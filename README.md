@@ -182,7 +182,7 @@ FluxVoice-S2UT/
 │   ├── onnxruntime/           # Prebuilt ONNX Runtime C++ SDK
 │   └── imgui/                 # Lightweight GUI
 ├── tests/                     # CTest unit tests (no audio device needed)
-├── tools/                     # Loopback glitch check (PipeWire/PulseAudio) + analyzer
+├── tools/                     # fv_probe (record / tone / latency), loopback + soak analyzers, OLA sine WAVs
 └── src/
     ├── main.cpp
     ├── audio/
@@ -219,6 +219,8 @@ ctest --test-dir build                           # unit + CLI tests (no audio de
 ./build/fluxvoice --list-devices                 # enumerate audio devices
 ./build/fluxvoice --passthrough                  # M1: click-free loopback test (Enter / Ctrl+C stops)
 tools/pw_loopback_check.sh --mode queue --load   # Linux: tone loopback via null sinks + glitch analysis
+./build/fv_probe --list-devices                  # M1 stages 05–06: record / measure a cable route
+tools/pw_latency_check.sh                        # Linux: path latencies via null sinks + fv_probe
 ```
 
 > Header-only deps (miniaudio, readerwriterqueue) are fetched automatically via `FetchContent`.

@@ -41,9 +41,9 @@ first with pure passthrough.
 | 01 | [Build system & dependencies](01_build_and_dependencies.md) | `cmake --build` produces `fluxvoice` binary | ☑ |
 | 02 | [Duplex audio I/O](02_duplex_audio_io.md) | Enumerate devices; callback passthrough audible | ☑ |
 | 03 | [SPSC buffering & worker thread](03_spsc_buffering_worker.md) | Queue-routed loopback, zero alloc/locks in callback | ☑ |
-| 04 | [Overlap-Add DSP](04_overlap_add_dsp.md) | OLA crossfader + unit tests | ☐ |
-| 05 | [Virtual cable loopback](05_virtual_cable_loopback.md) | Mic → fluxvoice → virtual cable → recorder | ☐ |
-| 06 | [Latency & stability verification](06_latency_verification.md) | Measured latency budget + soak-test report | ☐ |
+| 04 | [Overlap-Add DSP](04_overlap_add_dsp.md) | OLA crossfader + unit tests | ☑ |
+| 05 | [Virtual cable loopback](05_virtual_cable_loopback.md) | Mic → fluxvoice → virtual cable → recorder | ◐ guard + `fv_probe` landed; cable check pending |
+| 06 | [Latency & stability verification](06_latency_verification.md) | Measured latency budget + soak-test report | ◐ instruments landed; measurements pending |
 
 ## Acceptance criteria
 
@@ -51,7 +51,7 @@ first with pure passthrough.
 - [ ] Queue-path loopback works with `input_overruns == 0` and bounded `output_underruns` during steady state
 - [ ] Output routed to a virtual audio cable is recordable by a second application
 - [ ] Measured input→output latency documented (target ≤ 60 ms on the passthrough path)
-- [ ] OLA unit tests pass; no heap allocation or mutex inside the audio callback
+- [x] OLA unit tests pass; no heap allocation or mutex inside the audio callback
 
 ## Key constraints (real-time audio rules)
 
@@ -73,7 +73,7 @@ first with pure passthrough.
 | Callback overruns on loaded systems | 20 ms period default; expose `--sample-rate`/period config; count overruns instead of crashing |
 | Underrun silence masking bugs | Count underruns atomically; report on exit; test with worker stalled |
 | Callback sizes differ from the requested 20 ms period | Period size is a hint: handle any `frame_count`; build 80 ms chunks from accumulated samples, not callback counts |
-| Capture/playback clocks drift on different devices | Measure `out_q_` occupancy in the Stage 06 soak; resample only if measured |
+| Capture/playback clocks drift on different devices | One duplex device keeps `out_q_` occupancy constant, so drift hides inside miniaudio/the OS ([Stage 06 finding](06_latency_verification.md#finding-out_q_-occupancy-cannot-show-clock-drift)); measure the route's delay over time with `fv_probe latency`; resample only if measured |
 
 ## References
 

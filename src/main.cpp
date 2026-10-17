@@ -25,13 +25,17 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <sstream>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 #include "audio/AudioEngine.hpp"
 #include "audio/ChunkAssembler.hpp"
+#include "audio/RouteGuard.hpp"
 #include "pipeline/PipelineTiming.hpp"
+#include "util/ProcessMemory.hpp"
 
 namespace {
 
@@ -65,6 +69,8 @@ void print_usage(const char* argv0) {
         "  --sample-rate <hz>    Sample rate (default 16000)\n"
         "  --duration <seconds>  Stop automatically after this many seconds\n"
         "                        (otherwise stop with Enter or Ctrl+C)\n"
+        "  --stats <seconds>     Print a [stats] line (counters, queued audio, RSS)\n"
+        "                        this often, for soak tests\n"
         "  -h, --help            This help\n";
 }
 
@@ -103,6 +109,39 @@ void print_stream_info(const StreamInfo& si) {
               << AudioEngine::kDefaultPeriodMs << " ms\n";
 }
 
+/// Glitch counters and derived values at one instant (control thread only).
+struct Snapshot {
+    uint64_t frames, overruns, underruns, drops;
+    // Samples held between capture and playback (queues + worker). Every
+    // callback enqueues and dequeues the same count, so this is exact by
+    // conservation: underruns - overruns - drops.
+    int64_t queued;
+    size_t  rss;
+};
+
+Snapshot snapshot(const AudioEngine& engine, const std::atomic<uint64_t>& drops) {
+    Snapshot s{};
+    s.frames    = engine.frames_processed();
+    s.overruns  = engine.input_overruns();
+    s.underruns = engine.output_underruns();
+    s.drops     = drops.load(std::memory_order_relaxed);
+    s.queued    = static_cast<int64_t>(s.underruns) - static_cast<int64_t>(s.overruns) -
+                  static_cast<int64_t>(s.drops);
+    s.rss       = fluxvoice::resident_bytes();
+    return s;
+}
+
+/// One machine-readable line; tools/analyze_soak.py parses these.
+std::string stats_line(double t, const Snapshot& s) {
+    std::ostringstream o;
+    o.setf(std::ios::fixed);
+    o.precision(1);
+    o << "[stats] t=" << t << " frames=" << s.frames << " overruns=" << s.overruns
+      << " underruns=" << s.underruns << " drops=" << s.drops << " queued=" << s.queued
+      << " rss_kb=" << s.rss / 1024;
+    return o.str();
+}
+
 const char* mode_name(Mode m) {
     switch (m) {
         case Mode::Passthrough: return "callback passthrough";
@@ -120,6 +159,7 @@ int main(int argc, char** argv) {
     int opt_input = -1, opt_output = -1;
     uint32_t sample_rate = AudioEngine::kDefaultSampleRate;
     uint32_t duration_s = 0;  // 0 = run until Enter / Ctrl+C
+    uint32_t stats_s = 0;     // 0 = no periodic [stats] lines
 
     for (int i = 1; i < argc; ++i) {
         std::string_view a = argv[i];
@@ -148,6 +188,7 @@ int main(int argc, char** argv) {
         else if (a == "--output")           { if (!value(0, kMaxIndex, v)) return 1; opt_output = static_cast<int>(v); }
         else if (a == "--sample-rate")      { if (!value(8000, 192000, sample_rate)) return 1; }
         else if (a == "--duration")         { if (!value(1, 7 * 24 * 3600, duration_s)) return 1; }
+        else if (a == "--stats")            { if (!value(1, 24 * 3600, stats_s)) return 1; }
         else if (a == "-h" || a == "--help") { print_usage(argv[0]); return 0; }
         else { std::cerr << "Unknown option: " << a << '\n'; print_usage(argv[0]); return 1; }
     }
@@ -175,7 +216,23 @@ int main(int argc, char** argv) {
         out_id = devs[opt_output].id; out_ptr = &out_id;
     }
 
-    if (!engine.start(in_ptr, out_ptr, sample_rate, mode == Mode::Passthrough)) {
+    if (!engine.open(in_ptr, out_ptr, sample_rate, mode == Mode::Passthrough)) {
+        std::cerr << "Failed to open audio devices\n";
+        return 1;
+    }
+
+    // Checked on the endpoints actually opened, so an OS-default input that
+    // happens to be our own virtual cable is caught too.
+    const StreamInfo& si = engine.stream_info();
+    if (is_feedback_route(si.capture_name, si.playback_name)) {
+        std::cerr << "Refusing to start: capture device \"" << si.capture_name
+                  << "\" records playback device \"" << si.playback_name << "\",\n"
+                  << "so FluxVoice would hear its own output (feedback loop).\n"
+                  << "Pick the microphone with --input (see --list-devices).\n";
+        return 1;
+    }
+
+    if (!engine.start()) {
         std::cerr << "Failed to start audio engine\n";
         return 1;
     }
@@ -183,7 +240,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_stop_signal);
     std::signal(SIGTERM, on_stop_signal);
 
-    print_stream_info(engine.stream_info());
+    print_stream_info(si);
     std::cout << "FluxVoice running (" << mode_name(mode) << "). ";
     if (duration_s > 0) std::cout << "Stopping after " << duration_s << " s; Ctrl+C to stop early.\n";
     else                std::cout << "Press Enter or Ctrl+C to stop.\n";
@@ -235,21 +292,35 @@ int main(int argc, char** argv) {
 
     const auto t0 = std::chrono::steady_clock::now();
     const auto deadline = t0 + std::chrono::seconds(duration_s);
+    auto next_stats = t0 + std::chrono::seconds(stats_s);
     while (!g_stop.load()) {
-        if (duration_s > 0 && std::chrono::steady_clock::now() >= deadline) break;
+        const auto now = std::chrono::steady_clock::now();
+        if (duration_s > 0 && now >= deadline) break;
+        if (stats_s > 0 && now >= next_stats) {
+            const double t = std::chrono::duration<double>(now - t0).count();
+            std::cout << stats_line(t, snapshot(engine, output_drops)) << std::endl;
+            next_stats += std::chrono::seconds(stats_s);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     const double elapsed =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    // Before teardown: callbacks that run after the worker stops would count
+    // as underruns that are not the stream's fault.
+    const Snapshot end = snapshot(engine, output_drops);
 
     worker_run.store(false);
     if (worker.joinable()) worker.join();
     engine.stop();
 
+    if (stats_s > 0) std::cout << stats_line(elapsed, end) << '\n';
     std::cout << "Stopped after " << elapsed << " s.\n"
-              << "Stats: frames processed = " << engine.frames_processed()
-              << ", input overruns = " << engine.input_overruns()
-              << ", output underruns = " << engine.output_underruns()
-              << ", output drops = " << output_drops.load() << '\n';
+              << "Stats: frames processed = " << end.frames
+              << ", input overruns = " << end.overruns
+              << ", output underruns = " << end.underruns
+              << ", output drops = " << end.drops << '\n'
+              << "Queued audio: " << end.queued << " samples ("
+              << 1000.0 * static_cast<double>(end.queued) / static_cast<double>(engine.sample_rate())
+              << " ms); RSS " << end.rss / 1024 << " KB\n";
     return 0;
 }

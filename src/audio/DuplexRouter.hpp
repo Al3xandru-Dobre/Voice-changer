@@ -17,6 +17,14 @@
 #include <cstdint>
 #include <cstring>
 
+// The queues are cache-line aligned on purpose (no false sharing between
+// producer and consumer); MSVC's C4324 "structure was padded" reports exactly
+// that padding.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4324)
+#endif
+
 class DuplexRouter {
 public:
     // ~4 s of mono 16 kHz audio — a safety limit, not a target delay.
@@ -107,3 +115,7 @@ private:
     moodycamel::ReaderWriterQueue<float> in_q_;
     moodycamel::ReaderWriterQueue<float> out_q_;
 };
+
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif

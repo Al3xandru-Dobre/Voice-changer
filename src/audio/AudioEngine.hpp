@@ -24,7 +24,7 @@ struct AudioDeviceInfo {
     bool is_default = false;
 };
 
-/// What was actually opened — filled by AudioEngine::start().
+/// What was actually opened — filled by AudioEngine::open().
 /// `client_sample_rate` is the rate our callback sees; the `*_internal_*`
 /// fields are the backend-side values (the OS audio server may still convert
 /// further). Mixing the two up is the classic "chipmunk voice" bug.
@@ -72,15 +72,16 @@ public:
     // Stream control
     // ------------------------------------------------------------------
 
-    /// Open and start a full-duplex stream (capture + playback, same format).
+    /// Open a full-duplex stream (capture + playback, same format) without
+    /// starting it, so callers can inspect stream_info() first.
     /// nullptr device ids select the OS default endpoints.
     /// When `passthrough` is true the callback memcpy's input → output
     /// directly (Milestone 1 smoke test); otherwise audio flows through the
     /// SPSC queues and the worker thread.
-    bool start(const ma_device_id* input_id  = nullptr,
-               const ma_device_id* output_id = nullptr,
-               uint32_t sample_rate = kDefaultSampleRate,
-               bool passthrough = false) {
+    bool open(const ma_device_id* input_id  = nullptr,
+              const ma_device_id* output_id = nullptr,
+              uint32_t sample_rate = kDefaultSampleRate,
+              bool passthrough = false) {
         if (!ctx_ok_ || dev_ok_) return false;
 
         router_.set_passthrough(passthrough);
@@ -107,15 +108,16 @@ public:
         info_.playback_internal_rate   = dev_.playback.internalSampleRate;
         info_.capture_internal_period  = dev_.capture.internalPeriodSizeInFrames;
         info_.playback_internal_period = dev_.playback.internalPeriodSizeInFrames;
-
-        if (ma_device_start(&dev_) != MA_SUCCESS) {
-            ma_device_uninit(&dev_);
-            return false;
-        }
         dev_ok_ = true;
         return true;
     }
 
+    /// Start the stream opened by open(); the data callback begins to run.
+    bool start() {
+        return dev_ok_ && ma_device_start(&dev_) == MA_SUCCESS;
+    }
+
+    /// Stop and close the stream (no-op when none is open).
     void stop() {
         if (dev_ok_) {
             ma_device_uninit(&dev_);
@@ -123,7 +125,7 @@ public:
         }
     }
 
-    bool running() const { return dev_ok_; }
+    bool is_open() const { return dev_ok_; }
     uint32_t sample_rate() const { return info_.client_sample_rate; }
     const StreamInfo& stream_info() const { return info_; }
 

@@ -10,6 +10,9 @@ models/*.onnx
 third_party/*/*
 !third_party/*/README.md
 
+# Session scratch: downloaded installers, probe scripts, generated configs
+tools/_dl/
+
 # Python
 __pycache__/
 *.py[cod]

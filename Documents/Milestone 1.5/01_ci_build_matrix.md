@@ -28,7 +28,13 @@ Milestone 1 / Stage 01 was only verified on Linux (GCC 13, Clang 18).
 - [ ] Configure with `-DFLUXVOICE_WARNINGS_AS_ERRORS=ON`, build, `ctest --output-on-failure`
 - [ ] Cache the FetchContent `_deps` directory keyed on `CMakeLists.txt` hash
 - [ ] Fix whatever MSVC / Apple Clang surface (expect: `/W4` warnings in our
-      sources, missing includes that libstdc++ provided transitively)
+      sources, missing includes that libstdc++ provided transitively).
+      Already seen with MSVC 19.50 (2026-10-17) and fixed in M1 / Stage 05:
+      `windows.h` (via miniaudio) defines `min`/`max` macros that broke
+      `std::min`/`std::max` (`NOMINMAX` on `miniaudio_headers`), and C4324
+      "structure was padded" on `DuplexRouter`'s queues failed `/WX`
+      (silenced in that header). Everything builds locally with `/W4 /WX`;
+      CI still to come
 - [ ] Confirm the CLI tests pass on CI runners **without audio hardware** —
       they must never open a device
 - [ ] Record supported OS versions (master open decision 1) in README §6

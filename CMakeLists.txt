@@ -61,6 +61,10 @@ else()
     target_include_directories(rwqueue_headers SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/third_party/readerwriterqueue)
 endif()
 
+# miniaudio's implementation pulls in <windows.h>, whose min/max macros break
+# std::min / std::max in every header included after it.
+target_compile_definitions(miniaudio_headers INTERFACE $<$<PLATFORM_ID:Windows>:NOMINMAX>)
+
 # Optional: prebuilt ONNX Runtime SDK (needed from Milestone 2).
 set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to a prebuilt ONNX Runtime SDK")
 if(ONNXRUNTIME_ROOT)
@@ -83,27 +87,34 @@ add_executable(fluxvoice
 target_include_directories(fluxvoice PRIVATE src)
 
 find_package(Threads REQUIRED)
-target_link_libraries(fluxvoice PRIVATE
-    miniaudio_headers
-    rwqueue_headers
-    Threads::Threads
-)
+
+# miniaudio + the platform audio backends it loads; for every target that
+# defines MINIAUDIO_IMPLEMENTATION.
+function(fluxvoice_link_audio target)
+    target_link_libraries(${target} PRIVATE miniaudio_headers rwqueue_headers Threads::Threads)
+    if(APPLE)
+        target_link_libraries(${target} PRIVATE
+            "-framework CoreAudio" "-framework AudioToolbox" "-framework AVFoundation"
+            "-framework CoreFoundation")
+    elseif(UNIX)
+        target_link_libraries(${target} PRIVATE ${CMAKE_DL_LIBS} m)
+    elseif(WIN32)
+        target_link_libraries(${target} PRIVATE ole32 winmm)
+    endif()
+endfunction()
+
+fluxvoice_link_audio(fluxvoice)
 
 if(ONNXRUNTIME_ROOT)
     target_link_libraries(fluxvoice PRIVATE onnxruntime_sdk)
     target_compile_definitions(fluxvoice PRIVATE FLUXVOICE_WITH_ORT=1)
 endif()
 
-# Platform audio backends used by miniaudio.
-if(APPLE)
-    target_link_libraries(fluxvoice PRIVATE
-        "-framework CoreAudio" "-framework AudioToolbox" "-framework AVFoundation"
-        "-framework CoreFoundation")
-elseif(UNIX)
-    target_link_libraries(fluxvoice PRIVATE ${CMAKE_DL_LIBS} m)
-elseif(WIN32)
-    target_link_libraries(fluxvoice PRIVATE ole32 winmm)
-endif()
+# Route-measurement companion (M1 stages 05-06): records, plays a test tone or
+# measures latency at the far end of a virtual-cable route. See tools/fv_probe.cpp.
+add_executable(fv_probe tools/fv_probe.cpp)
+target_include_directories(fv_probe PRIVATE tools)
+fluxvoice_link_audio(fv_probe)
 
 # ---------------------------------------------------------------------------
 # Warnings
@@ -125,25 +136,40 @@ function(fluxvoice_set_warnings target)
 endfunction()
 
 fluxvoice_set_warnings(fluxvoice)
+fluxvoice_set_warnings(fv_probe)
 
 # ---------------------------------------------------------------------------
 # Tests  (run with: ctest --test-dir build)
 #
 # None of these need audio hardware: CLI argument errors are rejected before
 # any device is opened, and the unit tests exercise the real-time path
-# (DuplexRouter) and chunking without miniaudio. OLA unit tests are added in
-# Milestone 1 / Stage 04.
+# (DuplexRouter), chunking, the OLA crossfader, the feedback-route guard and
+# the latency probe's detector without miniaudio.
 # ---------------------------------------------------------------------------
 if(FLUXVOICE_BUILD_TESTS)
     enable_testing()
 
-    foreach(_t duplex_router chunk_assembler)
+    foreach(_t duplex_router chunk_assembler overlap_add route_guard latency_probe)
         add_executable(test_${_t} tests/test_${_t}.cpp)
-        target_include_directories(test_${_t} PRIVATE src tests)
+        target_include_directories(test_${_t} PRIVATE src tests tools)
         target_link_libraries(test_${_t} PRIVATE rwqueue_headers Threads::Threads)
         fluxvoice_set_warnings(test_${_t})
         add_test(NAME ${_t} COMMAND test_${_t})
     endforeach()
+
+    # OLA listening aid: writes reference / butt-joined / crossfaded WAVs into
+    # the build directory. Run as a test so it keeps building and working.
+    add_executable(ola_sine_test tools/ola_sine_test.cpp)
+    target_include_directories(ola_sine_test PRIVATE src)
+    fluxvoice_set_warnings(ola_sine_test)
+    add_test(NAME ola_sine_wavs COMMAND ola_sine_test ${CMAKE_CURRENT_BINARY_DIR})
+
+    # Soak-log analyzer (standard-library Python) checks its own verdicts.
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME analyze_soak_selftest
+                 COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/analyze_soak.py --self-test)
+    endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)
     add_test(NAME cli_help_short COMMAND fluxvoice -h)
@@ -157,9 +183,26 @@ if(FLUXVOICE_BUILD_TESTS)
     set(_bad_args_trailing_junk  --sample-rate 16000hz)
     set(_bad_args_rate_range     --sample-rate 0)
     set(_bad_args_duration_zero  --duration 0)
+    set(_bad_args_stats_zero     --stats 0)
     foreach(_case unknown missing_value non_numeric negative trailing_junk rate_range
-                  duration_zero)
+                  duration_zero stats_zero)
         add_test(NAME cli_rejects_${_case} COMMAND fluxvoice ${_bad_args_${_case}})
         set_tests_properties(cli_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
+    endforeach()
+
+    add_test(NAME probe_help COMMAND fv_probe --help)
+    set_tests_properties(probe_help PROPERTIES PASS_REGULAR_EXPRESSION "Usage:")
+
+    # Rejected before an audio context is even created.
+    set(_probe_args_no_command      --input 0)
+    set(_probe_args_no_input        record out.wav)
+    set(_probe_args_no_output       latency --input 0)
+    set(_probe_args_no_wav          tone --input 0 --output 0)
+    set(_probe_args_latency_wav     latency --input 0 --output 0 out.wav)
+    set(_probe_args_short_interval  latency --input 0 --output 0 --interval-ms 50)
+    set(_probe_args_two_commands    record latency --input 0 out.wav)
+    foreach(_case no_command no_input no_output no_wav latency_wav short_interval two_commands)
+        add_test(NAME probe_rejects_${_case} COMMAND fv_probe ${_probe_args_${_case}})
+        set_tests_properties(probe_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()
 endif()
