@@ -28,6 +28,8 @@ first with pure passthrough.
 - End-to-end latency measurement & soak test
 
 **Out of scope** (later milestones)
+- Stable device identity, refresh/hot-plug recovery, typed audio errors,
+  Windows/macOS validation → [Milestone 1.5](../Milestone%201.5/00_master.md)
 - Any ONNX Runtime inference (M2+)
 - Wait-k policy / translation logic (M3)
 - GUI (M4)
@@ -70,9 +72,12 @@ first with pure passthrough.
 | Sample-rate mismatch across endpoints | Fix everything to 16 kHz mono in M1; resampling is M4 polish |
 | Callback overruns on loaded systems | 20 ms period default; expose `--sample-rate`/period config; count overruns instead of crashing |
 | Underrun silence masking bugs | Count underruns atomically; report on exit; test with worker stalled |
+| Callback sizes differ from the requested 20 ms period | Period size is a hint: handle any `frame_count`; build 80 ms chunks from accumulated samples, not callback counts |
+| Capture/playback clocks drift on different devices | Measure `out_q_` occupancy in the Stage 06 soak; resample only if measured |
 
 ## References
 
+- [Cross-platform audio I/O research](../Research_documents/CROSS_PLATFORM_AUDIO_IO_RESEARCH.md) — miniaudio 0.11.25 boundaries per OS, client vs. backend rates, period-size hints, clock drift (§5, §8).
 - `RESEARCH_GUIDE.md` §4 — miniaudio device enumeration & duplex examples; why lock-free queues (priority inversion); sherpa-onnx for later stateful-ONNX patterns.
 - `README.md` §4 — threading model and OLA reference implementation.
 - `miniaudio.h` header docs — `ma_context_get_devices`, `ma_device_config_init(ma_device_type_duplex)`, `dataCallback` contract.

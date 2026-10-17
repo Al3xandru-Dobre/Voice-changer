@@ -24,6 +24,12 @@ stages must budget against (Mode A target ~60–100 ms total).
       `output_underruns` deltas.
 - [ ] **Soak test.** ≥ 30 min continuous loopback; counters stay flat after
       startup; RSS stable (no leaks in the RT path).
+- [ ] **Clock-drift check.** Repeat the soak with capture and playback on
+      *different* devices (e.g. USB mic → virtual cable). Sample `out_q_`
+      occupancy periodically (off the RT thread): steady growth or decay means
+      the two device clocks drift. Report the drift rate; do **not** mask it by
+      enlarging buffers. *(Cross-platform research §8 — a resampling /
+      clock-recovery stage is added only if this measures a problem.)*
 - [ ] Write results into this file (table below) and update the master
       acceptance criteria.
 
@@ -46,6 +52,7 @@ stages must budget against (Mode A target ~60–100 ms total).
 | via virtual cable | — | — | cable's own buffering included |
 
 - Load test counters: overruns `—`, underruns `—`
+- Clock drift (different devices): `out_q_` occupancy trend `—` samples/min
 - Soak test duration: `—`, final RSS: `—`
 
 ## Definition of done

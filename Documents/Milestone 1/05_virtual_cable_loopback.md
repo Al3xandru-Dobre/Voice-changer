@@ -32,9 +32,18 @@ This is the real product routing — everything before was self-test.
 ## Implementation notes
 
 - Virtual sinks often run at 44.1/48 kHz while we open 16 kHz — miniaudio
-  handles device-side rate conversion; still, log the negotiated rate
-  (`ma_device.sampleRate`) since mismatch here is the #1 source of
-  "sounds chipmunk'd" bugs.
+  handles device-side rate conversion; still, log **both** rates since a
+  mismatch here is the #1 source of "sounds chipmunk'd" bugs:
+  - `ma_device.sampleRate` — the **client** rate we asked for (16 kHz), *not*
+    the hardware rate;
+  - `ma_device.capture.internalSampleRate` / `playback.internalSampleRate` —
+    the backend-side rates (the OS audio server may still convert further).
+  *(Cross-platform research §8.)*
+- Feedback guard: never pick FluxVoice's own sink monitor as its `--input`.
+- This stage validates the route on the **dev machine**. The full
+  Windows / macOS / Linux matrix, optional WASAPI system-playback capture and
+  "missing virtual output must not fall back to speakers" are
+  [Milestone 1.5 / Stage 06](../Milestone%201.5/06_routing_os_validation.md).
 - Monitor sources can add latency; measure it in Stage 06 rather than tuning
   blind.
 - Keep a `--passthrough` vs queue-mode A/B: if the cable path glitches but
@@ -48,6 +57,12 @@ pactl load-module module-null-sink sink_name=fluxvoice_out \
     sink_properties=device.description=FluxVoice-Out
 ./build/fluxvoice --output <index-of-fluxvoice_out>
 pw-record --target fluxvoice_out.monitor out.wav   # or pick it in your DAW
+# Some apps hide monitor sources — then also create a virtual source
+# (pipewire-pulse-module-virtual-source(7)) on top of the sink.
+
+# Windows (VB-Cable):  --output <index of "CABLE Input">;  receiver records "CABLE Output"
+# macOS (BlackHole 2ch): --output <index of "BlackHole 2ch">; receiver records "BlackHole 2ch"
+# (unverified on hardware — confirm names in --list-devices; see M1.5 stage 06)
 ```
 
 ## Files touched

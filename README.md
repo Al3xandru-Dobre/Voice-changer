@@ -166,7 +166,8 @@ FluxVoice-S2UT/
 ├── README.md
 ├── RESEARCH_GUIDE.md          # Annotated bibliography of papers, repos, tools
 ├── Documents/                 # Milestone plans (staged implementation docs)
-│   └── Milestone 1/…4/
+│   ├── Milestone 1/, 1.5/, 2/…4/
+│   └── Research_documents/    # Dated research reports feeding the plans
 ├── models/                    # Exported .onnx graphs (git-ignored)
 │   ├── encoder_mimi.onnx
 │   ├── translator_s2ut_waitk.onnx
@@ -227,6 +228,7 @@ Detailed staged plans live in [`Documents/`](Documents/). Each milestone has a `
 | # | Milestone | Deliverable | Plan |
 |---|---|---|---|
 | 1 | **DSP loopback & audio engine** | miniaudio device selector + SPSC ring buffer + `OverlapAddProcessor`; click-free pass-through into a virtual audio cable | [Documents/Milestone 1](Documents/Milestone%201/00_master.md) |
+| 1.5 | **Cross-platform audio devices** | Stable device selection, hot-plug refresh/recovery, typed errors; CI + hardware validation on Windows/macOS/Linux (runs parallel to M2) | [Documents/Milestone 1.5](Documents/Milestone%201.5/00_master.md) |
 | 2 | **Textless VC mode** | Causal encoder + custom Unit-HiFi-GAN exported to ONNX; Mode A runs in C++ with stateful KV/CNN caches | [Documents/Milestone 2](Documents/Milestone%202/00_master.md) |
 | 3 | **Wait-*k* S2UT mode** | Causal S2UT transformer on discrete units; `WaitKPolicy` bridges encoder → vocoder in C++ | [Documents/Milestone 3](Documents/Milestone%203/00_master.md) |
 | 4 | **UI & optimization** | ImGui dashboard, FP16/INT8 quantization, GPU execution-provider toggles | [Documents/Milestone 4](Documents/Milestone%204/00_master.md) |

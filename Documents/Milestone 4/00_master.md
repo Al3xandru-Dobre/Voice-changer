@@ -9,10 +9,18 @@ execution-provider toggles.*
 
 ## Scope sketch
 
+- **Device selectors** (cross-platform research §10, stage 5): two
+  direction-specific dropdowns with an explicit "Follow system default"
+  entry, a refresh action, and stale/error status. They consume
+  [Milestone 1.5](../Milestone%201.5/00_master.md)'s `AudioDeviceRegistry` /
+  `AudioController` — the UI submits endpoint key + snapshot generation,
+  **never a row index**, and uses the same selection rules as the CLI.
+  *Depends on M1.5 stages 03–05.*
 - Dear ImGui app window (`src/ui/AppWindow.cpp` placeholder exists):
-  device dropdowns, translation ON/OFF, Wait-k slider (k ∈ [1..10]),
+  translation ON/OFF, Wait-k slider (k ∈ [1..10]),
   `.onnx` model loading, live latency/underrun telemetry from
-  `AudioEngine`'s atomic counters.
+  `AudioEngine`'s atomic counters, and `StreamStatus` (backend, requested vs.
+  resolved device, client vs. backend sample rate).
 - Quantization: FP16 (`export_stateful_onnx.py --fp16`), then INT8 eval;
   measure quality vs. RTF trade-off.
 - Execution providers: CUDA / DirectML / CoreML toggles via ORT session

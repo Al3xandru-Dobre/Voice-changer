@@ -4,6 +4,17 @@
 - **Research date:** 2026-10-17
 - **Status:** Research and proposed implementation plan; no implementation changes
 
+> **Implementation tracking.** This report is preserved as a dated research
+> snapshot. Its §10 plan is scheduled in
+> [Milestone 1.5 — Cross-platform audio devices](../Milestone%201.5/00_master.md)
+> (research stages 1–4 and 6 → M1.5 stages 02–06; research stage 5 → Milestone 4
+> UI). Corrections it raised against existing plans were folded into Milestone 1
+> stages 02, 03, 05 and 06. Where this snapshot and a stage file disagree, the
+> stage file is authoritative.
+>
+> Superseded since writing: §10's note that "the current CMake file does not
+> define test targets" — CTest was added in Milestone 1 / Stage 01.
+
 ## 1. Recommendation
 
 Keep **miniaudio**, already pinned to **0.11.25**, for device enumeration and
@@ -71,12 +82,12 @@ upstream verification before implementation or release.
 
 | Location | Existing behavior | Gap relevant to this work |
 |---|---|---|
-| [`CMakeLists.txt`](../CMakeLists.txt) | C++20; miniaudio 0.11.25 and ReaderWriterQueue v1.0.7; OS-specific link settings | Keep dependency pinning; add tests when implementing |
-| [`AudioEngine.hpp`](../src/audio/AudioEngine.hpp) | Owns a context; enumerates both directions; copies IDs/names/default flags; starts mono float32 duplex audio | No catalog snapshots, refresh policy, typed failures, or device-change handling |
-| [`main.cpp`](../src/main.cpp) | `--list-devices`, `--input`, `--output`; omitted IDs use defaults | Selection indices are temporary; invalid enumeration/start states have little diagnostic detail |
-| [`AppWindow.cpp`](../src/ui/AppWindow.cpp) | Placeholder for the future UI | Device dropdowns should consume the same registry as the CLI |
-| [M1 duplex plan](Milestone%201/02_duplex_audio_io.md) | Basic device enumeration and passthrough | Extend with variable-frame, identity, and lifecycle tests |
-| [M1 virtual-cable plan](Milestone%201/05_virtual_cable_loopback.md) | Windows/macOS cable and Linux sink/monitor routing | Setup remains platform-specific; client/native format terminology needs clarification |
+| [`CMakeLists.txt`](../../CMakeLists.txt) | C++20; miniaudio 0.11.25 and ReaderWriterQueue v1.0.7; OS-specific link settings | Keep dependency pinning; add tests when implementing |
+| [`AudioEngine.hpp`](../../src/audio/AudioEngine.hpp) | Owns a context; enumerates both directions; copies IDs/names/default flags; starts mono float32 duplex audio | No catalog snapshots, refresh policy, typed failures, or device-change handling |
+| [`main.cpp`](../../src/main.cpp) | `--list-devices`, `--input`, `--output`; omitted IDs use defaults | Selection indices are temporary; invalid enumeration/start states have little diagnostic detail |
+| [`AppWindow.cpp`](../../src/ui/AppWindow.cpp) | Placeholder for the future UI | Device dropdowns should consume the same registry as the CLI |
+| [M1 duplex plan](../Milestone%201/02_duplex_audio_io.md) | Basic device enumeration and passthrough | Extend with variable-frame, identity, and lifecycle tests |
+| [M1 virtual-cable plan](../Milestone%201/05_virtual_cable_loopback.md) | Windows/macOS cable and Linux sink/monitor routing | Setup remains platform-specific; client/native format terminology needs clarification |
 
 The existing wrapper correctly copies `ma_device_id` values instead of retaining
 miniaudio's enumeration pointers. Keep this behavior. Its empty-list and `false`
@@ -493,8 +504,8 @@ platform-specific setup hidden behind a common application interface.
 ### Sources actually inspected locally
 
 - **[P1] Project:** the files linked in section 3, plus
-  [`third_party/README.md`](../third_party/README.md) and
-  [`Documents/README.md`](README.md).
+  [`third_party/README.md`](../../third_party/README.md) and
+  [`Documents/README.md`](../README.md).
 - **[MA1] miniaudio 0.11.25:** local
   `build/_deps/miniaudio-src/miniaudio.h`; header version confirmed against the
   checkout tag. See sections 1.1, 15, and 17; API documentation for

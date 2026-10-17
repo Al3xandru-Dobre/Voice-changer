@@ -27,8 +27,10 @@ callback must stay allocation-free and lock-free end-to-end.
       `out_q_.try_dequeue` → device, zero-fill on underrun
 - [x] Worker-side `read_input` / `write_output` drain/fill helpers
 - [x] `main.cpp` worker thread: shovel input → output (loopback through queues)
-- [ ] Chunk assembler: worker aggregates 5×20 ms callbacks into one 80 ms
-      frame (+20 ms historical context) — the unit neural stages consume.
+- [ ] Chunk assembler: worker accumulates samples into exact 1,280-sample
+      (80 ms) frames (+20 ms historical context) — the unit neural stages
+      consume. Must be **independent of callback `frame_count`** (period sizes
+      are hints); test with arbitrary callback sizes.
       *Design now, land with M2's encoder interface.*
 - [ ] Verify queue-path loopback is glitch-free under CPU load
       (`stress-ng` / parallel build)
@@ -46,6 +48,10 @@ callback must stay allocation-free and lock-free end-to-end.
   later surfaced in the M4 telemetry UI.
 - Worker sleep granularity: poll with ~2 ms backoff when empty (a 20 ms
   callback deposits 320 samples; busy-spinning burns a core for nothing).
+- The `1 << 16` capacity is a **safety limit, not a target delay** — ~4 s of
+  queued audio would be unusable latency. Bounding queued latency and the
+  device-switch drain/reset sequence are specified in
+  [Milestone 1.5 / Stage 05](../Milestone%201.5/05_refresh_recovery_controller.md).
 
 ## Files touched
 

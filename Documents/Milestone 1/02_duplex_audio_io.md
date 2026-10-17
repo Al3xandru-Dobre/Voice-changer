@@ -37,10 +37,18 @@ headphones with no framework in between.
 
 - Keep capture and playback formats identical so the callback is a pure
   `memcpy` — format conversion inside the callback is an M4 concern.
-- `periodSizeInMilliseconds = 20` → 320 samples/callback @ 16 kHz; five
-  callbacks make one 80 ms neural chunk (the geometry M2 needs).
+- `periodSizeInMilliseconds = 20` *requests* 320 samples/callback @ 16 kHz,
+  but miniaudio documents period sizes as **hints** — the callback must handle
+  whatever `frame_count` it receives. Never count callbacks to form chunks;
+  the worker assembles exact 1,280-sample (80 ms) chunks from accumulated
+  samples (Stage 03). *(Cross-platform research §8.)*
 - Pass `nullptr` device ids for OS-default endpoints; only copy `ma_device_id`
   **values**, never retain `ma_device_info` pointers.
+- Index-based `--input`/`--output` selection is a **smoke-test convenience**:
+  indices shift when devices are plugged in. Stable selection, typed errors and
+  null-backend detection are
+  [Milestone 1.5](../Milestone%201.5/00_master.md) work — don't extend the
+  index scheme here.
 - `pUserData` carries `this` into the static `data_callback` — set it in the
   config, not after init.
 
