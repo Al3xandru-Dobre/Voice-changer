@@ -1,0 +1,8 @@
+# Python training environment (Milestones 2–3).
+# Pin exact versions once the toolchain is chosen in stage plans.
+torch
+torchaudio
+onnx
+onnxruntime
+numpy
+soundfile

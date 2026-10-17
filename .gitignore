@@ -1,0 +1,23 @@
+# Build output
+build/
+out/
+.cache/
+
+# Exported neural models are large binaries — do not commit.
+models/*.onnx
+
+# Vendored dependencies: ignore contents but keep each dir's README.md.
+third_party/*/*
+!third_party/*/README.md
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
