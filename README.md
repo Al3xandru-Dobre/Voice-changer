@@ -181,12 +181,17 @@ FluxVoice-S2UT/
 │   ├── readerwriterqueue/     # moodycamel lock-free SPSC queue
 │   ├── onnxruntime/           # Prebuilt ONNX Runtime C++ SDK
 │   └── imgui/                 # Lightweight GUI
+├── tests/                     # CTest unit tests (no audio device needed)
+├── tools/                     # Loopback glitch check (PipeWire/PulseAudio) + analyzer
 └── src/
     ├── main.cpp
     ├── audio/
-    │   ├── AudioEngine.hpp    # Device enumeration & miniaudio duplex callback
+    │   ├── AudioEngine.hpp    # Device enumeration & miniaudio duplex stream
+    │   ├── DuplexRouter.hpp   # Real-time callback body + SPSC queues + counters
+    │   ├── ChunkAssembler.hpp # Arbitrary callback sizes → fixed 80 ms model frames
     │   └── OverlapAdd.hpp     # OLA crossfader
     ├── pipeline/
+    │   ├── PipelineTiming.hpp # Chunk / context / overlap geometry @ 16 kHz
     │   ├── KVStateCache.hpp   # Recurrent ONNX tensor state across chunks
     │   ├── WaitKPolicy.hpp    # Simultaneous-translation state machine
     │   └── InferencePipeline.cpp
@@ -210,9 +215,10 @@ FluxVoice-S2UT/
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release   # fetches miniaudio + readerwriterqueue
 cmake --build build -j
-ctest --test-dir build                           # CLI smoke tests (no audio device needed)
+ctest --test-dir build                           # unit + CLI tests (no audio device needed)
 ./build/fluxvoice --list-devices                 # enumerate audio devices
-./build/fluxvoice --passthrough                  # M1: click-free loopback test
+./build/fluxvoice --passthrough                  # M1: click-free loopback test (Enter / Ctrl+C stops)
+tools/pw_loopback_check.sh --mode queue --load   # Linux: tone loopback via null sinks + glitch analysis
 ```
 
 > Header-only deps (miniaudio, readerwriterqueue) are fetched automatically via `FetchContent`.

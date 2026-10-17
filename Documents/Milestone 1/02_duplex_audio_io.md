@@ -2,7 +2,7 @@
 
 > **Milestone 1** · [Master plan](00_master.md) · [← Stage 01](01_build_and_dependencies.md) · [Stage 03 →](03_spsc_buffering_worker.md)
 
-**Status:** ◐ skeleton landed
+**Status:** ☑ done (2026-10-17) — objective verification; a headphone listening check is optional
 **Depends on:** Stage 01
 
 ## Objective
@@ -29,9 +29,20 @@ headphones with no framework in between.
       16 kHz, `periodSizeInMilliseconds = 20`
 - [x] `--passthrough` path: callback `memcpy` (or zero-fill when no input)
 - [x] CLI: `--list-devices`, `--input`, `--output`, `--sample-rate`
-- [ ] Hardware check: enumerate on the dev machine; confirm default + named
+- [x] CLI: `--duration <s>`; clean stop on Enter, `Ctrl+C` (SIGINT) and SIGTERM
+      (previously `Ctrl+C` killed the process without closing the device)
+- [x] `--list-devices` prints the selected backend; `start()` reports what was
+      actually opened (`StreamInfo`: device names, client vs. backend rate,
+      backend period sizes)
+- [x] Real-time callback body moved into `DuplexRouter` (no miniaudio
+      dependency) so it is unit-tested without a device — see Stage 03
+- [x] Hardware check: enumerate on the dev machine; confirm default + named
       devices open
-- [ ] Audible passthrough test through headphones (feedback-safe levels!)
+- [x] Passthrough test — **objective** instead of audible: a 440 Hz tone is
+      routed through fluxvoice between two PipeWire null sinks, recorded, and
+      analysed for dropouts / clicks / pitch (`tools/pw_loopback_check.sh`)
+- [ ] *(Optional, human)* listen through headphones at feedback-safe levels:
+      `./build/fluxvoice --passthrough`
 
 ## Implementation notes
 
@@ -52,12 +63,35 @@ headphones with no framework in between.
 - `pUserData` carries `this` into the static `data_callback` — set it in the
   config, not after init.
 
+## Verification (2026-10-17)
+
+Dev machine: Ubuntu 24.04, kernel 6.8, PipeWire via `pipewire-pulse`
+(miniaudio backend: **PulseAudio**), Intel SOF HDA (`sof-hda-dsp`).
+
+| Check | Result |
+|---|---|
+| `--list-devices` | Backend printed; 3 capture (incl. speaker monitor), 1 playback; default flags correct |
+| Named devices open | Null-sink endpoints opened by index (capture "Monitor of …", playback sink) |
+| Default playback opens | `sof-hda-dsp Speaker + Headphones` (silent input — nothing audible) |
+| Default capture opens | `sof-hda-dsp Digital Microphone` (routed to a null sink, not recorded) |
+| Passthrough, 20 s tone loopback | 0 dropouts, 0 clicks, 440.00 Hz, −12.0 dBFS, counters 0/0 |
+| Stop via Enter / SIGINT / SIGTERM | exit 0, stats printed, nothing on stderr |
+
+Observed backend periods: capture **320** frames, playback **240** frames for a
+requested 20 ms (= 320) — direct evidence that period sizes are hints.
+
+Re-run: `tools/pw_loopback_check.sh --mode passthrough` (Linux, PipeWire or
+PulseAudio; creates and removes its own null sinks; restores your defaults).
+
 ## Files touched
 
-- `src/audio/AudioEngine.hpp`, `src/main.cpp`
+- `src/audio/AudioEngine.hpp`, `src/audio/DuplexRouter.hpp` (new), `src/main.cpp`,
+  `tools/pw_loopback_check.sh`, `tools/analyze_loopback.py` (new)
 
 ## Definition of done
 
 - `--list-devices` prints capture + playback tables with default flags.
 - `--passthrough` produces clear looped audio; `Ctrl+C`/`Enter` stops cleanly
   with no miniaudio errors.
+
+Both met — see Verification.

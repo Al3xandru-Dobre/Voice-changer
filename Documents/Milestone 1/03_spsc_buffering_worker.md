@@ -2,7 +2,7 @@
 
 > **Milestone 1** · [Master plan](00_master.md) · [← Stage 02](02_duplex_audio_io.md) · [Stage 04 →](04_overlap_add_dsp.md)
 
-**Status:** ◐ skeleton landed
+**Status:** ☑ done (2026-10-17)
 **Depends on:** Stage 02
 
 ## Objective
@@ -16,8 +16,11 @@ callback must stay allocation-free and lock-free end-to-end.
 - RESEARCH_GUIDE §4: *"Using `std::mutex` inside an audio callback will cause
   glitches due to OS thread priority inversion."* — hence `try_enqueue` /
   `try_dequeue`, never the blocking variants.
-- `src/audio/AudioEngine.hpp` — queues + counters implemented; the worker
-  loop lives in `src/main.cpp` (placeholder for the M2 inference thread).
+- `src/audio/DuplexRouter.hpp` — queues, counters and the callback body;
+  `AudioEngine` owns one and forwards to it. The worker loop lives in
+  `src/main.cpp` (placeholder for the M2 inference thread).
+- `src/audio/ChunkAssembler.hpp` + `src/pipeline/PipelineTiming.hpp` — the
+  80 ms frame geometry shared with `InferencePipeline`.
 
 ## Tasks
 
@@ -27,13 +30,17 @@ callback must stay allocation-free and lock-free end-to-end.
       `out_q_.try_dequeue` → device, zero-fill on underrun
 - [x] Worker-side `read_input` / `write_output` drain/fill helpers
 - [x] `main.cpp` worker thread: shovel input → output (loopback through queues)
-- [ ] Chunk assembler: worker accumulates samples into exact 1,280-sample
-      (80 ms) frames (+20 ms historical context) — the unit neural stages
-      consume. Must be **independent of callback `frame_count`** (period sizes
-      are hints); test with arbitrary callback sizes.
-      *Design now, land with M2's encoder interface.*
-- [ ] Verify queue-path loopback is glitch-free under CPU load
-      (`stress-ng` / parallel build)
+- [x] Chunk assembler (`ChunkAssembler`): exact 1,280-sample (80 ms) frames
+      with 320 samples (20 ms) of carried-over context, **independent of
+      callback `frame_count`**; allocation-free after construction. Tested
+      against a reference slicer with irregular push patterns. Wired into the
+      worker behind `--chunked`; *hooking frames into the encoder is M2.*
+- [x] Verify queue-path loopback is glitch-free under CPU load
+- [x] Unit tests (`ctest`): `duplex_router` (passthrough, in-order round trip
+      with irregular callback sizes, underrun zero-fill, overrun counting,
+      **zero heap allocations in `process()`**, concurrent callback + worker
+      threads) and `chunk_assembler`
+- [x] Worker counts `output drops` (samples `write_output` couldn't fit)
 
 ## Implementation notes
 
@@ -53,9 +60,39 @@ callback must stay allocation-free and lock-free end-to-end.
   device-switch drain/reset sequence are specified in
   [Milestone 1.5 / Stage 05](../Milestone%201.5/05_refresh_recovery_controller.md).
 
+## Verification (2026-10-17)
+
+Same dev machine as Stage 02; `tools/pw_loopback_check.sh` (tone → null sink →
+fluxvoice → null sink → recorder → glitch analysis).
+
+| Run | Duration | Overruns | Underruns | Drops | Recording |
+|---|---|---|---|---|---|
+| `--queue-loopback`, idle | 20 s | 0 | 320 (one period, startup) | 0 | clean, 440.00 Hz |
+| `--chunked`, idle | 20 s | 0 | 1,280 (one hop, startup) | 0 | clean, 440.00 Hz |
+| `--queue-loopback`, **24 busy loops on 24 cores** | 60 s | 0 | 320 (startup) | 0 | clean, 440.00 Hz |
+
+Unit tests: 11/11 CTest pass on GCC 13 and Clang 18 with
+`-DFLUXVOICE_WARNINGS_AS_ERRORS=ON`. `test_duplex_router` is also clean under
+ThreadSanitizer and ASan+UBSan.
+
+How the tests were checked: injecting a heap allocation into `process()` fails
+the allocation check, and an off-by-one in `ChunkAssembler::advance()` fails
+178 checks.
+
+Notes:
+- The allocation check replaces global `operator new`, so it catches C++
+  allocations only, not a direct `malloc`. The callback body is visible in one
+  header and makes no C allocation calls (checked by reading it).
+- On this kernel TSan needs ASLR off: `setarch $(uname -m) -R ./test_duplex_router`.
+  TSan builds skip the allocation test because TSan supplies its own `operator new`.
+
 ## Files touched
 
-- `src/audio/AudioEngine.hpp`, `src/main.cpp`
+- `src/audio/DuplexRouter.hpp`, `src/audio/ChunkAssembler.hpp`,
+  `src/pipeline/PipelineTiming.hpp` (new), `src/audio/AudioEngine.hpp`,
+  `src/pipeline/InferencePipeline.cpp`, `src/main.cpp`,
+  `tests/test_duplex_router.cpp`, `tests/test_chunk_assembler.cpp`,
+  `tests/TestSupport.hpp` (new), `CMakeLists.txt`
 
 ## Definition of done
 
@@ -64,3 +101,6 @@ callback must stay allocation-free and lock-free end-to-end.
   `input_overruns` == 0 on an idle machine.
 - No `malloc`/`new`, mutex, or logging call exists inside `data_callback`
   (audit by inspection; optionally verify with a `LD_PRELOAD` malloc counter).
+
+All three met — see Verification. The allocation audit is an automated test
+rather than an `LD_PRELOAD` counter.

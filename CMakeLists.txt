@@ -108,27 +108,42 @@ endif()
 # ---------------------------------------------------------------------------
 # Warnings
 # ---------------------------------------------------------------------------
-if(FLUXVOICE_STRICT_WARNINGS)
-    if(MSVC)
-        target_compile_options(fluxvoice PRIVATE /W4)
-    else()
-        target_compile_options(fluxvoice PRIVATE -Wall -Wextra -Wpedantic)
+# Applied to every target built from our sources (app + tests).
+function(fluxvoice_set_warnings target)
+    if(FLUXVOICE_STRICT_WARNINGS)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /W4)
+        else()
+            target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
     endif()
-endif()
 
-# Dependencies are SYSTEM includes, so this only gates warnings from src/.
-if(FLUXVOICE_WARNINGS_AS_ERRORS)
-    target_compile_options(fluxvoice PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX,-Werror>)
-endif()
+    # Dependencies are SYSTEM includes, so this only gates warnings from our code.
+    if(FLUXVOICE_WARNINGS_AS_ERRORS)
+        target_compile_options(${target} PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX,-Werror>)
+    endif()
+endfunction()
+
+fluxvoice_set_warnings(fluxvoice)
 
 # ---------------------------------------------------------------------------
 # Tests  (run with: ctest --test-dir build)
 #
-# CLI smoke tests need no audio hardware — argument errors are rejected before
-# any device is opened. OLA unit tests are added in Milestone 1 / Stage 04.
+# None of these need audio hardware: CLI argument errors are rejected before
+# any device is opened, and the unit tests exercise the real-time path
+# (DuplexRouter) and chunking without miniaudio. OLA unit tests are added in
+# Milestone 1 / Stage 04.
 # ---------------------------------------------------------------------------
 if(FLUXVOICE_BUILD_TESTS)
     enable_testing()
+
+    foreach(_t duplex_router chunk_assembler)
+        add_executable(test_${_t} tests/test_${_t}.cpp)
+        target_include_directories(test_${_t} PRIVATE src tests)
+        target_link_libraries(test_${_t} PRIVATE rwqueue_headers Threads::Threads)
+        fluxvoice_set_warnings(test_${_t})
+        add_test(NAME ${_t} COMMAND test_${_t})
+    endforeach()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)
     add_test(NAME cli_help_short COMMAND fluxvoice -h)
@@ -141,7 +156,9 @@ if(FLUXVOICE_BUILD_TESTS)
     set(_bad_args_negative       --output -1)
     set(_bad_args_trailing_junk  --sample-rate 16000hz)
     set(_bad_args_rate_range     --sample-rate 0)
-    foreach(_case unknown missing_value non_numeric negative trailing_junk rate_range)
+    set(_bad_args_duration_zero  --duration 0)
+    foreach(_case unknown missing_value non_numeric negative trailing_junk rate_range
+                  duration_zero)
         add_test(NAME cli_rejects_${_case} COMMAND fluxvoice ${_bad_args_${_case}})
         set_tests_properties(cli_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()

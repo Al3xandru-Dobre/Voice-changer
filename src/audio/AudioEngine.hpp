@@ -3,18 +3,17 @@
 // Design rules (see Documents/Milestone 1/):
 //   * The miniaudio data callback runs on a real-time OS audio thread.
 //     No heap allocation, no mutexes, no logging, no blocking — only
-//     memcpy and lock-free SPSC queue operations.
+//     memcpy and lock-free SPSC queue operations (see DuplexRouter).
 //   * The inference worker thread pulls samples via read_input() and pushes
 //     results via write_output(). Underruns are zero-filled to keep the
 //     output stream glitch-free.
 #pragma once
 
 #include <miniaudio.h>
-#include <readerwriterqueue.h>
 
-#include <atomic>
+#include "audio/DuplexRouter.hpp"
+
 #include <cstdint>
-#include <cstring>
 #include <string>
 #include <vector>
 
@@ -23,6 +22,21 @@ struct AudioDeviceInfo {
     ma_device_id id{};
     std::string name;
     bool is_default = false;
+};
+
+/// What was actually opened — filled by AudioEngine::start().
+/// `client_sample_rate` is the rate our callback sees; the `*_internal_*`
+/// fields are the backend-side values (the OS audio server may still convert
+/// further). Mixing the two up is the classic "chipmunk voice" bug.
+struct StreamInfo {
+    std::string backend;
+    std::string capture_name;
+    std::string playback_name;
+    uint32_t client_sample_rate        = 0;
+    uint32_t capture_internal_rate     = 0;
+    uint32_t playback_internal_rate    = 0;
+    uint32_t capture_internal_period   = 0;  // frames
+    uint32_t playback_internal_period  = 0;  // frames
 };
 
 class AudioEngine {
@@ -49,6 +63,11 @@ public:
     std::vector<AudioDeviceInfo> playback_devices()  { return enumerate(ma_device_type_playback); }
     std::vector<AudioDeviceInfo> capture_devices()   { return enumerate(ma_device_type_capture);  }
 
+    bool context_ok() const { return ctx_ok_; }
+    const char* backend_name() const {
+        return ctx_ok_ ? ma_get_backend_name(ctx_.backend) : "none";
+    }
+
     // ------------------------------------------------------------------
     // Stream control
     // ------------------------------------------------------------------
@@ -64,8 +83,7 @@ public:
                bool passthrough = false) {
         if (!ctx_ok_ || dev_ok_) return false;
 
-        passthrough_.store(passthrough, std::memory_order_relaxed);
-        sample_rate_ = sample_rate;
+        router_.set_passthrough(passthrough);
 
         ma_device_config cfg = ma_device_config_init(ma_device_type_duplex);
         cfg.capture.pDeviceID   = input_id;
@@ -80,6 +98,16 @@ public:
         cfg.pUserData           = this;
 
         if (ma_device_init(&ctx_, &cfg, &dev_) != MA_SUCCESS) return false;
+
+        info_.backend                  = backend_name();
+        info_.capture_name             = dev_.capture.name;
+        info_.playback_name            = dev_.playback.name;
+        info_.client_sample_rate       = dev_.sampleRate;
+        info_.capture_internal_rate    = dev_.capture.internalSampleRate;
+        info_.playback_internal_rate   = dev_.playback.internalSampleRate;
+        info_.capture_internal_period  = dev_.capture.internalPeriodSizeInFrames;
+        info_.playback_internal_period = dev_.playback.internalPeriodSizeInFrames;
+
         if (ma_device_start(&dev_) != MA_SUCCESS) {
             ma_device_uninit(&dev_);
             return false;
@@ -96,32 +124,21 @@ public:
     }
 
     bool running() const { return dev_ok_; }
-    uint32_t sample_rate() const { return sample_rate_; }
+    uint32_t sample_rate() const { return info_.client_sample_rate; }
+    const StreamInfo& stream_info() const { return info_; }
 
     // ------------------------------------------------------------------
     // Worker-thread side (NOT real-time — call from the inference thread)
     // ------------------------------------------------------------------
-
-    /// Drain up to `max_samples` captured samples. Returns count read.
-    size_t read_input(float* dst, size_t max_samples) {
-        size_t n = 0;
-        while (n < max_samples && in_q_.try_dequeue(dst[n])) ++n;
-        return n;
-    }
-
-    /// Push processed samples toward the output device. Samples that do not
-    /// fit are dropped (counted as overruns on the input side of the cable).
-    size_t write_output(const float* src, size_t num_samples) {
-        size_t n = 0;
-        while (n < num_samples && out_q_.try_enqueue(src[n])) ++n;
-        return n;
-    }
+    size_t read_input(float* dst, size_t max_samples)       { return router_.read_input(dst, max_samples); }
+    size_t write_output(const float* src, size_t num_samples) { return router_.write_output(src, num_samples); }
 
     // ------------------------------------------------------------------
     // Telemetry (atomic — safe to read from the UI thread)
     // ------------------------------------------------------------------
-    uint64_t input_overruns()  const { return input_overruns_.load(std::memory_order_relaxed); }
-    uint64_t output_underruns() const { return output_underruns_.load(std::memory_order_relaxed); }
+    uint64_t input_overruns()   const { return router_.input_overruns(); }
+    uint64_t output_underruns() const { return router_.output_underruns(); }
+    uint64_t frames_processed() const { return router_.frames_processed(); }
 
 private:
     std::vector<AudioDeviceInfo> enumerate(ma_device_type type) {
@@ -148,51 +165,21 @@ private:
         return out;
     }
 
-    /// Real-time audio callback. Keep it allocation-free and lock-free.
+    /// Real-time audio callback. Keep it allocation-free and lock-free —
+    /// all logic lives in DuplexRouter::process().
     static void data_callback(ma_device* dev, void* output, const void* input,
                               ma_uint32 frame_count) {
         auto* self = static_cast<AudioEngine*>(dev->pUserData);
-        const size_t n = static_cast<size_t>(frame_count) * kDefaultChannels;
-        float* out = static_cast<float*>(output);
-        const float* in = static_cast<const float*>(input);
-
-        if (self->passthrough_.load(std::memory_order_relaxed)) {
-            if (in) std::memcpy(out, in, n * sizeof(float));
-            else    std::memset(out, 0, n * sizeof(float));
-            return;
-        }
-
-        // Capture → input queue (drop + count on overflow).
-        if (in) {
-            for (size_t i = 0; i < n; ++i) {
-                if (!self->in_q_.try_enqueue(in[i])) {
-                    self->input_overruns_.fetch_add(n - i, std::memory_order_relaxed);
-                    break;
-                }
-            }
-        }
-
-        // Output queue → device (zero-fill on underrun — never block).
-        size_t got = 0;
-        while (got < n && self->out_q_.try_dequeue(out[got])) ++got;
-        if (got < n) {
-            std::memset(out + got, 0, (n - got) * sizeof(float));
-            self->output_underruns_.fetch_add(n - got, std::memory_order_relaxed);
-        }
+        self->router_.process(static_cast<float*>(output),
+                              static_cast<const float*>(input),
+                              static_cast<size_t>(frame_count) * kDefaultChannels);
     }
 
     ma_context ctx_{};
     bool       ctx_ok_ = false;
     ma_device  dev_{};
     bool       dev_ok_ = false;
-    uint32_t   sample_rate_ = kDefaultSampleRate;
+    StreamInfo info_;
 
-    std::atomic<bool>     passthrough_{false};
-    std::atomic<uint64_t> input_overruns_{0};
-    std::atomic<uint64_t> output_underruns_{0};
-
-    // ~4 s of mono 16 kHz audio — sized once at construction, never reallocs.
-    static constexpr size_t kQueueCapacity = 1 << 16;
-    moodycamel::ReaderWriterQueue<float> in_q_{kQueueCapacity};
-    moodycamel::ReaderWriterQueue<float> out_q_{kQueueCapacity};
+    DuplexRouter router_;
 };

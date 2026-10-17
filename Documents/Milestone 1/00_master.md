@@ -39,8 +39,8 @@ first with pure passthrough.
 | # | Stage | Output | Status |
 |---|---|---|---|
 | 01 | [Build system & dependencies](01_build_and_dependencies.md) | `cmake --build` produces `fluxvoice` binary | ☑ |
-| 02 | [Duplex audio I/O](02_duplex_audio_io.md) | Enumerate devices; callback passthrough audible | ☐ |
-| 03 | [SPSC buffering & worker thread](03_spsc_buffering_worker.md) | Queue-routed loopback, zero alloc/locks in callback | ☐ |
+| 02 | [Duplex audio I/O](02_duplex_audio_io.md) | Enumerate devices; callback passthrough audible | ☑ |
+| 03 | [SPSC buffering & worker thread](03_spsc_buffering_worker.md) | Queue-routed loopback, zero alloc/locks in callback | ☑ |
 | 04 | [Overlap-Add DSP](04_overlap_add_dsp.md) | OLA crossfader + unit tests | ☐ |
 | 05 | [Virtual cable loopback](05_virtual_cable_loopback.md) | Mic → fluxvoice → virtual cable → recorder | ☐ |
 | 06 | [Latency & stability verification](06_latency_verification.md) | Measured latency budget + soak-test report | ☐ |

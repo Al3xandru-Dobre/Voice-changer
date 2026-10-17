@@ -46,6 +46,11 @@ This is the real product routing — everything before was self-test.
   [Milestone 1.5 / Stage 06](../Milestone%201.5/06_routing_os_validation.md).
 - Monitor sources can add latency; measure it in Stage 06 rather than tuning
   blind.
+- `tools/pw_loopback_check.sh` (added in Stage 02/03) already exercises the
+  Linux null-sink → monitor route with `parecord` as the second application,
+  using a test tone and automated glitch analysis. It does not replace this
+  stage's check with a real microphone and a real receiving app (Audacity, OBS,
+  a voice-chat client).
 - Keep a `--passthrough` vs queue-mode A/B: if the cable path glitches but
   headphones don't, the sink — not our pipeline — is the bottleneck.
 

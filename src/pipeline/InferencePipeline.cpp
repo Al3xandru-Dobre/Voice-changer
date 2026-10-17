@@ -10,19 +10,12 @@
 // TODO(M3): insert WaitKPolicy between encoder and vocoder.
 #include "audio/OverlapAdd.hpp"
 #include "pipeline/KVStateCache.hpp"
+#include "pipeline/PipelineTiming.hpp"
 #include "pipeline/WaitKPolicy.hpp"
 
 #include <cstddef>
 
 namespace fluxvoice {
-
-/// Timing geometry @ 16 kHz — one inference step per 80 ms hop.
-struct PipelineTiming {
-    static constexpr size_t kSampleRate     = 16000;
-    static constexpr size_t kChunkSamples   = 1280;  // 80 ms hop
-    static constexpr size_t kContextSamples = 320;   // 20 ms historical context
-    static constexpr size_t kOverlapSamples = 320;   // 20 ms OLA tail
-};
 
 /// Stateful per-stream inference context.
 /// M1: OLA only. M2+: holds Ort::Session objects + KVStateCache instances.
