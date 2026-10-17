@@ -221,6 +221,7 @@ ctest --test-dir build                           # unit + CLI tests (no audio de
 tools/pw_loopback_check.sh --mode queue --load   # Linux: tone loopback via null sinks + glitch analysis
 ./build/fv_probe --list-devices                  # M1 stages 05–06: record / measure a cable route
 tools/pw_latency_check.sh                        # Linux: path latencies via null sinks + fv_probe
+powershell -ExecutionPolicy Bypass -File tools/setup_test_rig.ps1   # Windows: check/install VB-CABLE + Voicemeeter, build, verify the rig
 ```
 
 > Header-only deps (miniaudio, readerwriterqueue) are fetched automatically via `FetchContent`.

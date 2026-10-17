@@ -9,8 +9,8 @@ upstream separately when reproducible.
 
 | Tag | Name | File | Component | Status | First seen |
 |---|---|---|---|---|---|
-| BUG-001 | Dead pipes | [BUG-001_voicemeeter_vaio_routing_wedge.md](BUG-001_voicemeeter_vaio_routing_wedge.md) | Voicemeeter Banana 2.1.2.2 (external) | ☐ open | 2026-10-17 |
-| BUG-002 | Read-only handshake | [BUG-002_voicemeeter_remote_write_lock.md](BUG-002_voicemeeter_remote_write_lock.md) | VoicemeeterRemote64.dll (external) | ☐ open | 2026-10-17 |
+| BUG-001 | Dead pipes | [BUG-001_voicemeeter_vaio_routing_wedge.md](BUG-001_voicemeeter_vaio_routing_wedge.md) | Voicemeeter Banana 2.1.2.2 (external) | ◐ diagnosed | 2026-10-17 |
+| BUG-002 | Read-only handshake | [BUG-002_voicemeeter_remote_write_lock.md](BUG-002_voicemeeter_remote_write_lock.md) | VoicemeeterRemote64.dll (external) | ◐ workaround | 2026-10-17 |
 
 ## Conventions
 

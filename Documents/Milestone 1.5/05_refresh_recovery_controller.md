@@ -56,7 +56,11 @@ Running / Recovering / Error -> Stopping -> Idle
 - [ ] Log client vs. backend format: `ma_device.sampleRate` (client) vs.
       `capture/playback.internalSampleRate` (backend) — see M1 stage 05
 - [ ] Bound queued-audio latency and define the overload/drop policy (queue
-      capacity is a safety limit, not a target delay)
+      capacity is a safety limit, not a target delay). Reuse
+      [M2 / Stage 08](../Milestone%202/08_realtime_mode_a_pipeline.md)'s
+      `LatencyGovernor` and its `InferencePipeline::reset()` contract (worker
+      thread only, after quiesce). Whichever stage lands second adapts to the
+      other.
 - [ ] Fake-backend tests: notification bursts, retry limits, shutdown during
       recovery, no callback touching destroyed controller state, queue discard
       only after producers/consumers stop

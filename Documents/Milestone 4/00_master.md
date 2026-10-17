@@ -21,10 +21,20 @@ execution-provider toggles.*
   `.onnx` model loading, live latency/underrun telemetry from
   `AudioEngine`'s atomic counters, and `StreamStatus` (backend, requested vs.
   resolved device, client vs. backend sample rate).
+- **Voice sliders & preset picker.** They consume
+  [M2 / Stage 09](../Milestone%202/09_voice_controls_presets.md)'s
+  `VoiceParams` descriptor table (`fluxvoice --list-params --json`): one
+  slider per descriptor (name, unit, range, default), voice A/B dropdowns
+  from `voices.json`, preset load/save. No engine changes needed.
 - Quantization: FP16 (`export_stateful_onnx.py --fp16`), then INT8 eval;
   measure quality vs. RTF trade-off.
 - Execution providers: CUDA / DirectML / CoreML toggles via ORT session
-  options (`third_party/onnxruntime/README.md`).
+  options (`third_party/onnxruntime/README.md`). DirectML is in sustained
+  engineering; evaluate Windows ML (WinML) as the preferred Windows path
+  ([M2 research §9](../Research_documents/M2_TEXTLESS_VC_RESEARCH.md)).
+- Moved here from M2: 24/48 kHz output or bandwidth extension, input noise
+  suppression, a delay-aligned monitor mix (replacing dry/wet, which M2
+  excluded).
 
 ## Exit criteria
 

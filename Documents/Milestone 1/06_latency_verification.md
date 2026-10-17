@@ -117,8 +117,14 @@ whole table in one command: it creates two null sinks, measures the baseline,
 then each mode, and prints medians, p95s and "added" (median − baseline).
 *Written on the Windows machine: its control flow was run against stub
 `pactl`/`fluxvoice`/`fv_probe` binaries, but not yet on a real PipeWire host.*
-On Windows, use VB-Cable plus a second pair (e.g. VB-Cable A) and the commands
-above. "Latency added by the virtual cable" needs a physical jumper (line out →
+On Windows, use VB-Cable plus a second pair — either VB-Cable A or the
+Voicemeeter VAIO pair configured with `tools/vm_route.py` (see
+[Stage 05](05_virtual_cable_loopback.md) and
+[BUG-001](../Bug%20Report/BUG-001_voicemeeter_vaio_routing_wedge.md) for why
+hand-scripting the Remote API is a trap); fresh machines start with
+`tools/setup_test_rig.ps1`. Prefer `--input-name`/`--output-name` over
+indices in scripts: indices shift when audio drivers are installed or
+removed. "Latency added by the virtual cable" needs a physical jumper (line out →
 line in) as the reference. It is optional when no machine has one.
 
 ### Load audit and soak — `--stats` + `analyze_soak.py`

@@ -70,6 +70,21 @@ This is the real product routing — everything before was self-test.
   miniaudio stream — a real second application. Device indices match
   `fluxvoice --list-devices` on the same backend. Run fluxvoice first, then
   fv_probe, so fluxvoice's start-up underrun doesn't land in the recording.
+- **Voicemeeter as the second cable pair (Windows).** Banana's virtual
+  strips are `Strip[3]` (VAIO, "Voicemeeter Input") and `Strip[4]` (AUX,
+  "Voicemeeter AUX Input") — *not* Strip[2]/[3] (see
+  [BUG-001](../Bug%20Report/BUG-001_voicemeeter_vaio_routing_wedge.md)).
+  Never script the Remote API by hand: use `tools/vm_route.py` (applies the
+  routing and verifies every write by read-back; `--check` inspects without
+  writing; refuses mismatched integrity levels, so the BUG-002 silent-drop
+  fails loudly; `--self-test` runs offline) and keep Voicemeeter
+  **non-elevated**.
+- **Fresh machines:** `tools/setup_test_rig.ps1` is the one-command rig
+  bootstrap — toolchain check, build + ctest, VB-CABLE/Voicemeeter present
+  or installed (UAC prompts), VAIO routing + end-to-end tone check.
+- fv_probe accepts `--input-name`/`--output-name` (unique substring match)
+  in addition to indices; scripts should prefer names — indices shift
+  whenever audio drivers are installed or removed (BUG-001).
 - This stage validates the route on the **dev machine**. The full
   Windows / macOS / Linux matrix, optional WASAPI system-playback capture and
   "missing virtual output must not fall back to speakers" are
@@ -105,11 +120,20 @@ pactl unload-module <module id>
 
 ```powershell
 # Windows / WASAPI + VB-Cable (https://vb-audio.com/Cable/, installer needs admin)
+# Fresh machine? tools\setup_test_rig.ps1 checks/installs everything first.
 .\build\fluxvoice.exe --list-devices  # playback "CABLE Input (VB-Audio Virtual Cable)"
 .\build\fluxvoice.exe --input <mic> --output <CABLE Input>
 # Receiver: pick "CABLE Output (VB-Audio Virtual Cable)" as the microphone in
-# Audacity / OBS / a voice-chat app, or record it from a second terminal:
-.\build\fv_probe.exe record --input <CABLE Output> --seconds 20 voice.wav
+# Audacity / OBS / a voice-chat app, or record it from a second terminal
+# (name selection survives driver installs; indices do not — BUG-001):
+.\build\fv_probe.exe record --input-name "CABLE Output" --seconds 20 voice.wav
+
+# Second cable pair via Voicemeeter Banana (Stage 06 two-cable method):
+#   run Voicemeeter NON-elevated (BUG-002), then:
+python tools\vm_route.py          # VAIO ("Voicemeeter Input") -> B1, AUX -> B2; write-by-write verified
+python tools\vm_route.py --check  # integrity levels + current routing; writes nothing
+#   tone round-trip (silence = dead route; also run by setup_test_rig.ps1):
+.\build\fv_probe.exe tone --output-name "Voicemeeter Input" --input-name "Voicemeeter Out B1" --seconds 4 tone.wav
 ```
 
 ```bash
@@ -162,6 +186,13 @@ listen to / analyse the recording.
   (`open()` + `start()`), `src/audio/RouteGuard.hpp` (new),
   `src/audio/DuplexRouter.hpp` (C4324), `tools/fv_probe.cpp` (new),
   `tests/test_route_guard.cpp` (new), `CMakeLists.txt`, this doc
+- Rig hardening after
+  [BUG-001](../Bug%20Report/BUG-001_voicemeeter_vaio_routing_wedge.md)
+  (2026-10-17): `tools/vm_route.py` (new — verified-write Voicemeeter
+  routing + offline self-test), `tools/setup_test_rig.ps1` (new — rig
+  bootstrap), `tools/fv_probe.cpp` (`--input-name`/`--output-name`),
+  `CMakeLists.txt` (`vm_route_help`, `vm_route_selftest`,
+  `probe_rejects_name_and_index` tests)
 
 ## Definition of done
 

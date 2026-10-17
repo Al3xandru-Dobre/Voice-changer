@@ -10,6 +10,11 @@
 //   fv_probe latency --output O --input I [--count N] [--interval-ms M] [--rate R]
 //                    [--csv out.csv]
 //
+// Devices are selected by index (--input/--output) or by name substring
+// (--input-name/--output-name, case-insensitive, must match exactly one
+// device). Scripts should prefer names: enumeration indices shift whenever
+// audio drivers are installed or removed (BUG-001).
+//
 // record   Record capture device I to a 16-bit mono WAV, e.g. "CABLE Output":
 //          does FluxVoice's output reach other apps?
 // tone     Play a 440 Hz sine into O while recording I, e.g. O = the cable
@@ -42,6 +47,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <csignal>
 #include <cstddef>
@@ -72,6 +78,7 @@ struct Options {
     Command     cmd  = Command::None;
     bool        list = false;
     int         input = -1, output = -1;
+    std::string input_name, output_name;  // substring match (see header note)
     uint32_t    rate = 48000, seconds = 10, freq = 440, count = 60, interval_ms = 500;
     std::string wav;  // record / tone output
     std::string csv;  // latency: one row per marker
@@ -94,6 +101,10 @@ void print_usage(const char* argv0) {
         "\n"
         "  --input <index>       capture device (see --list-devices)\n"
         "  --output <index>      playback device (see --list-devices)\n"
+        "  --input-name <text>   capture device by name substring (alternative to\n"
+        "                        --input; error if the text matches no device or\n"
+        "                        more than one)\n"
+        "  --output-name <text>  playback device by name substring\n"
         "  --seconds <s>         record / tone length (default 10)\n"
         "  --freq <hz>           tone frequency (default 440)\n"
         "  --count <n>           latency markers (default 60)\n"
@@ -112,6 +123,45 @@ bool parse_uint(std::string_view s, uint32_t lo, uint32_t hi, uint32_t& out) {
         return false;
     out = v;
     return true;
+}
+
+std::string to_lower(std::string_view s) {
+    std::string out(s);
+    for (char& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+/// Resolve a device selection: an explicit index, or the unique device whose
+/// name contains `name` (case-insensitive). Returns -1 with a message on
+/// failure.
+int resolve_device(const ma_device_info* devs, ma_uint32 n, int index,
+                   const std::string& name, const char* what) {
+    if (!name.empty()) {
+        const std::string needle = to_lower(name);
+        int hit = -1;
+        for (ma_uint32 i = 0; i < n; ++i) {
+            if (to_lower(devs[i].name).find(needle) == std::string::npos) continue;
+            if (hit >= 0) {
+                std::cerr << "Ambiguous " << what << " name \"" << name << "\": matches ["
+                          << hit << "] " << devs[hit].name << " and [" << i << "] "
+                          << devs[i].name << '\n';
+                return -1;
+            }
+            hit = static_cast<int>(i);
+        }
+        if (hit < 0)
+            std::cerr << "No " << what << " device name contains \"" << name
+                      << "\" (see --list-devices)\n";
+        else
+            std::cout << "Matched " << what << " device [" << hit << "] "
+                      << devs[hit].name << '\n';
+        return hit;
+    }
+    if (index >= static_cast<int>(n)) {
+        std::cerr << "Bad index for " << what << " (see --list-devices)\n";
+        return -1;
+    }
+    return index;
 }
 
 /// Mono 16-bit PCM WAV, written as samples arrive; sizes patched by close().
@@ -276,6 +326,11 @@ int main(int argc, char** argv) {
         else if (a == "latency" && opt.cmd == Command::None) opt.cmd = Command::Latency;
         else if (a == "--input")           { if (!value(0, kMaxIndex, v)) return 1; opt.input = static_cast<int>(v); }
         else if (a == "--output")          { if (!value(0, kMaxIndex, v)) return 1; opt.output = static_cast<int>(v); }
+        else if (a == "--input-name" || a == "--output-name") {
+            if (i + 1 >= argc) { std::cerr << "Missing value for " << a << '\n'; return 1; }
+            if (a == "--input-name") opt.input_name  = argv[++i];
+            else                     opt.output_name = argv[++i];
+        }
         else if (a == "--seconds")         { if (!value(1, 24 * 3600, opt.seconds)) return 1; }
         else if (a == "--freq")            { if (!value(20, 20000, opt.freq)) return 1; }
         else if (a == "--count")           { if (!value(1, 1000000, opt.count)) return 1; }
@@ -291,12 +346,16 @@ int main(int argc, char** argv) {
 
     if (!opt.list) {
         const bool wants_wav = opt.cmd == Command::Record || opt.cmd == Command::Tone;
+        const bool has_input  = opt.input >= 0 || !opt.input_name.empty();
+        const bool has_output = opt.output >= 0 || !opt.output_name.empty();
         const char* err = nullptr;
-        if (opt.cmd == Command::None)                          err = "Missing command (record, tone or latency)";
-        else if (opt.input < 0)                                err = "--input is required";
-        else if (opt.cmd != Command::Record && opt.output < 0) err = "--output is required";
-        else if (wants_wav && opt.wav.empty())                 err = "Missing output WAV path";
-        else if (!wants_wav && !opt.wav.empty())               err = "latency takes no WAV path";
+        if (opt.cmd == Command::None)                              err = "Missing command (record, tone or latency)";
+        else if (opt.input >= 0 && !opt.input_name.empty())        err = "--input and --input-name are mutually exclusive";
+        else if (opt.output >= 0 && !opt.output_name.empty())      err = "--output and --output-name are mutually exclusive";
+        else if (!has_input)                                       err = "--input or --input-name is required";
+        else if (opt.cmd != Command::Record && !has_output)        err = "--output or --output-name is required";
+        else if (wants_wav && opt.wav.empty())                     err = "Missing output WAV path";
+        else if (!wants_wav && !opt.wav.empty())                   err = "latency takes no WAV path";
         if (err) { std::cerr << err << '\n'; print_usage(argv[0]); return 1; }
     }
 
@@ -326,13 +385,16 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Copy the ids: the enumeration arrays are only valid until the next call.
-    if (opt.input >= static_cast<int>(n_cap)) { std::cerr << "Bad --input index\n"; return 1; }
-    const ma_device_id in_id = cap[opt.input].id;
+    // Resolve device selections, then copy the ids: the enumeration arrays are
+    // only valid until the next call.
+    const int in_idx = resolve_device(cap, n_cap, opt.input, opt.input_name, "capture");
+    if (in_idx < 0) return 1;
+    const ma_device_id in_id = cap[in_idx].id;
     ma_device_id out_id{};
     if (opt.cmd != Command::Record) {
-        if (opt.output >= static_cast<int>(n_play)) { std::cerr << "Bad --output index\n"; return 1; }
-        out_id = play[opt.output].id;
+        const int out_idx = resolve_device(play, n_play, opt.output, opt.output_name, "playback");
+        if (out_idx < 0) return 1;
+        out_id = play[out_idx].id;
     }
 
     Stream s;

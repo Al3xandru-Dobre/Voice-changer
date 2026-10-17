@@ -169,6 +169,14 @@ if(FLUXVOICE_BUILD_TESTS)
     if(Python3_Interpreter_FOUND)
         add_test(NAME analyze_soak_selftest
                  COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/analyze_soak.py --self-test)
+
+        # Voicemeeter rig configurator: keeps the CLI well-formed in CI (the
+        # script itself needs Voicemeeter and only runs on the rig machine).
+        add_test(NAME vm_route_help
+                 COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/vm_route.py --help)
+        set_tests_properties(vm_route_help PROPERTIES PASS_REGULAR_EXPRESSION "usage")
+        add_test(NAME vm_route_selftest
+                 COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/vm_route.py --self-test)
     endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)
@@ -201,7 +209,9 @@ if(FLUXVOICE_BUILD_TESTS)
     set(_probe_args_latency_wav     latency --input 0 --output 0 out.wav)
     set(_probe_args_short_interval  latency --input 0 --output 0 --interval-ms 50)
     set(_probe_args_two_commands    record latency --input 0 out.wav)
-    foreach(_case no_command no_input no_output no_wav latency_wav short_interval two_commands)
+    set(_probe_args_name_and_index  tone --input 0 --input-name CABLE --output 0 out.wav)
+    foreach(_case no_command no_input no_output no_wav latency_wav short_interval two_commands
+                  name_and_index)
         add_test(NAME probe_rejects_${_case} COMMAND fv_probe ${_probe_args_${_case}})
         set_tests_properties(probe_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()
