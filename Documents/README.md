@@ -26,6 +26,12 @@ gets a tracking note at the top rather than being rewritten.
 The project-wide bibliography (papers, repos, tools) remains in the root
 [`RESEARCH_GUIDE.md`](../RESEARCH_GUIDE.md).
 
+## Bug reports
+
+One file per bug (tagged `BUG-NNN`, with a short name) in
+[`Bug Report/`](Bug%20Report/00_index.md) — covering both FluxVoice bugs and
+external-dependency bugs that block milestone work.
+
 ## Conventions
 
 
