@@ -193,6 +193,15 @@ if(FLUXVOICE_BUILD_TESTS)
     fluxvoice_set_warnings(test_model_contract)
     add_test(NAME model_contract COMMAND test_model_contract ${CMAKE_SOURCE_DIR}/tests/data)
 
+    # BUG-008: the root .gitignore keeps tests/data/ tracked and ignores the M2
+    # data root, weights and run output. Needs a git checkout (not a tarball).
+    find_package(Git QUIET)
+    if(GIT_FOUND AND EXISTS ${CMAKE_SOURCE_DIR}/.git)
+        add_test(NAME gitignore_rules
+                 COMMAND ${CMAKE_COMMAND} -DGIT=${GIT_EXECUTABLE} -DSRC=${CMAKE_SOURCE_DIR}
+                         -P ${CMAKE_SOURCE_DIR}/tests/check_gitignore.cmake)
+    endif()
+
     # M2 stage 03: causal YIN tracker vs the Python golden vectors (ORT-free).
     # Picked up at configure time once tests/test_pitch_tracker.cpp exists.
     if(EXISTS ${CMAKE_SOURCE_DIR}/tests/test_pitch_tracker.cpp)

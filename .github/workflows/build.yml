@@ -63,3 +63,42 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release
+
+  # Milestone 2 stage 02 tests that need onnx / onnxruntime (BUG-009): fixture
+  # byte-identical regeneration and ORT bit-exactness. A full `uv sync --frozen`
+  # would pull the CUDA torch wheels, so install only this subset, at the
+  # versions uv.lock pins (with their unconditional dependencies).
+  python-m2:
+    name: python-m2-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned ONNX subset of uv.lock
+        run: |
+          python - > ci-requirements.txt <<'EOF'
+          import tomllib
+          with open("python_training/uv.lock", "rb") as f:
+              pkgs = {p["name"]: p for p in tomllib.load(f)["package"]}
+          todo, pins = ["numpy", "onnx", "onnxruntime", "pytest"], {}
+          while todo:
+              name = todo.pop()
+              if name in pins:
+                  continue
+              pins[name] = pkgs[name]["version"]
+              todo += [d["name"] for d in pkgs[name].get("dependencies", []) if "marker" not in d]
+          print("\n".join(f"{n}=={v}" for n, v in sorted(pins.items())))
+          EOF
+          cat ci-requirements.txt
+          python -m pip install --only-binary=:all: -r ci-requirements.txt
+
+      - name: Test
+        working-directory: python_training
+        run: python -m pytest -q -p no:cacheprovider tests/test_contract.py tests/test_fixtures.py

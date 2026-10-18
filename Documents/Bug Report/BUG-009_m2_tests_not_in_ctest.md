@@ -8,7 +8,7 @@
 | **Name** | *Silent gate* — the build-and-test gate passes without touching any Milestone 2 code |
 | **Reported** | 2026-10-18 |
 | **Severity** | Medium (a regression in the contract rules would pass the gate) |
-| **Status** | ☑ fixed — verified 2026-10-18 15:30, see [Resolution](#resolution-verified-2026-10-18); CI still doesn't run the uv/pytest half |
+| **Status** | ☑ fixed — verified 2026-10-18 15:30, see [Resolution](#resolution-verified-2026-10-18); CI pytest job added 17:00 (not yet run on GitHub) |
 | **Component** | `CMakeLists.txt`, `.github/workflows/build.yml`, `tools/make_fixture_models.py` |
 | **Blocks** | [Stage 02](../Milestone%202/02_model_contract_fixtures.md) definition of done ("tests run … and pass in both languages"); [`AGENTS.md`](../../AGENTS.md) Part 1 rules 4 and 5 |
 
@@ -111,3 +111,15 @@ Remaining: the workflow has no `uv sync --frozen` + `pytest` step, so
 `test_fixtures.py` (ONNX Runtime bit-exactness of the fixtures) and
 `python_training_stage01_02` run only on a machine that has the venv. That was
 item 4 of my proposed fix; it is the one part not done.
+
+*[Done, 2026-10-18 17:00:* `build.yml` has a `python-m2-contract` job
+(ubuntu, Python 3.12). It does not run `uv sync --frozen`, which would pull
+the CUDA torch wheels. Instead it reads `uv.lock` with `tomllib` and installs
+`numpy`, `onnx`, `onnxruntime` and `pytest` at their locked versions, plus
+their unconditional dependencies, `protobuf` included. Then it runs
+`pytest tests/test_contract.py tests/test_fixtures.py`. The extraction
+script was dry-run locally and gives the lock's pins (`onnx==1.23.2`,
+`onnxruntime==1.31.0`, `protobuf==7.36.2`, …). **The job itself has not run
+yet**: it will run on the next push, and that run is also the first time
+byte-identical fixture regeneration is checked on Linux. Stage 03–04 tests
+and `test_prepare_data.py` / `test_eval_tools.py` stay venv-only.*]*

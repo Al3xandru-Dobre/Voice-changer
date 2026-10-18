@@ -8,7 +8,7 @@
 | **Name** | *Data-root trap* — the rule Stage 01 prescribes (`data/`) also ignores the committed test fixtures |
 | **Reported** | 2026-10-18 |
 | **Severity** | Medium (latent trap + partial gap; the imminent hazard was removed during the review, see below) |
-| **Status** | ☑ fixed — verified 2026-10-18 15:30, see [Resolution](#resolution-verified-2026-10-18); two small follow-ups noted there |
+| **Status** | ☑ fixed — verified 2026-10-18 15:30, see [Resolution](#resolution-verified-2026-10-18); follow-ups closed, regression test added 17:00 |
 | **Component** | `.gitignore`; [Milestone 2 / Stage 01](../Milestone%202/01_python_toolchain_eval_harness.md) "Data root" task |
 | **Blocks** | Stage 01 definition of done (data root); a clean-clone CI run of every contract test |
 
@@ -151,6 +151,10 @@ Follow-ups, as first noted (later status in brackets):
    why; I re-read it.]*
 
 I also suggested a regression check (`git check-ignore -q tests/data/...` must
-exit 1). **Still open:** neither CMake nor CI has one, so the hazard is covered
-only by the anchored patterns and the comment above them.
+exit 1). *[Done, 2026-10-18 17:00: CTest `gitignore_rules` runs
+`tests/check_gitignore.cmake`, which asserts the tracked and ignored paths in
+the table above with `git check-ignore --no-index`. It is registered when Git
+and a `.git` directory exist, so it runs on all four CI platforms. Checked
+against a mutation: a scratch repo whose `.gitignore` has `data/` instead of
+`/data/` fails it, naming the four `tests/data/` paths.]*
 

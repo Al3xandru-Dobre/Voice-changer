@@ -98,10 +98,13 @@ def test_embed_replaces_a_stale_contract_and_sorts_keys():
     import onnx
     model = onnx.load(str(FIXTURES / "identity" / "encoder_s1.onnx"))
     fc.embed(model, '{"old": 1}')
-    p = model.metadata_props.add()
-    p.key, p.value = "author", "x"
+    # Out of order and on both sides of METADATA_KEY, so dropping the sort fails.
+    for key in ("zeta", "author"):
+        p = model.metadata_props.add()
+        p.key, p.value = key, "x"
     fc.embed(model, "NEW")
-    assert [(q.key, q.value) for q in model.metadata_props] == [("author", "x"), (fc.METADATA_KEY, "NEW")]
+    assert [(q.key, q.value) for q in model.metadata_props] == [
+        ("author", "x"), (fc.METADATA_KEY, "NEW"), ("zeta", "x")]
 
 
 def test_graph_io_reads_dtypes_and_missing_shapes():
