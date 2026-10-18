@@ -39,6 +39,12 @@ reports and milestone findings live in [`BEST_PRACTICES.md`](BEST_PRACTICES.md)
 (with a condensed quick-reference layer in the root [`MEMORY.md`](../MEMORY.md)
 and specialist agent workflows in [`AGENTS.md`](../AGENTS.md)).
 
+## Default development workflow
+
+All future C++ changes follow the [cross-platform-first workflow](BEST_PRACTICES.md#56-default-development-workflow): explicit owning includes, intentional aggregate defaults, guarded native APIs, upstream warning fixes, regression coverage and an all-target warnings-as-errors build plus hardware-free CTest. [AGENTS.md](../AGENTS.md) makes this an always-on rule; [MEMORY.md](../MEMORY.md) keeps the condensed invariants.
+
+Before claiming cross-platform verification, retain native Windows/MSVC, Linux/GCC, Linux/Clang and macOS/AppleClang build/test evidence. Report unavailable toolchains as NOT RUN/pending; local MSVC or frontend-only parsing does not substitute for the native matrix. Live audio routing still requires the separate manual hardware checks in the milestone stages.
+
 ## Conventions
 
 

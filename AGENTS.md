@@ -14,12 +14,14 @@
 3. **Real-time callback sanctity:** Never introduce heap allocations, mutexes, I/O (`std::cout`/`stderr`), blocking calls, or ONNX inference inside `AudioEngine::data_callback` or `DuplexRouter::process()`.
 4. **Build & test gate:** Every C++ or tool change must build cleanly with warnings-as-errors and pass the hardware-free CTest suite:
    ```powershell
-   cmake -S . -B build -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+   cmake -S . -B build -DFLUXVOICE_STRICT_WARNINGS=ON -DFLUXVOICE_BUILD_TESTS=ON -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
    cmake --build build --config Release
    ctest --test-dir build -C Release --output-on-failure
    ```
+   Use a separate build directory per compiler/generator. Build all targets, including `fluxvoice_header_checks`, and run CTest with tests enabled; a targeted build alone is not the final gate. Native Windows/MSVC, Linux/GCC, Linux/Clang and macOS/AppleClang CI results are required before claiming cross-platform verification. If a native toolchain is unavailable, report that leg as NOT RUN/pending, not passed; clang-tidy with Windows headers is only a frontend check.
 5. **Self-tested rig scripts:** Every Python utility in `tools/` must use the Python standard library only, support `--self-test` with offline fakes, and be registered in `CMakeLists.txt`.
 6. **Portable headers & toolchain selection:** First-party headers must be self-contained — own the standard include for every name used and qualify size/fixed-width types (`std::size_t`, `std::[u]intN_t`); the ALL-built `fluxvoice_header_checks` target checks independent header inclusion (one TU per header). Guard OS headers behind `_WIN32`/`__APPLE__`/`__linux__`, distinguish OS macros from compiler/frontend macros (clang-cl defines both `__clang__` and `_MSC_VER`), select MSVC-style vs GNU-style warning flags via `CMAKE_CXX_COMPILER_FRONTEND_VARIANT`, and link platform libraries per-OS in CMake — never `#pragma comment(lib)`.
+7. **Cross-platform-first workflow:** Apply [BEST_PRACTICES section 5.6](Documents/BEST_PRACTICES.md#56-default-development-workflow) to every new or changed C++ header, source, test and CMake target. Own each standard include, use standard-qualified types in new code, give aggregate members explicit defaults only when those defaults are semantically correct, and add regression coverage for compiler failures. Fix first-party warnings at their source; do not weaken the shared warning gate or blanket-suppress diagnostics to make CI green. Record commands, compiler/platform identity and pass/fail/NOT RUN evidence for each affected native leg.
 
 ---
 
@@ -141,6 +143,7 @@ When delegating to a subagent (`run_subagent`) or adopting a specialized role fo
   > 2. **Mutation-Proof Assertions:** Pin each business rule with a test that fails if that specific rule is broken (e.g., breaking window bookkeeping, sub-sample interpolation sign, p95 rank, route-guard pattern, or dropped-write detection in `FakeRemote`).
   > 3. **Soak & Latency Verification:** Audit live runs with `tools/analyze_soak.py` (0 overrun/underrun/drop delta after 10 s warm-up, RSS growth <= 1 MB in M1 / <= 5 MB in M2 over 30 min) and `fv_probe latency`.
   > 4. **Bug Report & Best-Practice Maintenance:** Format new bugs in `Documents/Bug Report/BUG-NNN_<slug>.md` with tag, status (`☐ open` -> `◐ diagnosed` -> `◐ workaround` -> `☑ fixed`), environment, repro steps, expected vs. actual, evidence table, root cause, workaround, and blocked milestone stage. Distill every new root cause into `Documents/BEST_PRACTICES.md` and `MEMORY.md`.
+  > 5. **Cross-Platform Verification:** Enforce always-on rules 4, 6 and 7 for sources, tests and build files. Check owning headers and independent header compilation, intentional aggregate defaults, dead internal helpers, OS-guarded APIs and per-target platform links. Review raw compiler/test evidence for all four native matrix legs; distinguish frontend-only checks and unavailable/pending legs from a native build plus CTest pass. Do not mark portability verified from MSVC alone.
 
 ---
 

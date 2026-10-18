@@ -44,7 +44,7 @@
 
 ---
 
-## 4. Top 12 "Never / Always" Engineering Rules
+## 4. Top 13 "Never / Always" Engineering Rules
 
 1. **NEVER** allocate, lock a mutex, log (`std::cout`/`stderr`), or block inside `AudioEngine::data_callback` or `DuplexRouter::process()`.
 2. **NEVER** assume callback `frame_count` equals `periodSizeInMilliseconds`; always assemble model hops by sample count via `ChunkAssembler`.
@@ -58,14 +58,15 @@
 10. **ALWAYS** ship an offline `--self-test` (using stdlib + in-memory fakes) for every Python rig/analysis tool and register it in `CMakeLists.txt` (`ctest`).
 11. **ALWAYS** make decision gates and parity checks measure the shipped runtime (ORT stateful timings, not PyTorch eager), use a relative tolerance on a non-silent output, report any exporter fallback, and keep the exit code independent of the console codepage ([`BUG-015`](Documents/Bug%20Report/BUG-015_gate_decides_on_pytorch_clock.md), [`BUG-016`](Documents/Bug%20Report/BUG-016_gate_export_silent_exporter_fallback.md), [`BUG-017`](Documents/Bug%20Report/BUG-017_vocoder_checks_below_noise_floor.md)).
 12. **ALWAYS** keep first-party headers self-contained and portable: own the standard include for every name (`<cstddef>`/`<cstdint>`/`<string>`/`<string_view>`/`<algorithm>`/`<utility>`/`<system_error>`), write size/fixed-width types as `std::size_t`/`std::[u]intN_t`, guard OS headers behind `_WIN32`/`__APPLE__`/`__linux__`, pick MSVC-style vs GNU-style warning flags by compiler *frontend* (`CMAKE_CXX_COMPILER_FRONTEND_VARIANT` — clang-cl defines both `__clang__` and `_MSC_VER`), link platform libraries per-OS in CMake (never `#pragma comment(lib)`), and let the ALL-built `fluxvoice_header_checks` target (one TU per header, no PCH/unity) guard independent header inclusion.
+13. **ALWAYS** develop cross-platform first: follow [BEST_PRACTICES section 5.6](Documents/BEST_PRACTICES.md#56-default-development-workflow), fix compiler warnings upstream without weakening the gate, give aggregate metadata semantically correct explicit defaults and regression tests, and remove dead internal helpers. The final C++ gate is an all-target warnings-as-errors build plus hardware-free CTest; record native MSVC, Linux GCC, Linux Clang and macOS AppleClang separately as PASS/FAIL/NOT RUN (frontend parsing is not a native pass).
 
 ---
 
 ## 5. Canonical Commands
 
 ```powershell
-# Configure, build & run hardware-free unit/CLI/self-tests (28+ tests)
-cmake -S . -B build -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+# Configure, build & run hardware-free unit/CLI/self-tests
+cmake -S . -B build -DFLUXVOICE_STRICT_WARNINGS=ON -DFLUXVOICE_BUILD_TESTS=ON -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 

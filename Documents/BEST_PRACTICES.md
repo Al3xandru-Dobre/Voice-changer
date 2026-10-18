@@ -215,7 +215,7 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Never commit scratch scripts under `tools/_dl/`; promote verified, self-tested scripts to `tools/` and register them in CTest.
 
 ### 5.3 Self-contained headers: include what you use, qualify standard names
-- **Hazard (portability audit, 2026-10-19):** ISO C++ `<cstddef>`/`<cstdint>` guarantee the names in namespace `std` — `size_t`/`uint64_t` in the *global* namespace are an implementation extension, not part of the standard-library contract, and some standard-library configurations do not provide them. Transitive includes (e.g. `std::pair` reaching a TU via `<vector>`) likewise differ across implementations. Headers that compile on MSVC can fail on the CI Linux/macOS legs for reasons invisible locally.
+- **Hazard (portability audit, 2026-10-19):** ISO C++ `<cstddef>`/`<cstdint>` guarantee the names in namespace `std` — `size_t`/`uint64_t` in the *global* namespace are not guaranteed by these headers, and some standard-library configurations do not provide them. Transitive includes (e.g. `std::pair` reaching a TU via `<vector>`) likewise differ across implementations. Headers that compile on MSVC can fail on the CI Linux/macOS legs for reasons invisible locally.
 - **Rule:**
   - Every first-party header must be self-contained: include the *owning* standard header for each name it uses, and qualify size/fixed-width types as `std::size_t` / `std::ptrdiff_t` / `std::[u]intN_t`.
 
@@ -260,6 +260,18 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Record verification status honestly: MSVC is built locally; the Linux GCC/Clang and AppleClang legs are exercised by CI — do not claim local runs that did not happen.
   - ONNX Runtime is optional and off by default (`ONNXRUNTIME_ROOT` unset → `FLUXVOICE_WITH_ORT` undefined → ORT code compiled out, the CI baseline). A prebuilt SDK must match the target architecture and platform: a Windows x64 SDK cannot link an ARM64 or Linux build, and the CUDA / DirectML / CoreML execution-provider builds are not interchangeable. Neural runtime wiring is still future work.
 
+### 5.6 Default development workflow
+
+This is the default for all future C++ source, header, test and CMake work, not a one-off portability cleanup. Preserve the real-time and milestone invariants in sections 2-4 while following this workflow.
+
+1. **Plan for all four native toolchains.** Review the Windows/MSVC, Linux/GCC, Linux/Clang and macOS/AppleClang impact before editing. Check the owning standard headers, exact-case include paths, guarded OS APIs, target architecture and CMake link dependencies. Do not assume MSVC's include graph or Windows SDK declarations exist on Unix.
+2. **Write portable code and tests together.** Include each standard name's owning header and use `std::size_t`/`std::ptrdiff_t`/`std::uint64_t` rather than depending on global aliases in new code. Include a matching project header first in its `.cpp`; single-header implementation TUs deliberately defining an implementation macro are the documented exception. Keep platform differences at the backend/util boundary and in target-scoped CMake settings, not scattered through DSP or callbacks.
+3. **Fix warnings at the source.** For intentional aggregate metadata defaults, initialize the member in the type declaration and test its semantics; do not invent a default for a required value just to silence a warning. Keep a partial aggregate initialization test when it guards the regression (as for `EndpointDescriptor::monitor_of`). Remove unused internal helpers; configuration-specific code should be appropriately guarded. Do not disable `-Wmissing-field-initializers`, `-Wunused-function`, strict warnings or warnings-as-errors to bypass a first-party defect. Existing narrowly scoped third-party/alignment exceptions in section 5.1 remain valid.
+4. **Verify narrowly, then run the final gate.** First build and test the affected targets with regression coverage. Then configure with `FLUXVOICE_BUILD_TESTS=ON`, `FLUXVOICE_STRICT_WARNINGS=ON` and `FLUXVOICE_WARNINGS_AS_ERRORS=ON`, build all targets (including `fluxvoice_header_checks`) and run the hardware-free CTest suite. The header check disables PCH/unity to guard independent inclusion; still audit owning headers because a header's internal transitive includes can hide omissions. Use the per-toolchain directories and commands in section 5.5; do not change generators or compilers inside an existing cache.
+5. **Report evidence, not inferred portability.** Record each native compiler's identity/version, OS/architecture, configure/build/test commands, result and raw log or CI run reference. A local MSVC pass or a clang-tidy parse using MSVC headers is not a Linux/AppleClang pass. Mark unavailable or unexecuted legs NOT RUN/pending, retain the reason and name the required CI follow-up. Cross-platform verification requires green native configure/build/CTest runs for all four legs in `.github/workflows/build.yml`; compilation alone does not verify live audio routing or OS permissions. Documentation-only changes need link/diff validation, not a fabricated new C++ test result.
+
+Compiler failures must leave behind the minimal upstream fix, a relevant regression check and a concise lesson here (with a condensed reminder in `MEMORY.md`/`AGENTS.md` when it changes the standing workflow). Keep research snapshots unchanged and do not mark milestone acceptance complete until its evidence exists.
+
 ---
 
 ## 6. Quick Pre-Flight Checklist
@@ -272,4 +284,7 @@ Before marking any audio, rig, DSP, or ML change complete:
 - [ ] **Exact latency accounting:** Are ONNX sessions warmed up before `engine.start()`, and is the final stats snapshot taken *before* worker teardown?
 - [ ] **Strict causality & parity:** Are all ML/DSP features strictly causal, guarded by `#ifdef FLUXVOICE_WITH_ORT` where appropriate, and tested for parity (> 2x window for sliding caches)?
 - [ ] **Gates measure the shipped runtime and can fail:** Does every decision gate/parity check use ORT stateful timings and a relative tolerance on a non-silent output, report any exporter fallback, and exit 0 under a cp1252 console?
+- [ ] **Portable declarations:** Are owning includes, standard-qualified types, intentional aggregate defaults, OS guards and target-scoped platform links correct in both sources and tests?
+- [ ] **Warning regression fixed upstream:** Does the compiler-specific regression have coverage without weakening the shared warning gate or hiding dead code?
+- [ ] **Native matrix evidence:** Are MSVC, Linux GCC, Linux Clang and macOS AppleClang results reported separately with commands/logs, with unavailable or pending legs explicitly NOT RUN rather than inferred green?
 - [ ] **Green hardware-free test suite:** Does `ctest --test-dir build -C Release --output-on-failure` pass 100% of unit, CLI-rejection, and `--self-test` cases without requiring an audio device?
