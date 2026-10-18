@@ -34,6 +34,15 @@ void test_types_exist_without_miniaudio() {
     CHECK(d.name == "USB Mic");
     CHECK(d.is_default);
     CHECK(d.persistent_token.empty());
+    // Trailing members fall back to their defaults: monitor metadata is
+    // Unknown/empty, not silently Supported.
+    CHECK(d.is_monitor == Capability::Unknown);
+    CHECK(!d.monitor_of.has_value());
+
+    // A value-initialized descriptor starts with the same metadata defaults.
+    const EndpointDescriptor empty{};
+    CHECK(empty.is_monitor == Capability::Unknown);
+    CHECK(!empty.monitor_of.has_value());
 
     // A default snapshot is the "nothing published yet" state.
     const DeviceSnapshot snap;

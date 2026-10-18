@@ -147,7 +147,9 @@ fluxvoice_link_audio(fv_probe)
 # Applied to every target built from our sources (app + tests).
 function(fluxvoice_set_warnings target)
     # cl.exe and clang-cl share the MSVC frontend dialect (/W4, /WX);
-    # CMAKE_CXX_COMPILER_FRONTEND_VARIANT is "MSVC" for both.
+    # CMAKE_CXX_COMPILER_FRONTEND_VARIANT is "MSVC" for both. Init
+    # explicitly so a caller's variable of the same name cannot leak in.
+    set(_msvc_frontend FALSE)
     if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         set(_msvc_frontend TRUE)
     endif()
@@ -183,10 +185,11 @@ fluxvoice_set_warnings(fv_probe)
 if(FLUXVOICE_BUILD_TESTS)
     enable_testing()
 
-    # Compile every first-party header in isolation: catches missing direct
-    # includes that transitive includes would otherwise hide. Part of ALL,
-    # no runtime test needed (see Documents/BEST_PRACTICES.md section 5).
-    include(${CMAKE_SOURCE_DIR}/cmake/CheckHeaders.cmake)
+    # Compile every first-party header in isolation: guards independent
+    # inclusion (a header's own transitive includes can still mask a
+    # missing owning include -- pair with manual IWYU review). Part of
+    # ALL, no runtime test needed (BEST_PRACTICES.md section 5).
+    include("${CMAKE_SOURCE_DIR}/cmake/CheckHeaders.cmake")
 
     foreach(_t duplex_router chunk_assembler overlap_add route_guard latency_probe audio_types
                device_registry audio_controller)

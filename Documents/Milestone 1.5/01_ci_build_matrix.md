@@ -74,10 +74,19 @@ once, manually, on Windows (MSVC 19.50, M1 / Stage 05).
   `src/*.hpp`, `tools/LatencyProbe.hpp` and `tests/TestSupport.hpp` in
   isolation; new `process_memory` CTest covers the `<windows.h>`/`<psapi.h>`
   NOMINMAX guard and link; macOS legs configure with
-  `-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0` and every job logs `cmake --version`
-  (non-Windows also `"$CXX" --version`). Verified locally on VS BuildTools
-  2026 (cl 19.51); Linux GCC/Clang and AppleClang stay unverified until the
-  first green CI push.
+  `-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0` (macOS row selects the Apple SDK
+  compiler `/usr/bin/clang` explicitly) and every job logs `cmake --version`
+  (non-Windows also `"$CXX" --version`). Local result: MSVC 19.51 `/W4 /WX`
+  clean, 21 isolated header-check TUs compiled, `process_memory` plus the
+  full CTest suite 47/47 passed; native Linux/macOS legs were not run and
+  stay unverified until the first green CI push.
+- 2026-10-19 (later): a user-run Linux Clang build (CI flags) surfaced
+  `-Wmissing-field-initializers` on partial `EndpointDescriptor` aggregates
+  (`monitor_of` had no default member initializer — now `= std::nullopt`,
+  with regression CHECKs) and `-Wunused-function` on a dead test helper
+  (`played()`, removed). Reproduced locally with the Clang 20 frontend and
+  re-verified clean; the MSVC `/W4 /WX` + 47-test gate re-passed. The Linux
+  CI rerun is pending — native Linux/macOS are still not confirmed green.
 
 ## Files touched
 

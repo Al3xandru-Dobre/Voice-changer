@@ -255,8 +255,9 @@ CC=clang CXX=clang++ cmake -S . -B build-clang -DCMAKE_BUILD_TYPE=Release -DFLUX
 cmake --build build-clang -j
 ctest --test-dir build-clang --output-on-failure
 
-# macOS AppleClang — macOS 13 is the supported floor (CI passes the same target)
-cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+# macOS AppleClang — /usr/bin/clang is the SDK compiler even when Homebrew LLVM leads PATH;
+# macOS 13 is the supported floor (CI selects and targets the same)
+CC=/usr/bin/clang CXX=/usr/bin/clang++ cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
 cmake --build build-macos -j
 ctest --test-dir build-macos --output-on-failure
 ```

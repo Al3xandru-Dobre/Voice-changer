@@ -78,7 +78,7 @@ struct EndpointDescriptor {
     Capability is_monitor = Capability::Unknown;
     /// When `is_monitor == Capability::Supported`, the playback sink key
     /// this monitor records, if provided by the backend/adapter.
-    std::optional<EndpointKey> monitor_of;
+    std::optional<EndpointKey> monitor_of = std::nullopt;
 };
 
 /// An owned, immutable copy of the whole device catalog at one instant.

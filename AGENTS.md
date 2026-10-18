@@ -19,7 +19,7 @@
    ctest --test-dir build -C Release --output-on-failure
    ```
 5. **Self-tested rig scripts:** Every Python utility in `tools/` must use the Python standard library only, support `--self-test` with offline fakes, and be registered in `CMakeLists.txt`.
-6. **Portable headers & toolchain selection:** First-party headers must be self-contained — own the standard include for every name used and qualify size/fixed-width types (`std::size_t`, `std::[u]intN_t`); the ALL-built `fluxvoice_header_checks` target compiles each header in isolation. Guard OS headers behind `_WIN32`/`__APPLE__`/`__linux__`, distinguish OS macros from compiler/frontend macros (clang-cl defines both `__clang__` and `_MSC_VER`), select MSVC-style vs GNU-style warning flags via `CMAKE_CXX_COMPILER_FRONTEND_VARIANT`, and link platform libraries per-OS in CMake — never `#pragma comment(lib)`.
+6. **Portable headers & toolchain selection:** First-party headers must be self-contained — own the standard include for every name used and qualify size/fixed-width types (`std::size_t`, `std::[u]intN_t`); the ALL-built `fluxvoice_header_checks` target checks independent header inclusion (one TU per header). Guard OS headers behind `_WIN32`/`__APPLE__`/`__linux__`, distinguish OS macros from compiler/frontend macros (clang-cl defines both `__clang__` and `_MSC_VER`), select MSVC-style vs GNU-style warning flags via `CMAKE_CXX_COMPILER_FRONTEND_VARIANT`, and link platform libraries per-OS in CMake — never `#pragma comment(lib)`.
 
 ---
 

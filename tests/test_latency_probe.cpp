@@ -30,13 +30,6 @@ probe::MarkerSchedule schedule(size_t count = 12) {
     return s;
 }
 
-/// The marker stream as the probe plays it.
-std::vector<float> played(const std::vector<float>& m, const probe::MarkerSchedule& s) {
-    std::vector<float> x(static_cast<size_t>(s.total()));
-    for (size_t n = 0; n < x.size(); ++n) x[n] = probe::marker_sample(m, s, n);
-    return x;
-}
-
 /// Deterministic white noise in [-amp, amp].
 struct Noise {
     uint32_t state = 12345;
