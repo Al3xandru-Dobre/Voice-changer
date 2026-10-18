@@ -44,7 +44,7 @@
 
 ---
 
-## 4. Top 10 "Never / Always" Engineering Rules
+## 4. Top 11 "Never / Always" Engineering Rules
 
 1. **NEVER** allocate, lock a mutex, log (`std::cout`/`stderr`), or block inside `AudioEngine::data_callback` or `DuplexRouter::process()`.
 2. **NEVER** assume callback `frame_count` equals `periodSizeInMilliseconds`; always assemble model hops by sample count via `ChunkAssembler`.
@@ -56,6 +56,7 @@
 8. **ALWAYS** guard ONNX Runtime C++ code with `#ifdef FLUXVOICE_WITH_ORT`, copy `onnxruntime.dll` next to executables on Windows, and check `Ort::GetVersionString()` to prevent `System32\onnxruntime.dll` shadowing.
 9. **ALWAYS** keep `NOMINMAX` on Windows `miniaudio_headers`, suppress MSVC `C4324` on cache-aligned SPSC queues, keep `MINIAUDIO_IMPLEMENTATION` in a single TU per binary, and compile cleanly with `/W4 /WX` / `-Wall -Wextra -Wpedantic -Werror`.
 10. **ALWAYS** ship an offline `--self-test` (using stdlib + in-memory fakes) for every Python rig/analysis tool and register it in `CMakeLists.txt` (`ctest`).
+11. **ALWAYS** make decision gates and parity checks measure the shipped runtime (ORT stateful timings, not PyTorch eager), use a relative tolerance on a non-silent output, report any exporter fallback, and keep the exit code independent of the console codepage ([`BUG-015`](Documents/Bug%20Report/BUG-015_gate_decides_on_pytorch_clock.md), [`BUG-016`](Documents/Bug%20Report/BUG-016_gate_export_silent_exporter_fallback.md), [`BUG-017`](Documents/Bug%20Report/BUG-017_vocoder_checks_below_noise_floor.md)).
 
 ---
 

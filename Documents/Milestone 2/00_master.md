@@ -89,9 +89,9 @@ C++ track: 02 (contract) ─► 07 (ORT C++) ──┴─► 08 (RT) ─► 09 �
 |---|---|---|---|---|
 | 01 | [Python toolchain, datasets & evaluation harness](01_python_toolchain_eval_harness.md) | §6 §7 | `uv sync --frozen` env; manifests; `eval_vc.py` baseline numbers | ◐ env, lists, harness, baseline (WER 1.54 %) done; training corpora downloading |
 | 02 | [Model contract & fixture models](02_model_contract_fixtures.md) | §8 §9 | `ModelContract.hpp` + `fvml/contract.py`; fixtures in `tests/data/` | ☑ |
-| 03 | [Causal pitch & energy features](03_causal_pitch_energy.md) | §4 | YIN + whitening, Python ↔ C++ golden parity | ☐ |
-| 04 | [Content encoder candidates](04_content_encoder_candidates.md) | §2 §7 | km100 teacher; causal student L∈{0,1,2}; Mimi kill decision | ☐ |
-| 05 | [Causal vocoder & decision gate](05_causal_vocoder_decision_gate.md) | §5 §7 §11 | Multi-speaker vocoder; gate table; encoder decision | ☐ |
+| 03 | [Causal pitch & energy features](03_causal_pitch_energy.md) | §4 | YIN + whitening, Python ↔ C++ golden parity | ◐ code, golden vectors & dev-clean accuracy done; train-clean-100 priors pending |
+| 04 | [Content encoder candidates](04_content_encoder_candidates.md) | §2 §7 | km100 teacher; causal student L∈{0,1,2}; Mimi kill decision | ◐ code, probes & streaming checks done; long GPU runs pending |
+| 05 | [Causal vocoder & decision gate](05_causal_vocoder_decision_gate.md) | §5 §7 §11 | Multi-speaker vocoder; gate table; encoder decision | ◐ vocoder, trainer, export smoke & gate harness done; 150k-step training & quality gate pending |
 | 06 | [Stateful ONNX export & parity](06_stateful_onnx_export.md) | §8 | Model bundle (s1/s2/s4) + `voices.json`; parity report | ☐ |
 | 07 | [ONNX Runtime C++ runtime](07_ort_cpp_runtime.md) | §9 | `OrtModel`, CMake import + DLL copy, `fv_vc_file` | ☐ |
 | 08 | [Real-time Mode A pipeline](08_realtime_mode_a_pipeline.md) | §3 §10 | `fluxvoice --vc` live; governor; telemetry | ☐ |

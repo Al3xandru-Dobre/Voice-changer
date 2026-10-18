@@ -25,13 +25,12 @@ from scipy.signal import lfilter
 # Population priors (start values of the whitening EMAs): log-f0 (natural log
 # of Hz) over voiced frames, log-energy over all frames. The voiced decision
 # uses z_energy, so the log-f0 prior is iterated to a fixed point.
-# PROVISIONAL: measured with `eval_pitch.py priors` on LibriSpeech dev-clean
-# (5.4 h, 40 speakers, 20 F / 20 M); recompute on train-clean-100 once Stage 01
-# has prepared it, then regenerate the golden vectors.
-LOGF0_PRIOR_MEAN = 5.087
-LOGF0_PRIOR_STD = 0.427
-ENERGY_PRIOR_MEAN = -8.500
-ENERGY_PRIOR_STD = 3.829
+# Measured with `eval_pitch.py priors` on LibriSpeech train-clean-100 (100.6 h,
+# 251 speakers); a 20 h re-run with these values moves none by more than 0.005.
+LOGF0_PRIOR_MEAN = 5.028
+LOGF0_PRIOR_STD = 0.421
+ENERGY_PRIOR_MEAN = -8.486
+ENERGY_PRIOR_STD = 3.817
 
 FEATURES = ("f0_hz", "aperiodicity", "voicing", "log_energy", "logf0_held", "z_logf0", "z_energy")
 

@@ -2,7 +2,7 @@
 
 > **Milestone 2** · [Master plan](00_master.md) · [← Stage 02](02_model_contract_fixtures.md) · [Stage 04 →](04_content_encoder_candidates.md)
 
-**Status:** ◐ in progress (2026-10-18). Python + C++ tracker, golden vectors, tests and the accuracy check are done. Still open: the priors are provisional (dev-clean) until train-clean-100 is prepared (see Verification)
+**Status:** ◐ in progress (2026-10-18). Python + C++ tracker, golden vectors, tests and the accuracy check are done. Open items are listed at the end of Verification
 **Depends on:** Stage 01 (env, data, evaluation lists), Stage 02 (frame geometry, lookahead field)
 **Research:** §4 pitch & energy · §3 latency (no hidden lookahead)
 
@@ -52,11 +52,11 @@ and energy.
 - The time constant is configurable (default 4 s), with a standard-deviation
   floor (0.05 for log-f0, 0.5 for log-energy).
 - It starts from population priors computed on LibriSpeech train-clean-100 in
-  this stage. **Provisional values** (dev-clean, 5.4 h, 40 speakers;
-  `eval_pitch.py priors`): log-f0 mean **5.087** (162 Hz), std **0.427**;
-  log-energy mean **−8.500**, std **3.829** (natural log of the mean square).
-  The voiced decision uses the energy prior, so the log-f0 prior was iterated
-  to a fixed point (3 runs, change < 0.01).
+  this stage (`eval_pitch.py priors`: 100.6 h, 251 speakers, 18.1 M frames,
+  8.8 M voiced). Log-f0 mean **5.028** (153 Hz), std **0.421**; log-energy
+  mean **−8.486**, std **3.817** (natural log of the mean square). The voiced
+  decision uses the energy prior, so the priors were iterated: a 20 h re-run
+  with these values moves none by more than 0.005.
 
 **Target mapping** (the C++ run-time path; training uses the target's own
 features directly):
@@ -70,11 +70,8 @@ and `shift_st` come from Stage 09 (defaults 1 and 0).
       (frame-in, features-out, explicit state) plus an offline wrapper that
       loops the streaming class. One code path, so offline equals streaming by
       construction. Also `RunningNorm` and `map_to_target`.
-- [ ] **Population priors.** Log-f0 and log-energy mean/std over train-clean-100
+- [x] **Population priors.** Log-f0 and log-energy mean/std over train-clean-100
       → constants recorded in this file and in `fvml/features.py`.
-      *Provisional dev-clean values are in. Once train-clean-100 is prepared, rerun
-      `eval_pitch.py priors --manifest librispeech-train-clean-100`, then
-      `make_pitch_golden.py`, and update `PitchTracker.hpp`.*
 - [x] **Accuracy check** against an offline reference tracker (non-causal is fine,
       e.g. a CREPE- or Harvest-based reference) on 30 min of LibriSpeech
       dev-clean (+ VCTK if prepared). The check is `eval_pitch.py accuracy`.
@@ -155,7 +152,7 @@ and `shift_st` come from Stage 09 (defaults 1 and 0).
 Measured 2026-10-18 on the dev laptop. Other jobs were running, so the
 timings are pessimistic.
 
-**Accuracy** (`eval_pitch.py accuracy --lookahead 0 1 2`): 30.0 min of
+**Accuracy** (`eval_pitch.py accuracy --lookahead 0 1 2`, re-run with the train-clean-100 priors: identical to within 0.0001): 30.0 min of
 dev-clean, 229 utterances, all 40 speakers, held out from the tuning rows.
 Each tracker frame is compared with the Praat frame nearest its window centre.
 
@@ -228,7 +225,6 @@ loaded machine):
   0.200), with rms z 1.001.
 
 **Open.**
-- Recompute the priors on train-clean-100.
 - Run the accuracy check on VCTK.
 - `tests/test_features.py` runs under CTest as `python_training_stage03_04`,
   but only where `python_training/.venv` exists. CI needs a `uv sync --frozen`

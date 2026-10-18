@@ -55,11 +55,11 @@ struct PitchTrackerConfig {
     double logf0_std_floor = 0.05;
     double energy_std_floor = 0.5;
     double hold_relax_s = 0.25;
-    // PROVISIONAL priors (LibriSpeech dev-clean); see fvml/features.py.
-    double logf0_prior_mean = 5.087;
-    double logf0_prior_std = 0.427;
-    double energy_prior_mean = -8.500;
-    double energy_prior_std = 3.829;
+    // Priors from LibriSpeech train-clean-100; see fvml/features.py.
+    double logf0_prior_mean = 5.028;
+    double logf0_prior_std = 0.421;
+    double energy_prior_mean = -8.486;
+    double energy_prior_std = 3.817;
     int    lookahead_frames = 0;
 
     int tau_min() const { return static_cast<int>(std::ceil(sample_rate / f0_max_hz)); }

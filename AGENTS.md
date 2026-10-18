@@ -28,7 +28,7 @@ When delegating to a subagent (`run_subagent`) or adopting a specialized role fo
 
 | Handle | Specialist Role | Default Profile | Primary Milestones | Owned / Target Paths |
 |---|---|---|---|---|
-| [`@explorer`](#1-explorer--codebase--milestone-explorer) | Codebase, Milestone & Research Explorer | `subagent_explore` (read-only) | All (M1–M4) | `src/**`, `Documents/**`, `tools/**`, `tests/**` |
+| [`@explorer`](#1-explorer--codebase--milestone-explorer) | Codebase, Milestone & Research Explorer | `subagent_explore` (read-only) | All (M1–M4) | `src/**`, `Documents/**`, `tools/**`, `tests/**` | model : 'SWE-2 High' 'GPT-6 Luna Max', 'Deepseek v4.1-flash Max'
 | [`@rt-audio-dsp`](#2-rt-audio-dsp--real-time-c-audio--dsp-specialist) | Real-Time C++ Audio & DSP Specialist | `subagent_general` | M1, M1.5, M2 (Stage 03/08) | `src/audio/**`, `src/main.cpp`, `src/util/**`, `CMakeLists.txt` |
 | [`@audio-rig-routing`](#3-audio-rig-routing--audio-test-rig-virtual-cables--os-routing-specialist) | Audio Test Rig, Virtual Cables & OS Routing Specialist | `subagent_general` | M1 (Stage 05–06), M1.5 (Stage 06) | `tools/fv_probe.cpp`, `tools/vm_route.py`, `tools/setup_test_rig.ps1`, `tools/pw_*.sh`, `tools/analyze_*.py` |
 | [`@ml-speech-trainer`](#4-ml-speech-trainer--speech--voice-conversion-ml-specialist) | Speech & Voice Conversion ML Specialist (PyTorch) | `subagent_general` | M2 (Stages 01, 03–06, 10), M3 | `python_training/**`, `models/**`, `Documents/Milestone 2/**`, `Documents/Milestone 3/**` |

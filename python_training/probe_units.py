@@ -111,6 +111,46 @@ def student_cost(checkpoint, fps_list, steps, warmup):
     return out
 
 
+def vocoder_cost(checkpoint, fps_list, steps, warmup, cfg=None):
+    """Single-core CPU latency p50/p95/p99 of UnitVocoder.step (Stage 05)."""
+    torch = single_core()
+    from fvml import vocoder as voc
+    if checkpoint:
+        model = voc.UnitVocoder.from_checkpoint(checkpoint)[0]
+    else:
+        model = voc.UnitVocoder(cfg or voc.VocoderConfig())
+    model.eval()
+    rng = np.random.default_rng(0)
+    out = {"params": model.num_params(), "macs_per_second": model.macs_per_second(),
+           "state_floats": model.state_numel(), "frame_samples": model.cfg.frame_samples}
+    rep = model.cfg.unit_repeat
+    spk = model.speaker_table.weight[:1].detach().clone()
+    for fps in fps_list:
+        hop = fps * model.cfg.frame_samples
+        cond_step = fps * rep
+        if model.cfg.content_kind == "discrete":
+            u = torch.from_numpy(rng.integers(0, model.cfg.vocab,
+                                              size=(warmup + steps, 1, fps), dtype=np.int64))
+        else:
+            u = torch.from_numpy(rng.standard_normal(
+                (warmup + steps, 1, fps, model.cfg.content_dim)).astype(np.float32))
+        lf = torch.from_numpy(rng.standard_normal((warmup + steps, 1, cond_step)).astype(np.float32))
+        vo = torch.from_numpy(rng.uniform(0.0, 1.0, (warmup + steps, 1, cond_step)).astype(np.float32))
+        ap = torch.from_numpy(rng.uniform(0.0, 1.0, (warmup + steps, 1, cond_step)).astype(np.float32))
+        en = torch.from_numpy(rng.standard_normal((warmup + steps, 1, cond_step)).astype(np.float32))
+        state, times = model.init_state(1), []
+        with torch.inference_mode():
+            for i in range(warmup + steps):
+                t0 = time.perf_counter()
+                _, state = model.step(u[i], lf[i], vo[i], ap[i], en[i], spk, state)
+                times.append(time.perf_counter() - t0)
+        p = percentiles(times[warmup:])
+        p["hop_ms"] = 1000.0 * hop / model.cfg.sample_rate
+        p["rtf_p95"] = p["p95_ms"] / p["hop_ms"]
+        out[f"fps{fps}"] = p
+    return out
+
+
 def teacher_cost(seconds=10.0, repeats=3):
     torch = single_core()
     from fvml import teacher
@@ -174,6 +214,8 @@ def main(argv=None):
     p.add_argument("--warmup", type=int, default=50)
     p.add_argument("--cost-teacher", action="store_true")
     p.add_argument("--cost-mimi", action="store_true")
+    p.add_argument("--cost-vocoder", action="store_true")
+    p.add_argument("--vocoder-checkpoint", help="--cost-vocoder: vocoder weights (default random init)")
     p.add_argument("--out", help="write the JSON report here")
     args = p.parse_args(argv)
     if not (args.units or args.cost):
@@ -202,6 +244,9 @@ def main(argv=None):
         fps = [int(f) for f in args.fps.split(",") if f.strip()]
         if args.cost:
             report["cost"] = {"student": student_cost(args.checkpoint, fps, args.steps, args.warmup)}
+            if args.cost_vocoder:
+                report["cost"]["vocoder"] = vocoder_cost(args.vocoder_checkpoint, fps,
+                                                         args.steps, args.warmup)
             if args.cost_teacher:
                 report["cost"]["teacher"] = teacher_cost()
             if args.cost_mimi:

@@ -22,6 +22,11 @@ and prevention rules are compiled into [`../BEST_PRACTICES.md`](../BEST_PRACTICE
 | BUG-010 | Deaf liveness | [BUG-010_liveness_ignores_callback_progress.md](BUG-010_liveness_ignores_callback_progress.md) | `AudioController` (M1.5 S05) | ☑ fixed | 2026-10-18 |
 | BUG-011 | Retry bypass | [BUG-011_preopen_retryable_failure_bypasses_recovery.md](BUG-011_preopen_retryable_failure_bypasses_recovery.md) | `AudioController` (M1.5 S05) | ☑ fixed | 2026-10-18 |
 | BUG-012 | Fresh stale | [BUG-012_unavailable_refresh_left_snapshot_fresh.md](BUG-012_unavailable_refresh_left_snapshot_fresh.md) | `AudioDeviceRegistry` (M1.5 S03/05) | ☑ fixed | 2026-10-18 |
+| BUG-013 | Stale golden | [BUG-013_stale_golden_survives_reexport.md](BUG-013_stale_golden_survives_reexport.md) | `export_stateful_onnx.py` bundle lifecycle (M2 S06) | ☐ open | 2026-10-18 |
+| BUG-014 | Traceback exits | [BUG-014_export_cli_traceback_exits.md](BUG-014_export_cli_traceback_exits.md) | `export_stateful_onnx.py` / `fvml/export.py` error boundary (M2 S06) | ☐ open | 2026-10-18 |
+| BUG-015 | Wrong clock | [BUG-015_gate_decides_on_pytorch_clock.md](BUG-015_gate_decides_on_pytorch_clock.md) | `gate_report.py` eligibility/projected T−B (M2 S05) | ◐ diagnosed | 2026-10-18 |
+| BUG-016 | Silent fallback | [BUG-016_gate_export_silent_exporter_fallback.md](BUG-016_gate_export_silent_exporter_fallback.md) | `gate_report.py` export smoke test / console encoding (M2 S05) | ◐ workaround | 2026-10-18 |
+| BUG-017 | Quiet tolerance | [BUG-017_vocoder_checks_below_noise_floor.md](BUG-017_vocoder_checks_below_noise_floor.md) | `vocoder.py` init, `stream_check.py`, `gate_report.py`, `test_vocoder.py` (M2 S05) | ◐ diagnosed | 2026-10-18 |
 
 ## Reviews
 
@@ -29,6 +34,8 @@ and prevention rules are compiled into [`../BEST_PRACTICES.md`](../BEST_PRACTICE
 |---|---|---|
 | 2026-10-18 | Milestone 2 stages 01–02: test run, definition-of-done check, mutation-test gaps, suggestions | [REVIEW-M2-S01-S02_2026-10-18.md](REVIEW-M2-S01-S02_2026-10-18.md) |
 | 2026-10-18 | Milestone 1.5 stages 05–06: controller/backend review, cmake gate, Windows WASAPI + loopback + feedback-guard verification; BUG-010/011/012 found & fixed | [REVIEW-M15-S05-S06_2026-10-18.md](REVIEW-M15-S05-S06_2026-10-18.md) |
+| 2026-10-18 | Milestone 2 stage 06: stateful ONNX export static review (no shell); DoD check, gate/conditioning/golden verification; BUG-013/014 found | [REVIEW-M2-S06_2026-10-18.md](REVIEW-M2-S06_2026-10-18.md) |
+| 2026-10-18 | Milestone 2 stage 05: causal vocoder + decision gate; fresh `/WX` build 46/46, 41-mutant test audit (28 survive), gate re-run with the stage file's numbers; BUG-015/016/017 found | [REVIEW-M2-S05_2026-10-18.md](REVIEW-M2-S05_2026-10-18.md) |
 
 ## Conventions
 

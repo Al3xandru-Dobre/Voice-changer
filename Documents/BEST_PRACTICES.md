@@ -180,6 +180,19 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Copy the pinned `onnxruntime.dll` next to every executable in CMake post-build, log `Ort::GetVersionString()`, and refuse to run on a version mismatch.
   - Guard all `<onnxruntime_cxx_api.h>` includes and calls behind `#ifdef FLUXVOICE_WITH_ORT` so the default ORT-less CI build always compiles and passes `ctest`.
 
+### 4.7 Decision gates and parity checks must measure what ships, and must be able to fail
+- **Past mistakes ([`BUG-015`](Bug%20Report/BUG-015_gate_decides_on_pytorch_clock.md), [`BUG-016`](Bug%20Report/BUG-016_gate_export_silent_exporter_fallback.md), [`BUG-017`](Bug%20Report/BUG-017_vocoder_checks_below_noise_floor.md), [Stage 05 review](Bug%20Report/REVIEW-M2-S05_2026-10-18.md)):**
+  1. The Stage 05 decision gate applied its "compute p95 <= 50 % of hop" rule to PyTorch-eager time (Python dispatch) while the product runs ONNX Runtime; with the stage file's own numbers the gate would have rejected every 20 ms-hop design and picked a 108.7 ms one.
+  2. The gate's export smoke test caught *every* exception from `dynamo=True` and re-exported with the legacy exporter, so a cp1252 console (the exporter prints an emoji) turned "exports with dynamo" into a silent pass on a different graph. The same console fault made the successful script exit 1.
+  3. An untrained generator's output peaked at 3.9e-5, below the absolute `1e-4` tolerance of its equivalence and ONNX checks, so dropping the transposed-conv caches still passed.
+  4. 28 of 41 deliberately broken variants survived the vocoder/gate tests (FiLM bypass, wrong `voices.json` row, dropped dilation, gate thresholds).
+- **Rule:**
+  - Take gate inputs from the runtime that ships (ORT/C++), time a **stateful multi-hop loop**, show every clock in the report, and label the one the rule used.
+  - Never wrap an exporter, parser or runtime call in a bare `except Exception` to "try the other way": record the reason, make the fallback visible in the report, and let a flag decide whether it is allowed.
+  - Force UTF-8 on stdout/stderr (`sys.stdout.reconfigure(encoding="utf-8", errors="replace")`) in every Python tool that prints `✓`, `−` or library progress text; the exit status must not depend on the console codepage.
+  - Gate equivalence on a relative measure (SNR >= 90 dB or error / RMS) **and** assert the reference is not near-silent; run parity checks on a model whose output is O(0.1), and with carried state.
+  - Pin every business rule of a gate (each threshold, the T-B formula, the ordering) and every identity-carrying mapping (speaker embedding -> voices.json row -> audio) with a test that fails when that rule is broken.
+
 ---
 
 ## 5. Cross-Platform Build, Testing & Rig Tooling Discipline
@@ -212,4 +225,5 @@ Before marking any audio, rig, DSP, or ML change complete:
 - [ ] **Verified IPC writes:** Does any external API/driver configuration script check process integrity levels, read back every write, and run an end-to-end tone/signal check?
 - [ ] **Exact latency accounting:** Are ONNX sessions warmed up before `engine.start()`, and is the final stats snapshot taken *before* worker teardown?
 - [ ] **Strict causality & parity:** Are all ML/DSP features strictly causal, guarded by `#ifdef FLUXVOICE_WITH_ORT` where appropriate, and tested for parity (> 2x window for sliding caches)?
+- [ ] **Gates measure the shipped runtime and can fail:** Does every decision gate/parity check use ORT stateful timings and a relative tolerance on a non-silent output, report any exporter fallback, and exit 0 under a cp1252 console?
 - [ ] **Green hardware-free test suite:** Does `ctest --test-dir build -C Release --output-on-failure` pass 100% of unit, CLI-rejection, and `--self-test` cases without requiring an audio device?

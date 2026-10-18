@@ -259,6 +259,17 @@ if(FLUXVOICE_BUILD_TESTS)
                          tests/test_streaming.py tests/test_content_encoder.py
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
         set_tests_properties(python_training_stage03_04 PROPERTIES TIMEOUT 300)
+        add_test(NAME python_training_stage05
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider tests/test_vocoder.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        set_tests_properties(python_training_stage05 PROPERTIES TIMEOUT 300
+                             ENVIRONMENT "PYTHONIOENCODING=utf-8")
+        add_test(NAME python_training_stage06
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider tests/test_export.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        # The dynamo exporter prints emoji; keep a cp1252 console pipe from crashing it.
+        set_tests_properties(python_training_stage06 PROPERTIES TIMEOUT 600
+                             ENVIRONMENT "PYTHONIOENCODING=utf-8")
     endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)

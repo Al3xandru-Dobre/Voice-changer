@@ -61,9 +61,68 @@ class StreamingConv1d(nn.Conv1d):
                            dtype=self.weight.dtype if dtype is None else dtype)
 
 
+class StreamingConvTranspose1d(nn.ConvTranspose1d):
+    """Causal 1-D transposed convolution with right trimming (trim_right_ratio = 1.0)
+    and an explicit input-side left-context cache (Milestone 2 / Stage 05).
+
+    Without left padding, F.conv_transpose1d(x) of length T produces
+    T * s + ((k - 1) * d - (s - 1)) samples; trimming the trailing
+    trim_right = (k - 1) * d - (s - 1) samples leaves T * s samples where output
+    window [t*s, (t+1)*s) depends only on input frames t - context .. t, with
+    context = ((k - 1) * d) // s. Prepending `context` input frames (zeros in
+    forward(), the cached tail in step()) and slicing [context * s : len - trim_right]
+    makes step() and forward() run the exact same F.conv_transpose1d on the
+    exact same neighbourhood.
+    """
+
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, groups=1,
+                 bias=True):
+        super().__init__(in_channels, out_channels, kernel_size, stride=stride, padding=0,
+                         output_padding=0, groups=groups, bias=bias, dilation=dilation)
+        self.trim_right = (kernel_size - 1) * dilation - (stride - 1)
+        if self.trim_right < 0:
+            raise ValueError(f"kernel {kernel_size}, dilation {dilation} and stride {stride} give "
+                             f"negative right trim {self.trim_right}; need (k-1)*d >= s-1")
+        self.context = (kernel_size - 1) * dilation // stride
+        self.upsample_stride = stride
+        self.step_stride = 1.0 / stride
+
+    def _conv(self, x):
+        y = F.conv_transpose1d(x, self.weight, self.bias, self.stride, 0, 0,
+                               self.groups, self.dilation)
+        start = self.context * self.upsample_stride
+        end = y.shape[-1] - self.trim_right
+        return y[..., start:end]
+
+    def _check(self, x):
+        if x.shape[-1] < 1:
+            raise ValueError("input length must be >= 1")
+
+    def forward(self, x, stream=None):
+        """(B, C_in, T) -> (B, C_out, T * s). With a StreamState: one streaming step."""
+        if stream is not None:
+            return stream.run(self, x)
+        self._check(x)
+        return self._conv(F.pad(x, (self.context, 0)))
+
+    def step(self, x, cache):
+        """(chunk, cache) -> (y, new_cache)."""
+        self._check(x)
+        buf = torch.cat([cache, x], dim=-1)
+        return self._conv(buf), buf[..., buf.shape[-1] - self.context:]
+
+    def init_cache(self, batch=1, device=None, dtype=None):
+        return torch.zeros(batch, self.in_channels, self.context,
+                           device=self.weight.device if device is None else device,
+                           dtype=self.weight.dtype if dtype is None else dtype)
+
+
+STREAMING_CONVS = (StreamingConv1d, StreamingConvTranspose1d)
+
+
 def named_streaming_convs(module):
-    """(qualified name, conv) for every StreamingConv1d, in registration order."""
-    return [(n, m) for n, m in module.named_modules() if isinstance(m, StreamingConv1d)]
+    """(qualified name, conv) for every streaming conv, in registration order."""
+    return [(n, m) for n, m in module.named_modules() if isinstance(m, STREAMING_CONVS)]
 
 
 def state_layout(module):
@@ -85,11 +144,11 @@ def past_context_samples(module, input_stride=1):
     """How many past input samples the stateful convs reach back, summed along
     the chain (assumes the convs run in registration order, as a plain stack
     does). Each conv's context counts in units of the cumulative stride before it."""
-    total, hop = 0, input_stride
+    total, hop = 0.0, float(input_stride)
     for _, m in named_streaming_convs(module):
         total += m.context * hop
         hop *= m.step_stride
-    return total
+    return int(round(total))
 
 
 class StreamState:
