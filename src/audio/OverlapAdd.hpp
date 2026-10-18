@@ -25,14 +25,14 @@ class OverlapAddProcessor {
 public:
     /// Requires overlap_size <= chunk_size: the crossfade is written into the
     /// head of the output chunk.
-    OverlapAddProcessor(size_t chunk_size, size_t overlap_size)
+    OverlapAddProcessor(std::size_t chunk_size, std::size_t overlap_size)
         : chunk_size_(chunk_size),
           overlap_size_(overlap_size),
           prev_tail_(overlap_size, 0.0f),
           fade_in_(overlap_size),
           fade_out_(overlap_size) {
         assert(overlap_size <= chunk_size);
-        for (size_t i = 0; i < overlap_size_; ++i) {
+        for (std::size_t i = 0; i < overlap_size_; ++i) {
             const float phase = static_cast<float>(i) / static_cast<float>(overlap_size_);
             fade_in_[i]  = 0.5f * (1.0f - std::cos(phase * kPi));
             fade_out_[i] = 1.0f - fade_in_[i];
@@ -42,11 +42,11 @@ public:
     /// in:  vocoder output of size (chunk_size() + overlap_size())
     /// out: clean chunk of size chunk_size(), ready for the output ring buffer.
     void process(const float* vocoder_out, float* clean_out) {
-        for (size_t i = 0; i < overlap_size_; ++i)
+        for (std::size_t i = 0; i < overlap_size_; ++i)
             clean_out[i] = vocoder_out[i] * fade_in_[i] + prev_tail_[i] * fade_out_[i];
-        for (size_t i = overlap_size_; i < chunk_size_; ++i)
+        for (std::size_t i = overlap_size_; i < chunk_size_; ++i)
             clean_out[i] = vocoder_out[i];
-        for (size_t i = 0; i < overlap_size_; ++i)
+        for (std::size_t i = 0; i < overlap_size_; ++i)
             prev_tail_[i] = vocoder_out[chunk_size_ + i];
     }
 
@@ -55,8 +55,8 @@ public:
         std::fill(prev_tail_.begin(), prev_tail_.end(), 0.0f);
     }
 
-    size_t chunk_size()   const { return chunk_size_; }
-    size_t overlap_size() const { return overlap_size_; }
+    std::size_t chunk_size()   const { return chunk_size_; }
+    std::size_t overlap_size() const { return overlap_size_; }
 
     /// Crossfade curves, overlap_size() samples each.
     const float* fade_in()  const { return fade_in_.data(); }
@@ -65,8 +65,8 @@ public:
 private:
     static constexpr float kPi = 3.1415926535f;
 
-    size_t chunk_size_;
-    size_t overlap_size_;
+    std::size_t chunk_size_;
+    std::size_t overlap_size_;
     std::vector<float> prev_tail_;
     std::vector<float> fade_in_;
     std::vector<float> fade_out_;

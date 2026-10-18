@@ -14,6 +14,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
 #include <csignal>
 #include <cstdint>
 #include <cstring>
@@ -22,7 +23,9 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "audio/AudioController.hpp"

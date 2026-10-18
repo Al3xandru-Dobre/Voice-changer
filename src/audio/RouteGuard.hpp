@@ -21,6 +21,7 @@
 
 #include "audio/AudioTypes.hpp"
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -35,7 +36,7 @@ inline bool is_feedback_route(std::string_view capture, std::string_view playbac
     // VB-Audio cables: the playback end is "<cable> Input", the capture end
     // "<cable> Output", with the rest of the name identical.
     constexpr std::string_view kIn = "Input", kOut = "Output";
-    for (size_t p = playback.find(kIn); p != std::string_view::npos; p = playback.find(kIn, p + 1)) {
+    for (std::size_t p = playback.find(kIn); p != std::string_view::npos; p = playback.find(kIn, p + 1)) {
         std::string far_end(playback);
         far_end.replace(p, kIn.size(), kOut);
         if (capture == far_end) return true;

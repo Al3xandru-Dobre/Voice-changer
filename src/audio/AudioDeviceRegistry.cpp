@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <string>
 #include <utility>
+#include <variant>
 
 namespace fluxvoice {
 

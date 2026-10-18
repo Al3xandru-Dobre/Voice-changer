@@ -34,10 +34,10 @@ once, manually, on Windows (MSVC 19.50, M1 / Stage 05).
       locally (19.50, M1 / Stage 05: `NOMINMAX` on `miniaudio_headers`, C4324
       silenced around `DuplexRouter`'s queues). Apple Clang compiles this
       project for the first time in CI — expect the first run to be the judge
-- [x] Confirm the CLI tests pass on CI runners **without audio hardware** —
+- [ ] Confirm the CLI tests pass on CI runners **without audio hardware** —
       they must never open a device (argument errors are rejected in the parse
       loop, before `AudioEngine` is even constructed; `--help` exits earlier
-      still; the CI run is the proof)
+      still; the first green CI run is the proof and is still pending)
 - [x] Record supported OS versions (master open decision 1) in README §6:
       Windows 10+ · macOS 13+ · current Ubuntu LTS (24.04)
 
@@ -65,6 +65,19 @@ once, manually, on Windows (MSVC 19.50, M1 / Stage 05).
 - The 2026-10-18 session that landed this workflow had no shell available on
   the dev machine, so nothing was executed locally — the first push runs it
   for real.
+- 2026-10-19 portability audit (local MSVC only): first-party headers made
+  self-contained (owning standard includes, `std::`-qualified
+  size/fixed-width types); MSVC-style vs GNU-style warning flags now chosen
+  via `CMAKE_CXX_COMPILER_FRONTEND_VARIANT` so clang-cl gets `/W4 /WX`;
+  explicit `psapi` link replaces any reliance on `#pragma comment(lib)`;
+  ALL-built `fluxvoice_header_checks` OBJECT target compiles every
+  `src/*.hpp`, `tools/LatencyProbe.hpp` and `tests/TestSupport.hpp` in
+  isolation; new `process_memory` CTest covers the `<windows.h>`/`<psapi.h>`
+  NOMINMAX guard and link; macOS legs configure with
+  `-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0` and every job logs `cmake --version`
+  (non-Windows also `"$CXX" --version`). Verified locally on VS BuildTools
+  2026 (cl 19.51); Linux GCC/Clang and AppleClang stay unverified until the
+  first green CI push.
 
 ## Files touched
 

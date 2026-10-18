@@ -20,15 +20,16 @@
 #include <cstdint>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 using fluxvoice::StreamInfo;
 
 class AudioEngine {
 public:
-    static constexpr uint32_t kDefaultSampleRate = 16000;
-    static constexpr uint32_t kDefaultChannels   = 1;
-    static constexpr uint32_t kDefaultPeriodMs   = 20;
+    static constexpr std::uint32_t kDefaultSampleRate = 16000;
+    static constexpr std::uint32_t kDefaultChannels   = 1;
+    static constexpr std::uint32_t kDefaultPeriodMs   = 20;
 
     AudioEngine() = default;  // backend_ initialises (and owns) the context
 
@@ -70,7 +71,7 @@ public:
     /// been minted by this engine's backend.
     bool open(const fluxvoice::EndpointKey* input  = nullptr,
               const fluxvoice::EndpointKey* output = nullptr,
-              uint32_t sample_rate = kDefaultSampleRate,
+              std::uint32_t sample_rate = kDefaultSampleRate,
               bool passthrough = false,
               fluxvoice::CaptureMode capture_mode = fluxvoice::CaptureMode::OrdinaryMicrophone) {
         if (!backend_.ok() || backend_.is_stream_open()) return false;
@@ -105,28 +106,28 @@ public:
 
     bool is_open() const { return backend_.is_stream_open(); }
     bool is_running() const { return backend_.is_stream_running(); }
-    uint32_t sample_rate() const { return info_.client_sample_rate; }
+    std::uint32_t sample_rate() const { return info_.client_sample_rate; }
     const StreamInfo& stream_info() const { return info_; }
 
     // ------------------------------------------------------------------
     // Worker-thread side (NOT real-time — call from the inference thread)
     // ------------------------------------------------------------------
-    size_t read_input(float* dst, size_t max_samples) {
+    std::size_t read_input(float* dst, std::size_t max_samples) {
         return router_.read_input(dst, max_samples);
     }
-    size_t write_output(const float* src, size_t num_samples) {
+    std::size_t write_output(const float* src, std::size_t num_samples) {
         return router_.write_output(src, num_samples);
     }
-    size_t write_output_bounded(const float* src, size_t num_samples, size_t max_queued_samples) {
+    std::size_t write_output_bounded(const float* src, std::size_t num_samples, std::size_t max_queued_samples) {
         return router_.write_output_bounded(src, num_samples, max_queued_samples);
     }
 
     // ------------------------------------------------------------------
     // Telemetry (atomic — safe to read from the UI thread)
     // ------------------------------------------------------------------
-    uint64_t input_overruns()   const { return router_.input_overruns(); }
-    uint64_t output_underruns() const { return router_.output_underruns(); }
-    uint64_t frames_processed() const { return router_.frames_processed(); }
+    std::uint64_t input_overruns()   const { return router_.input_overruns(); }
+    std::uint64_t output_underruns() const { return router_.output_underruns(); }
+    std::uint64_t frames_processed() const { return router_.frames_processed(); }
 
 private:
     std::vector<fluxvoice::EndpointDescriptor> devices(fluxvoice::EndpointDirection dir) {

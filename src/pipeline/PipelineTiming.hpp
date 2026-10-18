@@ -8,10 +8,10 @@ namespace fluxvoice {
 
 /// Timing geometry @ 16 kHz.
 struct PipelineTiming {
-    static constexpr size_t kSampleRate     = 16000;
-    static constexpr size_t kChunkSamples   = 1280;  // 80 ms hop
-    static constexpr size_t kContextSamples = 320;   // 20 ms historical context
-    static constexpr size_t kOverlapSamples = 320;   // 20 ms OLA tail
+    static constexpr std::size_t kSampleRate     = 16000;
+    static constexpr std::size_t kChunkSamples   = 1280;  // 80 ms hop
+    static constexpr std::size_t kContextSamples = 320;   // 20 ms historical context
+    static constexpr std::size_t kOverlapSamples = 320;   // 20 ms OLA tail
 };
 
 } // namespace fluxvoice

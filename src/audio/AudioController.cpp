@@ -3,7 +3,13 @@
 #include "audio/RouteGuard.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
 #include <utility>
+#include <variant>
 
 namespace fluxvoice {
 

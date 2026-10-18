@@ -129,6 +129,12 @@ if(ONNXRUNTIME_ROOT)
     target_compile_definitions(fluxvoice PRIVATE FLUXVOICE_WITH_ORT=1)
 endif()
 
+# util/ProcessMemory.hpp calls GetProcessMemoryInfo: link psapi explicitly
+# instead of relying on #pragma comment(lib, ...), which is not portable.
+if(WIN32)
+    target_link_libraries(fluxvoice PRIVATE psapi)
+endif()
+
 # Route-measurement companion (M1 stages 05-06): records, plays a test tone or
 # measures latency at the far end of a virtual-cable route. See tools/fv_probe.cpp.
 add_executable(fv_probe tools/fv_probe.cpp)
@@ -140,8 +146,13 @@ fluxvoice_link_audio(fv_probe)
 # ---------------------------------------------------------------------------
 # Applied to every target built from our sources (app + tests).
 function(fluxvoice_set_warnings target)
+    # cl.exe and clang-cl share the MSVC frontend dialect (/W4, /WX);
+    # CMAKE_CXX_COMPILER_FRONTEND_VARIANT is "MSVC" for both.
+    if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        set(_msvc_frontend TRUE)
+    endif()
     if(FLUXVOICE_STRICT_WARNINGS)
-        if(MSVC)
+        if(_msvc_frontend)
             target_compile_options(${target} PRIVATE /W4)
         else()
             target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
@@ -150,7 +161,11 @@ function(fluxvoice_set_warnings target)
 
     # Dependencies are SYSTEM includes, so this only gates warnings from our code.
     if(FLUXVOICE_WARNINGS_AS_ERRORS)
-        target_compile_options(${target} PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX,-Werror>)
+        if(_msvc_frontend)
+            target_compile_options(${target} PRIVATE /WX)
+        else()
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
     endif()
 endfunction()
 
@@ -167,6 +182,11 @@ fluxvoice_set_warnings(fv_probe)
 # ---------------------------------------------------------------------------
 if(FLUXVOICE_BUILD_TESTS)
     enable_testing()
+
+    # Compile every first-party header in isolation: catches missing direct
+    # includes that transitive includes would otherwise hide. Part of ALL,
+    # no runtime test needed (see Documents/BEST_PRACTICES.md section 5).
+    include(${CMAKE_SOURCE_DIR}/cmake/CheckHeaders.cmake)
 
     foreach(_t duplex_router chunk_assembler overlap_add route_guard latency_probe audio_types
                device_registry audio_controller)
@@ -217,6 +237,17 @@ if(FLUXVOICE_BUILD_TESTS)
     target_include_directories(ola_sine_test PRIVATE src)
     fluxvoice_set_warnings(ola_sine_test)
     add_test(NAME ola_sine_wavs COMMAND ola_sine_test ${CMAKE_CURRENT_BINARY_DIR})
+
+    # Native-header/link smoke test: including util/ProcessMemory.hpp first
+    # exercises the NOMINMAX guard around <windows.h>/<psapi.h> on Windows
+    # (std::min/std::max must still compile) and the explicit psapi link.
+    add_executable(test_process_memory tests/test_process_memory.cpp)
+    target_include_directories(test_process_memory PRIVATE src tests)
+    fluxvoice_set_warnings(test_process_memory)
+    if(WIN32)
+        target_link_libraries(test_process_memory PRIVATE psapi)
+    endif()
+    add_test(NAME process_memory COMMAND test_process_memory)
 
     # Soak-log analyzer (standard-library Python) checks its own verdicts.
     find_package(Python3 COMPONENTS Interpreter)

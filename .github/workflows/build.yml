@@ -29,7 +29,7 @@ jobs:
           - { name: linux-gcc,    os: ubuntu-latest,  cc: gcc,   cxx: g++ }
           - { name: linux-clang,  os: ubuntu-latest,  cc: clang, cxx: clang++ }
           - { name: windows-msvc, os: windows-latest }
-          - { name: macos-clang,  os: macos-latest,  cc: clang, cxx: clang++ }
+          - { name: macos-clang,  os: macos-latest,  cc: clang, cxx: clang++, cmake_args: "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0" }
 
     steps:
       - name: Check out
@@ -50,11 +50,23 @@ jobs:
           key: deps-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt') }}
           restore-keys: deps-${{ matrix.name }}-
 
+      - name: Toolchain versions
+        run: cmake --version
+
+      # Log the actual compiler for the portable legs; on windows-msvc the
+      # configure step already prints the MSVC toolchain ID and version.
+      - name: Compiler version
+        if: runner.os != 'Windows'
+        shell: bash
+        run: '"$CXX" --version'
+
       - name: Configure
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DFLUXVOICE_STRICT_WARNINGS=ON
           -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+          ${{ matrix.cmake_args }}
 
       # --config is a no-op on single-config generators and selects the
       # configuration to build on the multi-config Visual Studio generator.

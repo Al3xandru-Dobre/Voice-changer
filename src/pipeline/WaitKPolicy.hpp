@@ -17,7 +17,7 @@ class WaitKPolicy {
 public:
     enum class Decision { kRead, kWrite, kFlush };
 
-    static constexpr uint32_t kTailFlushMs = 400;
+    static constexpr std::uint32_t kTailFlushMs = 400;
     static constexpr int      kMinK = 1;
     static constexpr int      kMaxK = 10;
 
@@ -36,7 +36,7 @@ public:
     void notify_target_unit() { ++t_tgt_; }
 
     /// Feed chunk energy classification each step.
-    void on_chunk_energy(bool speech_detected, uint32_t elapsed_ms) {
+    void on_chunk_energy(bool speech_detected, std::uint32_t elapsed_ms) {
         silence_ms_ = speech_detected ? 0 : silence_ms_ + elapsed_ms;
     }
 
@@ -56,12 +56,12 @@ public:
     int k() const { return k_; }
     void set_k(int k) { k_ = std::clamp(k, kMinK, kMaxK); }
 
-    int64_t t_src() const { return t_src_; }
-    int64_t t_tgt() const { return t_tgt_; }
+    std::int64_t t_src() const { return t_src_; }
+    std::int64_t t_tgt() const { return t_tgt_; }
 
 private:
     int k_;
-    int64_t  t_src_ = 0;
-    int64_t  t_tgt_ = 0;
-    uint32_t silence_ms_ = 0;
+    std::int64_t  t_src_ = 0;
+    std::int64_t  t_tgt_ = 0;
+    std::uint32_t silence_ms_ = 0;
 };

@@ -214,6 +214,51 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Use in-memory fakes (such as `FakeRemote(drop=True)` in `tools/vm_route.py`) to explicitly test failure modes (dropped writes, integrity mismatches, late underruns, memory leaks, missing markers).
   - Never commit scratch scripts under `tools/_dl/`; promote verified, self-tested scripts to `tools/` and register them in CTest.
 
+### 5.3 Self-contained headers: include what you use, qualify standard names
+- **Hazard (portability audit, 2026-10-19):** GCC/Clang/Apple Clang do not guarantee the global `size_t`/`uint64_t` aliases that MSVC's `<c...>` headers leak, and transitive includes (e.g. `std::pair` reaching a TU via `<vector>`) differ across standard-library implementations. Headers that compile on MSVC can fail on the CI Linux/macOS legs for reasons invisible locally.
+- **Rule:**
+  - Every first-party header must be self-contained: include the *owning* standard header for each name it uses, and qualify size/fixed-width types as `std::size_t` / `std::ptrdiff_t` / `std::[u]intN_t`.
+
+    | Name(s) | Owning header |
+    |---|---|
+    | `std::string`, `std::to_string` | `<string>` |
+    | `std::string_view` | `<string_view>` |
+    | `std::min`/`max`/`sort`/`any_of`/`fill`/`copy` | `<algorithm>` |
+    | `std::move`/`forward`/`pair`/`swap` | `<utility>` |
+    | `std::size_t`/`std::ptrdiff_t`/`std::nullptr_t` | `<cstddef>` |
+    | `std::[u]int8_t` … `std::[u]int64_t` | `<cstdint>` |
+    | `std::error_code`/`std::system_error`/`std::errc` | `<system_error>` |
+  - A `.cpp` includes its own header **first**, so the header can never depend on whatever that TU happened to pull in earlier.
+  - The ALL-built `fluxvoice_header_checks` OBJECT target ([`cmake/CheckHeaders.cmake`](../cmake/CheckHeaders.cmake)) compiles each `src/*.hpp`, `tools/LatencyProbe.hpp` and `tests/TestSupport.hpp` alone in its own TU — with `UNITY_BUILD` OFF and precompiled headers disabled, so global settings cannot mask a missing include.
+  - Write include paths with exact case and forward slashes against the `src/`, `tools/`, `tests/` roots — Windows' case-insensitive filesystem forgives mismatches that break Linux CI.
+  - Third-party headers stay SYSTEM includes; warning flags apply only to first-party sources. Keep native/vendor diagnostics scoped with `#pragma … push/pop` (the miniaudio implementation TU) — never file-wide or global disables.
+
+### 5.4 OS macros vs compiler/frontend, platform libraries, ISO C++20
+- **Rule:**
+  - Distinguish **OS macros** (`_WIN32`, `__APPLE__`, `__linux__`) from **compiler/frontend** macros (`_MSC_VER`, `__clang__`, `__GNUC__`): clang-cl defines *both* `__clang__` and `_MSC_VER`. In CMake, select MSVC-style flags (`/W4`, `/WX`) vs GNU-style flags (`-Wall -Wextra -Wpedantic`, `-Werror`) by `CMAKE_CXX_COMPILER_FRONTEND_VARIANT`, not by `CMAKE_CXX_COMPILER_ID` alone — an ID check sends `-Werror` to clang-cl, which rejects it.
+  - `<windows.h>`/`<psapi.h>` only inside `_WIN32` guards (with `NOMINMAX`); `<unistd.h>` only under POSIX/Linux guards; `<mach/mach.h>` only under `__APPLE__`. `util.h`-style grab-bag headers are not portable — include the specific owning header instead.
+  - Link platform libraries per-OS in CMake (`ole32`/`winmm`/`psapi` on WIN32, `dl`/`m` on UNIX, `-framework …` on APPLE) — never `#pragma comment(lib, …)`, which only MSVC honours.
+  - ISO C++20 only: no MSVC-only extensions, no GNU C extensions, and no reliance on transitive standard includes that the standard does not guarantee.
+
+### 5.5 Per-toolchain build directories & the optional ONNX Runtime SDK
+- **Rule:**
+  - Keep one build directory per native toolchain (`build/` MSVC, `build-gcc`, `build-clang`, `build-macos`) — never reuse a Visual Studio cache for Ninja/GCC or vice versa.
+  - Linux GCC (fresh dir):
+    ```bash
+    CC=gcc CXX=g++ cmake -S . -B build-gcc -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+    cmake --build build-gcc -j
+    ctest --test-dir build-gcc --output-on-failure
+    ```
+  - Linux Clang: same with `CC=clang CXX=clang++` and `-B build-clang`.
+  - macOS AppleClang (macOS 13 is the supported floor — pin the deployment target explicitly, as the CI `macos-clang` leg does):
+    ```bash
+    cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+    cmake --build build-macos -j
+    ctest --test-dir build-macos --output-on-failure
+    ```
+  - Record verification status honestly: MSVC is built locally; the Linux GCC/Clang and AppleClang legs are exercised by CI — do not claim local runs that did not happen.
+  - ONNX Runtime is optional and off by default (`ONNXRUNTIME_ROOT` unset → `FLUXVOICE_WITH_ORT` undefined → ORT code compiled out, the CI baseline). A prebuilt SDK must match the target architecture and platform: a Windows x64 SDK cannot link an ARM64 or Linux build, and the CUDA / DirectML / CoreML execution-provider builds are not interchangeable. Neural runtime wiring is still future work.
+
 ---
 
 ## 6. Quick Pre-Flight Checklist

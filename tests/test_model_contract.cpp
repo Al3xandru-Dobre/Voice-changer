@@ -20,6 +20,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef FLUXVOICE_TEST_DATA_DIR

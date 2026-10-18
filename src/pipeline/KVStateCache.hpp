@@ -10,11 +10,13 @@
 // online-zipformer-transducer-model.cc (RESEARCH_GUIDE.md §4).
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class KVStateCache {
@@ -23,18 +25,18 @@ public:
     /// TODO(M2): bind each Buffer to an Ort::Value via
     /// Ort::Value::CreateTensor(..., data.data(), num_elements(), shape).
     struct Buffer {
-        std::vector<int64_t> shape;
+        std::vector<std::int64_t> shape;
         std::vector<float>   data;
 
-        size_t num_elements() const {
-            return static_cast<size_t>(std::accumulate(
-                shape.begin(), shape.end(), int64_t{1},
-                [](int64_t a, int64_t b) { return a * b; }));
+        std::size_t num_elements() const {
+            return static_cast<std::size_t>(std::accumulate(
+                shape.begin(), shape.end(), std::int64_t{1},
+                [](std::int64_t a, std::int64_t b) { return a * b; }));
         }
     };
 
     /// Create (or return) the named buffer sized to `shape`.
-    Buffer& register_buffer(const std::string& name, std::vector<int64_t> shape) {
+    Buffer& register_buffer(const std::string& name, std::vector<std::int64_t> shape) {
         auto [it, inserted] = buffers_.try_emplace(name);
         if (inserted) {
             it->second.shape = std::move(shape);
@@ -60,7 +62,7 @@ public:
     }
 
     void clear() { buffers_.clear(); }
-    size_t size() const { return buffers_.size(); }
+    std::size_t size() const { return buffers_.size(); }
 
 private:
     std::unordered_map<std::string, Buffer> buffers_;

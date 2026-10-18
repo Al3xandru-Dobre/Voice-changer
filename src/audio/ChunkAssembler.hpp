@@ -14,7 +14,7 @@
 //
 // Usage:
 //     while (n > 0) {
-//         size_t used = asm.push(p, n);  p += used;  n -= used;
+//         std::size_t used = asm.push(p, n);  p += used;  n -= used;
 //         if (asm.ready()) { consume(asm.frame(), asm.frame_size()); asm.advance(); }
 //     }
 #pragma once
@@ -26,13 +26,13 @@
 
 class ChunkAssembler {
 public:
-    ChunkAssembler(size_t hop, size_t context)
+    ChunkAssembler(std::size_t hop, std::size_t context)
         : hop_(hop), context_(context), buf_(context + hop, 0.0f), fill_(context) {}
 
     /// Copy up to `n` samples in; stops early once a frame is complete.
     /// Returns the number of samples consumed.
-    size_t push(const float* in, size_t n) {
-        const size_t take = std::min(n, buf_.size() - fill_);
+    std::size_t push(const float* in, std::size_t n) {
+        const std::size_t take = std::min(n, buf_.size() - fill_);
         std::memcpy(buf_.data() + fill_, in, take * sizeof(float));
         fill_ += take;
         return take;
@@ -60,15 +60,15 @@ public:
         fill_ = context_;
     }
 
-    size_t hop()        const { return hop_; }
-    size_t context()    const { return context_; }
-    size_t frame_size() const { return buf_.size(); }
+    std::size_t hop()        const { return hop_; }
+    std::size_t context()    const { return context_; }
+    std::size_t frame_size() const { return buf_.size(); }
     /// New samples buffered toward the next frame (0 … hop).
-    size_t pending()    const { return fill_ - context_; }
+    std::size_t pending()    const { return fill_ - context_; }
 
 private:
-    size_t hop_;
-    size_t context_;
+    std::size_t hop_;
+    std::size_t context_;
     std::vector<float> buf_;
-    size_t fill_;
+    std::size_t fill_;
 };

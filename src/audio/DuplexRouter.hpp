@@ -29,14 +29,14 @@
 class DuplexRouter {
 public:
     // ~4 s of mono 16 kHz audio — a safety limit, not a target delay.
-    static constexpr size_t kQueueCapacity = 1 << 16;
+    static constexpr std::size_t kQueueCapacity = 1 << 16;
 
-    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+    static_assert(std::atomic<std::uint64_t>::is_always_lock_free,
                   "RT-thread counters must be lock-free on this target");
     static_assert(std::atomic<bool>::is_always_lock_free,
                   "RT-thread flags must be lock-free on this target");
 
-    explicit DuplexRouter(size_t queue_capacity = kQueueCapacity)
+    explicit DuplexRouter(std::size_t queue_capacity = kQueueCapacity)
         : in_q_(queue_capacity), out_q_(queue_capacity) {}
 
     DuplexRouter(const DuplexRouter&)            = delete;
@@ -55,12 +55,12 @@ public:
     /// (capture-only or native loopback callback, M1.5 stages 05–06). `n` is
     /// whatever the backend delivered — never assume it equals the requested
     /// period.
-    void process(float* out, const float* in, size_t n) {
+    void process(float* out, const float* in, std::size_t n) {
         if (!out) {
             if (!in) return;
             capture_frames_processed_.fetch_add(n, std::memory_order_relaxed);
             if (!passthrough_.load(std::memory_order_relaxed)) {
-                for (size_t i = 0; i < n; ++i) {
+                for (std::size_t i = 0; i < n; ++i) {
                     if (!in_q_.try_enqueue(in[i])) {
                         input_overruns_.fetch_add(n - i, std::memory_order_relaxed);
                         break;
@@ -80,7 +80,7 @@ public:
 
         // Capture → input queue (drop + count on overflow).
         if (in) {
-            for (size_t i = 0; i < n; ++i) {
+            for (std::size_t i = 0; i < n; ++i) {
                 if (!in_q_.try_enqueue(in[i])) {
                     input_overruns_.fetch_add(n - i, std::memory_order_relaxed);
                     break;
@@ -89,7 +89,7 @@ public:
         }
 
         // Output queue → device (zero-fill on underrun — never block).
-        size_t got = 0;
+        std::size_t got = 0;
         while (got < n && out_q_.try_dequeue(out[got])) ++got;
         if (got < n) {
             std::memset(out + got, 0, (n - got) * sizeof(float));
@@ -102,16 +102,16 @@ public:
     // ------------------------------------------------------------------
 
     /// Drain up to `max_samples` captured samples. Returns count read.
-    size_t read_input(float* dst, size_t max_samples) {
-        size_t n = 0;
+    std::size_t read_input(float* dst, std::size_t max_samples) {
+        std::size_t n = 0;
         while (n < max_samples && in_q_.try_dequeue(dst[n])) ++n;
         return n;
     }
 
     /// Push processed samples toward the output device. Returns how many
     /// fit; the rest are dropped by the caller's choice (never blocks).
-    size_t write_output(const float* src, size_t num_samples) {
-        size_t n = 0;
+    std::size_t write_output(const float* src, std::size_t num_samples) {
+        std::size_t n = 0;
         while (n < num_samples && out_q_.try_enqueue(src[n])) ++n;
         return n;
     }
@@ -121,11 +121,11 @@ public:
     /// headroom so `out_q_` occupancy never grows past `max_queued_samples`;
     /// the caller counts `num_samples - written` in `output_drops` so the
     /// conservation identity remains exact.
-    size_t write_output_bounded(const float* src, size_t num_samples, size_t max_queued_samples) {
+    std::size_t write_output_bounded(const float* src, std::size_t num_samples, std::size_t max_queued_samples) {
         if (max_queued_samples == 0) return write_output(src, num_samples);
-        const size_t approx = out_q_.size_approx();
+        const std::size_t approx = out_q_.size_approx();
         if (approx >= max_queued_samples) return 0;
-        const size_t limit = std::min(num_samples, max_queued_samples - approx);
+        const std::size_t limit = std::min(num_samples, max_queued_samples - approx);
         return write_output(src, limit);
     }
 
@@ -134,8 +134,8 @@ public:
     /// Control-thread only: MUST be called only after the audio callback and
     /// worker thread are both quiesced/stopped (preserves SPSC single-consumer
     /// discipline).
-    size_t discard_queues() {
-        size_t discarded = 0;
+    std::size_t discard_queues() {
+        std::size_t discarded = 0;
         float dummy = 0.0f;
         while (in_q_.try_dequeue(dummy)) ++discarded;
         while (out_q_.try_dequeue(dummy)) ++discarded;
@@ -145,25 +145,25 @@ public:
     // ------------------------------------------------------------------
     // Telemetry — atomic, safe to read from any thread.
     // ------------------------------------------------------------------
-    uint64_t input_overruns()   const { return input_overruns_.load(std::memory_order_relaxed); }
-    uint64_t output_underruns() const { return output_underruns_.load(std::memory_order_relaxed); }
-    uint64_t frames_processed() const {
-        const uint64_t out_frames = frames_processed_.load(std::memory_order_relaxed);
+    std::uint64_t input_overruns()   const { return input_overruns_.load(std::memory_order_relaxed); }
+    std::uint64_t output_underruns() const { return output_underruns_.load(std::memory_order_relaxed); }
+    std::uint64_t frames_processed() const {
+        const std::uint64_t out_frames = frames_processed_.load(std::memory_order_relaxed);
         return out_frames > 0 ? out_frames
                               : capture_frames_processed_.load(std::memory_order_relaxed);
     }
-    uint64_t capture_frames_processed() const {
+    std::uint64_t capture_frames_processed() const {
         return capture_frames_processed_.load(std::memory_order_relaxed);
     }
-    size_t   input_queued_approx()  const { return in_q_.size_approx(); }
-    size_t   output_queued_approx() const { return out_q_.size_approx(); }
+    std::size_t   input_queued_approx()  const { return in_q_.size_approx(); }
+    std::size_t   output_queued_approx() const { return out_q_.size_approx(); }
 
 private:
     std::atomic<bool>     passthrough_{false};
-    std::atomic<uint64_t> input_overruns_{0};
-    std::atomic<uint64_t> output_underruns_{0};
-    std::atomic<uint64_t> frames_processed_{0};
-    std::atomic<uint64_t> capture_frames_processed_{0};
+    std::atomic<std::uint64_t> input_overruns_{0};
+    std::atomic<std::uint64_t> output_underruns_{0};
+    std::atomic<std::uint64_t> frames_processed_{0};
+    std::atomic<std::uint64_t> capture_frames_processed_{0};
 
     moodycamel::ReaderWriterQueue<float> in_q_;
     moodycamel::ReaderWriterQueue<float> out_q_;

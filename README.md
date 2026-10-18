@@ -214,8 +214,8 @@ FluxVoice-S2UT/
 
 - CMake ≥ 3.22
 - C++20 compiler — MSVC 2022 / GCC 12+ / Clang 15+
-- ONNX Runtime C++ SDK (CUDA, DirectML or CoreML execution provider) — *required from Milestone 2*
-- Virtual audio cable — VB-Cable (Windows) / BlackHole (macOS) / PipeWire virtual sink (Linux)
+- ONNX Runtime C++ SDK — optional (`-DONNXRUNTIME_ROOT=`); the SDK's OS, architecture and execution-provider build (CUDA / DirectML / CoreML are not interchangeable) must match the target. *Needed only when the neural stages get wired in — the default build is ORT-free.*
+- Virtual audio cable — VB-Cable (Windows) / BlackHole (macOS) / PipeWire virtual sink (Linux). **Runtime only**, for live routing: building and the whole `ctest` suite are hardware-free and need neither a cable nor an audio device
 
 ### Quick start
 
@@ -234,6 +234,32 @@ powershell -ExecutionPolicy Bypass -File tools/setup_test_rig.ps1   # Windows: c
 > Header-only deps (miniaudio, readerwriterqueue) are fetched automatically via `FetchContent`.
 > Point `-DONNXRUNTIME_ROOT=/path/to/onnxruntime` at a prebuilt SDK when wiring the neural stages.
 > CI (`.github/workflows/build.yml`, M1.5 stage 01) builds Linux GCC/Clang, Windows MSVC and macOS Apple Clang with `-DFLUXVOICE_WARNINGS_AS_ERRORS=ON` and runs `ctest` on every push.
+
+### Per-toolchain builds (warnings-as-errors, matching CI)
+
+Keep a separate build directory per toolchain — never reuse a CMake cache across generators. See [Documents/BEST_PRACTICES.md §5](Documents/BEST_PRACTICES.md#5-cross-platform-build-testing--rig-tooling-discipline) for the include/portability rules these builds enforce (`fluxvoice_header_checks` compiles every first-party header in isolation as part of ALL):
+
+```bash
+# Windows / MSVC — Developer PowerShell, multi-config VS generator
+cmake -S . -B build -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+
+# Linux GCC — fresh dir
+CC=gcc CXX=g++ cmake -S . -B build-gcc -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+cmake --build build-gcc -j
+ctest --test-dir build-gcc --output-on-failure
+
+# Linux Clang — fresh dir
+CC=clang CXX=clang++ cmake -S . -B build-clang -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+cmake --build build-clang -j
+ctest --test-dir build-clang --output-on-failure
+
+# macOS AppleClang — macOS 13 is the supported floor (CI passes the same target)
+cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+cmake --build build-macos -j
+ctest --test-dir build-macos --output-on-failure
+```
 
 ---
 

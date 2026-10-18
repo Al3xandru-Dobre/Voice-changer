@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <iterator>
@@ -73,7 +74,7 @@ inline TensorDtype dtype_from_string(std::string_view s) {
 struct TensorSpec {
     std::string          name;
     TensorDtype          dtype = TensorDtype::kF32;
-    std::vector<int64_t> shape;
+    std::vector<std::int64_t> shape;
     bool                 has_shape = true;
 };
 
@@ -97,10 +98,10 @@ struct ModelContract {
     std::string              license;
 
     /// Samples consumed (encoder) or produced (vocoder) per Run.
-    int64_t hop() const { return int64_t{frames_per_step} * frame_samples; }
-    int64_t cond_frames() const { return cond_frame_samples > 0 ? hop() / cond_frame_samples : 0; }
+    std::int64_t hop() const { return std::int64_t{frames_per_step} * frame_samples; }
+    std::int64_t cond_frames() const { return cond_frame_samples > 0 ? hop() / cond_frame_samples : 0; }
     /// Vocoder `audio` output length: hop plus the OLA tail.
-    int64_t output_samples() const { return hop() + overlap_samples; }
+    std::int64_t output_samples() const { return hop() + overlap_samples; }
 
     /// Encoder output = vocoder input: `units` (i64 ids) or `content` (f32).
     const char* content_name() const { return content_kind == ContentKind::kDiscrete ? "units" : "content"; }
@@ -115,7 +116,7 @@ struct ModelContract {
         if (role == ModelRole::kEncoder) return {{"audio", TensorDtype::kF32, {1, hop()}}};
         std::vector<TensorSpec> specs{content_spec()};
         for (const auto& name : cond_inputs)
-            specs.push_back({name, TensorDtype::kF32, {1, name == "spk_emb" ? int64_t{spk_emb_dim} : cond_frames()}});
+            specs.push_back({name, TensorDtype::kF32, {1, name == "spk_emb" ? std::int64_t{spk_emb_dim} : cond_frames()}});
         return specs;
     }
 
@@ -131,9 +132,9 @@ inline constexpr std::string_view kStateIn  = "state_in.";
 inline constexpr std::string_view kStateOut = "state_out.";
 
 /// "[1,320]"; dynamic dimensions print as "?".
-inline std::string format_shape(const std::vector<int64_t>& shape) {
+inline std::string format_shape(const std::vector<std::int64_t>& shape) {
     std::string s = "[";
-    for (size_t i = 0; i < shape.size(); ++i) {
+    for (std::size_t i = 0; i < shape.size(); ++i) {
         if (i) s += ',';
         s += shape[i] < 0 ? std::string("?") : std::to_string(shape[i]);
     }
@@ -195,14 +196,14 @@ inline bool get_int(const Json& obj, const char* key, int& out, std::string& err
     // Booleans and floats (320.0) are not integers. An integer literal beyond
     // 64 bits parses as a float here (Python says "out of range" instead).
     if (!it->is_number_integer()) return fail(error, key_msg(key, "must be an integer"));
-    constexpr int64_t kMin = std::numeric_limits<int32_t>::min(), kMax = std::numeric_limits<int32_t>::max();
-    int64_t v = 0;
+    constexpr std::int64_t kMin = std::numeric_limits<std::int32_t>::min(), kMax = std::numeric_limits<std::int32_t>::max();
+    std::int64_t v = 0;
     if (it->is_number_unsigned()) {
-        const auto u = it->get<uint64_t>();
-        if (u > static_cast<uint64_t>(kMax)) return fail(error, key_msg(key, "is out of range"));
-        v = static_cast<int64_t>(u);
+        const auto u = it->get<std::uint64_t>();
+        if (u > static_cast<std::uint64_t>(kMax)) return fail(error, key_msg(key, "is out of range"));
+        v = static_cast<std::int64_t>(u);
     } else {
-        v = it->get<int64_t>();
+        v = it->get<std::int64_t>();
         if (v < kMin || v > kMax) return fail(error, key_msg(key, "is out of range"));
     }
     out = static_cast<int>(v);
@@ -285,7 +286,7 @@ inline bool validate_contract(const ModelContract& c, std::string& error) {
     if (c.role == ModelRole::kEncoder) {
         const bool set[] = {c.cond_frame_samples != 0, !c.cond_inputs.empty(), c.spk_emb_dim != 0,
                             c.overlap_samples != 0};
-        for (size_t i = 0; i < std::size(set); ++i)
+        for (std::size_t i = 0; i < std::size(set); ++i)
             if (set[i]) return fail(error, misplaced_key_message(kVocoderKeys[i], c.role, c.content_kind));
     }
 
@@ -418,8 +419,8 @@ inline bool validate_pair(const ModelContract& enc, const ModelContract& voc, st
 /// Samples from an input sample to the output that describes it, for a valid
 /// pair: hop (framing) + (L_enc + L_voc) x frame_samples + overlap_samples.
 /// Device I/O and compute come on top (master latency budget).
-inline int64_t algorithmic_latency_samples(const ModelContract& enc, const ModelContract& voc) {
-    return enc.hop() + (int64_t{enc.lookahead_frames} + voc.lookahead_frames) * enc.frame_samples +
+inline std::int64_t algorithmic_latency_samples(const ModelContract& enc, const ModelContract& voc) {
+    return enc.hop() + (std::int64_t{enc.lookahead_frames} + voc.lookahead_frames) * enc.frame_samples +
            voc.overlap_samples;
 }
 
@@ -445,9 +446,9 @@ inline bool validate_io(const ModelContract& c, const std::vector<TensorSpec>& i
                                    ", state_out." + x + " is " + to_string(o->dtype));
         // The loader sizes every state buffer once, from the graph.
         if (!i->has_shape) return fail(error, "state '" + x + "' has no shape in the graph");
-        if (std::any_of(i->shape.begin(), i->shape.end(), [](int64_t d) { return d < 0; }))
+        if (std::any_of(i->shape.begin(), i->shape.end(), [](std::int64_t d) { return d < 0; }))
             return fail(error, "state '" + x + "' has a dynamic shape " + format_shape(*i));
-        if (std::any_of(i->shape.begin(), i->shape.end(), [](int64_t d) { return d == 0; }))
+        if (std::any_of(i->shape.begin(), i->shape.end(), [](std::int64_t d) { return d == 0; }))
             return fail(error, "state '" + x + "' has an empty dimension " + format_shape(*i));
         if (!o->has_shape || i->shape != o->shape)
             return fail(error, "state '" + x + "' changes shape: state_in." + x + " is " + format_shape(*i) +

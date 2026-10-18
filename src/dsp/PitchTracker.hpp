@@ -119,13 +119,13 @@ public:
         : cfg_(cfg),
           tau_min_(cfg.tau_min()),
           tau_max_(cfg.tau_max()),
-          integration_(static_cast<size_t>(cfg.integration_samples())),
-          hop_(static_cast<size_t>(cfg.frame_samples)),
-          window_(static_cast<size_t>(cfg.window_samples)),
+          integration_(static_cast<std::size_t>(cfg.integration_samples())),
+          hop_(static_cast<std::size_t>(cfg.frame_samples)),
+          window_(static_cast<std::size_t>(cfg.window_samples)),
           hold_decay_(cfg.hold_decay()),
           hpf_(BiquadCoefficients::high_pass(cfg.hpf_hz, cfg.sample_rate, cfg.hpf_q)),
-          history_(static_cast<size_t>(cfg.history_samples()), 0.0),
-          cmnd_(static_cast<size_t>(tau_max_) + 1, 1.0) {
+          history_(static_cast<std::size_t>(cfg.history_samples()), 0.0),
+          cmnd_(static_cast<std::size_t>(tau_max_) + 1, 1.0) {
         assert(cfg_.valid());
         reset();
     }
@@ -137,15 +137,15 @@ public:
         std::copy(history_.begin() + static_cast<std::ptrdiff_t>(hop_), history_.end(),
                   history_.begin());
         double* tail = history_.data() + history_.size() - hop_;
-        for (size_t i = 0; i < hop_; ++i) tail[i] = hpf_.process(static_cast<double>(frame[i]));
+        for (std::size_t i = 0; i < hop_; ++i) tail[i] = hpf_.process(static_cast<double>(frame[i]));
 
-        const size_t frame_end = history_.size() - static_cast<size_t>(cfg_.lookahead_frames) * hop_;
+        const std::size_t frame_end = history_.size() - static_cast<std::size_t>(cfg_.lookahead_frames) * hop_;
         const double* cur = history_.data() + frame_end - hop_;
-        const double* win = history_.data() + frame_end + static_cast<size_t>(cfg_.window_offset()) - window_;
+        const double* win = history_.data() + frame_end + static_cast<std::size_t>(cfg_.window_offset()) - window_;
 
         // 2. Energy.
         double sum_sq = 0.0;
-        for (size_t i = 0; i < hop_; ++i) sum_sq += cur[i] * cur[i];
+        for (std::size_t i = 0; i < hop_; ++i) sum_sq += cur[i] * cur[i];
         const double log_energy = std::log(sum_sq / static_cast<double>(hop_) + cfg_.energy_eps);
         energy_norm_.update(log_energy);
         const double z_energy = energy_norm_.z(log_energy);
@@ -191,14 +191,14 @@ public:
     }
 
     const PitchTrackerConfig& config() const { return cfg_; }
-    size_t frame_samples() const { return hop_; }
+    std::size_t frame_samples() const { return hop_; }
     const BiquadCoefficients& hpf_coefficients() const { return hpf_.coefficients(); }
 
 private:
     /// Aperiodicity of one window; `f0` gets the estimate (0 only for silence).
     double yin(const double* x, double& f0) {
         double energy = 0.0;
-        for (size_t i = 0; i < window_; ++i) energy += x[i] * x[i];
+        for (std::size_t i = 0; i < window_; ++i) energy += x[i] * x[i];
         if (energy < cfg_.silence_mean_square * static_cast<double>(window_)) {
             f0 = 0.0;
             return 1.0;
@@ -210,33 +210,33 @@ private:
         for (int tau = 1; tau <= tau_max_; ++tau) {
             const double* y = x + tau;
             double s = 0.0;
-            for (size_t j = 0; j < integration_; ++j) {
+            for (std::size_t j = 0; j < integration_; ++j) {
                 const double diff = y[j] - x[j];
                 s += diff * diff;
             }
             cum += s;
-            cmnd_[static_cast<size_t>(tau)] = cum > 0.0 ? s * tau / cum : 1.0;
+            cmnd_[static_cast<std::size_t>(tau)] = cum > 0.0 ? s * tau / cum : 1.0;
         }
 
         int best = tau_min_;
         for (int tau = tau_min_ + 1; tau <= tau_max_; ++tau)
-            if (cmnd_[static_cast<size_t>(tau)] < cmnd_[static_cast<size_t>(best)]) best = tau;
-        const double aperiodicity = cmnd_[static_cast<size_t>(best)];
+            if (cmnd_[static_cast<std::size_t>(tau)] < cmnd_[static_cast<std::size_t>(best)]) best = tau;
+        const double aperiodicity = cmnd_[static_cast<std::size_t>(best)];
 
         int tau = best;   // YIN's fallback: the global minimum
         if (aperiodicity < cfg_.f0_threshold) {
             // First dip below the threshold, then down to its local minimum.
             tau = tau_min_;
-            while (cmnd_[static_cast<size_t>(tau)] >= cfg_.f0_threshold) ++tau;
+            while (cmnd_[static_cast<std::size_t>(tau)] >= cfg_.f0_threshold) ++tau;
             while (tau + 1 <= tau_max_ &&
-                   cmnd_[static_cast<size_t>(tau) + 1] < cmnd_[static_cast<size_t>(tau)])
+                   cmnd_[static_cast<std::size_t>(tau) + 1] < cmnd_[static_cast<std::size_t>(tau)])
                 ++tau;
         }
         double shift = 0.0;
         if (tau + 1 <= tau_max_) {
-            const double a = cmnd_[static_cast<size_t>(tau) - 1];
-            const double b = cmnd_[static_cast<size_t>(tau)];
-            const double c = cmnd_[static_cast<size_t>(tau) + 1];
+            const double a = cmnd_[static_cast<std::size_t>(tau) - 1];
+            const double b = cmnd_[static_cast<std::size_t>(tau)];
+            const double c = cmnd_[static_cast<std::size_t>(tau) + 1];
             const double den = a - 2.0 * b + c;
             if (den > 0.0) shift = 0.5 * (a - c) / den;
         }
@@ -247,9 +247,9 @@ private:
     PitchTrackerConfig cfg_;
     int tau_min_;
     int tau_max_;
-    size_t integration_;
-    size_t hop_;
-    size_t window_;
+    std::size_t integration_;
+    std::size_t hop_;
+    std::size_t window_;
     double hold_decay_;
     Biquad hpf_;
     std::vector<double> history_;

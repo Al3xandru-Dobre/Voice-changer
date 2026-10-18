@@ -20,6 +20,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -27,6 +28,7 @@
 #include <fstream>
 #include <new>
 #include <random>
+#include <ratio>
 #include <sstream>
 #include <string>
 #include <vector>
