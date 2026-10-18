@@ -4,7 +4,8 @@
 > [Documents index](../README.md) ·
 > Research basis: [Textless VC research](../Research_documents/M2_TEXTLESS_VC_RESEARCH.md)
 
-**Status:** ☐ not started — stage files written 2026-10-18
+**Status:** ◐ in progress — Stage 02 done; Stage 01 harness and baseline done, training
+corpora downloading (2026-10-18)
 **Goal from README:** *Export causal encoder + custom Unit-HiFi-GAN to ONNX.
 Run Mode A (voice changer without translation) in C++ with stateful KV/CNN
 padding caches.*
@@ -86,8 +87,8 @@ C++ track: 02 (contract) ─► 07 (ORT C++) ──┴─► 08 (RT) ─► 09 �
 
 | # | Stage | Research | Output | Status |
 |---|---|---|---|---|
-| 01 | [Python toolchain, datasets & evaluation harness](01_python_toolchain_eval_harness.md) | §6 §7 | `uv sync --frozen` env; manifests; `eval_vc.py` baseline numbers | ☐ |
-| 02 | [Model contract & fixture models](02_model_contract_fixtures.md) | §8 §9 | `ModelContract.hpp` + `fvml/contract.py`; fixtures in `tests/data/` | ☐ |
+| 01 | [Python toolchain, datasets & evaluation harness](01_python_toolchain_eval_harness.md) | §6 §7 | `uv sync --frozen` env; manifests; `eval_vc.py` baseline numbers | ◐ env, lists, harness, baseline (WER 1.54 %) done; training corpora downloading |
+| 02 | [Model contract & fixture models](02_model_contract_fixtures.md) | §8 §9 | `ModelContract.hpp` + `fvml/contract.py`; fixtures in `tests/data/` | ☑ |
 | 03 | [Causal pitch & energy features](03_causal_pitch_energy.md) | §4 | YIN + whitening, Python ↔ C++ golden parity | ☐ |
 | 04 | [Content encoder candidates](04_content_encoder_candidates.md) | §2 §7 | km100 teacher; causal student L∈{0,1,2}; Mimi kill decision | ☐ |
 | 05 | [Causal vocoder & decision gate](05_causal_vocoder_decision_gate.md) | §5 §7 §11 | Multi-speaker vocoder; gate table; encoder decision | ☐ |
@@ -165,7 +166,7 @@ at 16 kHz with 10 ms device periods. The values are **estimates** until Stage
 | 3 | Teacher | HuBERT-Base (English, MIT); mHuBERT-147 deferred to M3 (NC licence) | Stage 04 |
 | 4 | Hop / lookahead | Chosen by the gate (expected: L=1 at 20 ms hops) | Stage 05 |
 | 5 | Role of "own voice" | A target row ("Me") in the multi-speaker vocoder | Stage 10 |
-| 6 | `python_training/requirements.txt` | Generated from `uv.lock` (`uv export`) for non-uv users | Stage 01 |
+| 6 | `python_training/requirements.txt` | Generated from `uv.lock` (`uv export`) for non-uv users — **adopted** (Stage 01) | Stage 01 |
 | 7 | Encoder decision (filled by the gate) | — | Stage 05 |
 
 ## Risks & mitigations

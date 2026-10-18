@@ -1,0 +1,24 @@
+{
+  "description": "The M3 translator role is not in v1",
+  "error": "unknown role 'translator' (expected encoder or vocoder)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "translator",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

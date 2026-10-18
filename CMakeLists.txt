@@ -45,13 +45,26 @@ if(FLUXVOICE_FETCH_DEPS)
         GIT_SHALLOW    TRUE
         SOURCE_SUBDIR  "__no_cmakelists__")
 
-    FetchContent_MakeAvailable(miniaudio readerwriterqueue)
+    # nlohmann/json (Milestone 2: model contracts in Stage 02, presets in Stage 09).
+    # The release tarball, pinned by hash; only its headers are used.
+    if(POLICY CMP0135)
+        cmake_policy(SET CMP0135 NEW)   # extracted files get the extraction time
+    endif()
+    FetchContent_Declare(nlohmann_json
+        URL           https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+        URL_HASH      SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
+        SOURCE_SUBDIR "__no_cmakelists__")
+
+    FetchContent_MakeAvailable(miniaudio readerwriterqueue nlohmann_json)
 
     add_library(miniaudio_headers INTERFACE)
     target_include_directories(miniaudio_headers SYSTEM INTERFACE ${miniaudio_SOURCE_DIR})
 
     add_library(rwqueue_headers INTERFACE)
     target_include_directories(rwqueue_headers SYSTEM INTERFACE ${readerwriterqueue_SOURCE_DIR})
+
+    add_library(nlohmann_json_headers INTERFACE)
+    target_include_directories(nlohmann_json_headers SYSTEM INTERFACE ${nlohmann_json_SOURCE_DIR}/include)
 else()
     # Fallback: expect vendored copies under third_party/
     add_library(miniaudio_headers INTERFACE)
@@ -59,6 +72,9 @@ else()
 
     add_library(rwqueue_headers INTERFACE)
     target_include_directories(rwqueue_headers SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/third_party/readerwriterqueue)
+
+    add_library(nlohmann_json_headers INTERFACE)
+    target_include_directories(nlohmann_json_headers SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/third_party/nlohmann_json/include)
 endif()
 
 # miniaudio's implementation pulls in <windows.h>, whose min/max macros break
@@ -80,6 +96,9 @@ endif()
 # ---------------------------------------------------------------------------
 add_executable(fluxvoice
     src/main.cpp
+    src/audio/AudioController.cpp
+    src/audio/AudioDeviceRegistry.cpp
+    src/audio/MiniaudioBackend.cpp
     src/pipeline/InferencePipeline.cpp
     src/ui/AppWindow.cpp
 )
@@ -149,13 +168,39 @@ fluxvoice_set_warnings(fv_probe)
 if(FLUXVOICE_BUILD_TESTS)
     enable_testing()
 
-    foreach(_t duplex_router chunk_assembler overlap_add route_guard latency_probe)
+    foreach(_t duplex_router chunk_assembler overlap_add route_guard latency_probe audio_types
+               device_registry audio_controller)
         add_executable(test_${_t} tests/test_${_t}.cpp)
         target_include_directories(test_${_t} PRIVATE src tests tools)
         target_link_libraries(test_${_t} PRIVATE rwqueue_headers Threads::Threads)
         fluxvoice_set_warnings(test_${_t})
         add_test(NAME ${_t} COMMAND test_${_t})
     endforeach()
+
+    # The registry and controller tests link their implementations over a fake
+    # backend (no miniaudio, no hardware).
+    target_sources(test_device_registry PRIVATE src/audio/AudioDeviceRegistry.cpp)
+    target_sources(test_audio_controller PRIVATE
+        src/audio/AudioController.cpp
+        src/audio/AudioDeviceRegistry.cpp
+        src/pipeline/InferencePipeline.cpp)
+
+    # M2 stage 02: model contract v1, ORT-free. Runs the cases in
+    # tests/data/contracts/ (shared with the Python twin) and the fixture manifest.
+    add_executable(test_model_contract tests/test_model_contract.cpp)
+    target_include_directories(test_model_contract PRIVATE src tests)
+    target_link_libraries(test_model_contract PRIVATE nlohmann_json_headers)
+    fluxvoice_set_warnings(test_model_contract)
+    add_test(NAME model_contract COMMAND test_model_contract ${CMAKE_SOURCE_DIR}/tests/data)
+
+    # M2 stage 03: causal YIN tracker vs the Python golden vectors (ORT-free).
+    # Picked up at configure time once tests/test_pitch_tracker.cpp exists.
+    if(EXISTS ${CMAKE_SOURCE_DIR}/tests/test_pitch_tracker.cpp)
+        add_executable(test_pitch_tracker tests/test_pitch_tracker.cpp)
+        target_include_directories(test_pitch_tracker PRIVATE src tests)
+        fluxvoice_set_warnings(test_pitch_tracker)
+        add_test(NAME pitch_tracker COMMAND test_pitch_tracker ${CMAKE_SOURCE_DIR}/tests/data/pitch)
+    endif()
 
     # OLA listening aid: writes reference / butt-joined / crossfaded WAVs into
     # the build directory. Run as a test so it keeps building and working.
@@ -177,11 +222,43 @@ if(FLUXVOICE_BUILD_TESTS)
         set_tests_properties(vm_route_help PROPERTIES PASS_REGULAR_EXPRESSION "usage")
         add_test(NAME vm_route_selftest
                  COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/vm_route.py --self-test)
+
+        # M2 stage 02: the Python twin of the contract validator, and the committed
+        # fixtures against their manifest. Both standard library only.
+        add_test(NAME model_contract_py
+                 COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/python_training/tests/test_contract.py)
+        add_test(NAME fixture_models_selftest
+                 COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/make_fixture_models.py --self-test)
+    endif()
+
+    # M2 stages 01-02 with the pinned training environment (Python 3.12, onnx,
+    # onnxruntime, ...; `uv sync --frozen` in python_training/). Registered only
+    # when that environment exists, so plain CI builds skip it.
+    if(WIN32)
+        set(_training_python ${CMAKE_SOURCE_DIR}/python_training/.venv/Scripts/python.exe)
+    else()
+        set(_training_python ${CMAKE_SOURCE_DIR}/python_training/.venv/bin/python)
+    endif()
+    if(EXISTS ${_training_python})
+        add_test(NAME python_training_stage01_02
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                         tests/test_contract.py tests/test_fixtures.py tests/test_prepare_data.py
+                         tests/test_eval_tools.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        add_test(NAME python_training_stage03_04
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider tests/test_features.py
+                         tests/test_streaming.py tests/test_content_encoder.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        set_tests_properties(python_training_stage03_04 PROPERTIES TIMEOUT 300)
     endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)
     add_test(NAME cli_help_short COMMAND fluxvoice -h)
     set_tests_properties(cli_help PROPERTIES PASS_REGULAR_EXPRESSION "Usage:")
+
+    # M1.5 stage 04: the help documents index|default device selection.
+    add_test(NAME cli_help_selection COMMAND fluxvoice --help)
+    set_tests_properties(cli_help_selection PROPERTIES PASS_REGULAR_EXPRESSION "input.*default")
 
     # Each of these must exit non-zero without touching an audio device.
     set(_bad_args_unknown        --bogus)
@@ -192,8 +269,12 @@ if(FLUXVOICE_BUILD_TESTS)
     set(_bad_args_rate_range     --sample-rate 0)
     set(_bad_args_duration_zero  --duration 0)
     set(_bad_args_stats_zero     --stats 0)
+    set(_bad_args_input_word         --input mic1)
+    set(_bad_args_input_float        --input 1.5)
+    set(_bad_args_input_upper        --input DEFAULT)
+    set(_bad_args_input_and_loopback --input 0 --loopback-input 0)
     foreach(_case unknown missing_value non_numeric negative trailing_junk rate_range
-                  duration_zero stats_zero)
+                  duration_zero stats_zero input_word input_float input_upper input_and_loopback)
         add_test(NAME cli_rejects_${_case} COMMAND fluxvoice ${_bad_args_${_case}})
         set_tests_properties(cli_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()
@@ -202,16 +283,17 @@ if(FLUXVOICE_BUILD_TESTS)
     set_tests_properties(probe_help PROPERTIES PASS_REGULAR_EXPRESSION "Usage:")
 
     # Rejected before an audio context is even created.
-    set(_probe_args_no_command      --input 0)
-    set(_probe_args_no_input        record out.wav)
-    set(_probe_args_no_output       latency --input 0)
-    set(_probe_args_no_wav          tone --input 0 --output 0)
-    set(_probe_args_latency_wav     latency --input 0 --output 0 out.wav)
-    set(_probe_args_short_interval  latency --input 0 --output 0 --interval-ms 50)
-    set(_probe_args_two_commands    record latency --input 0 out.wav)
-    set(_probe_args_name_and_index  tone --input 0 --input-name CABLE --output 0 out.wav)
+    set(_probe_args_no_command         --input 0)
+    set(_probe_args_no_input           record out.wav)
+    set(_probe_args_no_output          latency --input 0)
+    set(_probe_args_no_wav             tone --input 0 --output 0)
+    set(_probe_args_latency_wav        latency --input 0 --output 0 out.wav)
+    set(_probe_args_short_interval     latency --input 0 --output 0 --interval-ms 50)
+    set(_probe_args_two_commands       record latency --input 0 out.wav)
+    set(_probe_args_name_and_index     tone --input 0 --input-name CABLE --output 0 out.wav)
+    set(_probe_args_loopback_with_tone tone --loopback --input 0 --output 0 out.wav)
     foreach(_case no_command no_input no_output no_wav latency_wav short_interval two_commands
-                  name_and_index)
+                  name_and_index loopback_with_tone)
         add_test(NAME probe_rejects_${_case} COMMAND fv_probe ${_probe_args_${_case}})
         set_tests_properties(probe_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()

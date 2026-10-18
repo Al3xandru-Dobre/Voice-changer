@@ -1,0 +1,28 @@
+{
+  "description": "Negative embedding size",
+  "error": "spk_emb_dim must be between 0 and 4096 (got -1)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "cond_frame_samples": 320,
+        "cond_inputs": [
+          "logf0"
+        ],
+        "spk_emb_dim": -1,
+        "overlap_samples": 0,
+        "states": [
+          "dec"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

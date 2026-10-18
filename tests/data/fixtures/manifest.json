@@ -1,0 +1,738 @@
+{
+  "generator": "tools/make_fixture_models.py",
+  "opset": 17,
+  "ir_version": 8,
+  "models": [
+    {
+      "file": "identity/encoder_s1.onnx",
+      "sha256": "302bc0d93d8ca2f4db33c362ac1fee12a5c387052dc1df2c444467682011d065",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "identity/vocoder_s1.onnx",
+      "sha256": "d7e4bcc6cf5ea804986013fbeff0367e8e2e2bbe1106f1af526459c7fe96b0c0",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[\"logf0\",\"voicing\",\"aperiodicity\",\"energy\",\"spk_emb\"],\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":4,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "identity/encoder_s2.onnx",
+      "sha256": "5fededd927e8e43f39225c49f43fb274f12579554e407c0f53454052f55bc69a",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":2,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              640
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2,
+              320
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "identity/vocoder_s2.onnx",
+      "sha256": "4c91317b7651998183ab7a7e1d36c4cd118d09c8a02b2add36be2109cacbfbac",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[\"logf0\",\"voicing\",\"aperiodicity\",\"energy\",\"spk_emb\"],\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":2,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":4,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2,
+              320
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              640
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "identity/encoder_s4.onnx",
+      "sha256": "444808542cddb2aa37287fffa4d5ca1c562c42491666a120a02d0e88236eb54b",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":4,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1280
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              320
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "identity/vocoder_s4.onnx",
+      "sha256": "c3e0eeef64d74cca6b8b0f83c950ce07e24320f4cebfbb860aabf502023cbebf",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[\"logf0\",\"voicing\",\"aperiodicity\",\"energy\",\"spk_emb\"],\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":4,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":4,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              320
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1280
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "delay_s1.onnx",
+      "sha256": "324406e43c44d0586c36c549fd7bd65c8645a7d052d7490073e1c7df9dec18ae",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[],\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":1,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":0,\"states\":[\"buf\"]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_in.buf",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_out.buf",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "accumulator_s1.onnx",
+      "sha256": "d799719d45502c9c93e01789adc49e0a9b69e924a16c095c1519e9f6ad131a0b",
+      "contract": "{\"content_dim\":1,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[\"acc\"]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_in.acc",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.acc",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "broken/no_contract.onnx",
+      "sha256": "7e0978cadcf57ef8e31794da3dd7867f8c5f7513c399f85547d9441903bf63d3",
+      "contract": null,
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "model has no 'fluxvoice.contract' metadata"
+    },
+    {
+      "file": "broken/not_json.onnx",
+      "sha256": "2210ef43ee54f06f4b0bab77e95212c30dc4413b1e168cfac898aeba0eb14531",
+      "contract": "{\"contract_version\": 1, \"role\": ",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "contract is not valid JSON"
+    },
+    {
+      "file": "broken/unknown_version.onnx",
+      "sha256": "4dd0474937c8b4825ba32b11d592e95804f600412c8ff6e004e22121c4024ffe",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "unsupported contract_version 2 (this build reads version 1)"
+    },
+    {
+      "file": "broken/missing_key.onnx",
+      "sha256": "e158c74db80372037553a046601c29273f4a7b55130e45bc20a12224255d02f6",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "missing key 'sample_rate'"
+    },
+    {
+      "file": "broken/wrong_input_name.onnx",
+      "sha256": "94ec9d316e96c677efcaa4b7168ac10eed9a4ea8c0f862697362456e85d76ad6",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "wav",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "missing graph input 'audio'"
+    },
+    {
+      "file": "broken/wrong_shape.onnx",
+      "sha256": "705fab22f29894d0742591dc27565f56f41b985ec55b03d09414b4683072b71c",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              640
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "graph input 'audio' has shape [1,640], contract expects [1,320]"
+    },
+    {
+      "file": "broken/dynamic_shape.onnx",
+      "sha256": "2479c22168accdd5cc93dbcdd36c6a6940776890ab2d6a0f43669062dfffd572",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              -1
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              -1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "graph input 'audio' has shape [1,?], contract expects [1,320]"
+    },
+    {
+      "file": "broken/wrong_dtype.onnx",
+      "sha256": "9837a3ad91b3e15291894b5c211b81cbdfa049bdfd9ca175f5adb58b65b6488c",
+      "contract": "{\"content_kind\":\"discrete\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[],\"vocab\":320}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "graph output 'units' has dtype f32, contract expects i64"
+    },
+    {
+      "file": "broken/unpaired_state.onnx",
+      "sha256": "056f2e68e9cbee334660e6b52f70e9eb7f28879f40840f57beda882fa84e3cfa",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[],\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":1,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":0,\"states\":[\"buf\"]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_in.buf",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "unpaired state 'buf': state_in.buf has no state_out.buf"
+    },
+    {
+      "file": "broken/unlisted_state.onnx",
+      "sha256": "9f408d3d68ee55fd5cbef07155c77a03c1ae13827041f1dddd5da8ae3886f8cc",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[],\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":1,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":1,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":0,\"states\":[]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_in.buf",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_out.buf",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": "graph input 'state_in.buf' is not a state listed in the contract"
+    }
+  ],
+  "pairs": [
+    {
+      "name": "identity_s1",
+      "encoder": "identity/encoder_s1.onnx",
+      "vocoder": "identity/vocoder_s1.onnx",
+      "algorithmic_latency_samples": 320
+    },
+    {
+      "name": "identity_s2",
+      "encoder": "identity/encoder_s2.onnx",
+      "vocoder": "identity/vocoder_s2.onnx",
+      "algorithmic_latency_samples": 640
+    },
+    {
+      "name": "identity_s4",
+      "encoder": "identity/encoder_s4.onnx",
+      "vocoder": "identity/vocoder_s4.onnx",
+      "algorithmic_latency_samples": 1280
+    },
+    {
+      "name": "delay_s1",
+      "encoder": "identity/encoder_s1.onnx",
+      "vocoder": "delay_s1.onnx",
+      "algorithmic_latency_samples": 640
+    }
+  ],
+  "bundles": [
+    {
+      "dir": "identity",
+      "vocoder": "identity/vocoder_s1.onnx",
+      "voices": "identity/voices.json"
+    }
+  ]
+}

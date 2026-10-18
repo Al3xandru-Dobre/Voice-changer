@@ -1,0 +1,4 @@
+# Golden vectors are compared byte for byte: never convert line endings.
+* -text
+*.json text eol=lf
+*.md text eol=lf

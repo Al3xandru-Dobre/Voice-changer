@@ -1,0 +1,41 @@
+{
+  "description": "A stateless encoder (no state pairs)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [],
+        "license": "test case (no weights)"
+      },
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              1
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

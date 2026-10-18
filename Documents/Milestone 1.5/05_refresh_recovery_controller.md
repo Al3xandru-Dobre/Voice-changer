@@ -2,7 +2,7 @@
 
 > **Milestone 1.5** · [Master plan](00_master.md) · [← Stage 04](04_selection_policy_cli.md) · [Stage 06 →](06_routing_os_validation.md)
 
-**Status:** ☐ not started
+**Status:** ☑ complete (2026-10-18)
 **Depends on:** Stage 04, Milestone 1 / Stage 03 (SPSC queues + worker)
 **Research:** §5 "Notifications do not replace catalog refresh" · §7 · §8 · §10 stage 4
 
@@ -41,29 +41,29 @@ Running / Recovering / Error -> Stopping -> Idle
 
 ## Tasks
 
-- [ ] `AudioController` owning registry + device; all enumeration, open/close,
-      retries on one control thread
-- [ ] `notificationCallback` sets bits in a lock-free atomic pending-event
+- [x] `AudioController` owning registry + device; all enumeration, open/close,
+      retries on one control thread (`src/audio/AudioController.{hpp,cpp}`)
+- [x] `notificationCallback` sets bits in a lock-free atomic pending-event
       bitset only; control thread drains it (`static_assert(is_always_lock_free)`)
-- [ ] Periodic refresh (configurable, default **1 s**) + on-demand + on hint;
+- [x] Periodic refresh (configurable, default **1 s**) + on-demand + on hint;
       coalesce bursts; bounded backoff on errors; stale snapshot retained
-- [ ] Liveness = controller state + notifications + backend state + callback
+- [x] Liveness = controller state + notifications + backend state + callback
       progress counter — not `dev_ok_`, and **not** "samples are non-zero"
       (the user may be silent)
-- [ ] Switch transition: quiesce worker + callbacks → drain/discard both SPSC
+- [x] Switch transition: quiesce worker + callbacks → drain/discard both SPSC
       queues → reset OLA (and, from M2, model state) → reopen. No old-route PCM
       may leak into the new route.
-- [ ] Log client vs. backend format: `ma_device.sampleRate` (client) vs.
+- [x] Log client vs. backend format: `ma_device.sampleRate` (client) vs.
       `capture/playback.internalSampleRate` (backend) — see M1 stage 05
-- [ ] Bound queued-audio latency and define the overload/drop policy (queue
+- [x] Bound queued-audio latency and define the overload/drop policy (queue
       capacity is a safety limit, not a target delay). Reuse
       [M2 / Stage 08](../Milestone%202/08_realtime_mode_a_pipeline.md)'s
       `LatencyGovernor` and its `InferencePipeline::reset()` contract (worker
       thread only, after quiesce). Whichever stage lands second adapts to the
       other.
-- [ ] Fake-backend tests: notification bursts, retry limits, shutdown during
+- [x] Fake-backend tests: notification bursts, retry limits, shutdown during
       recovery, no callback touching destroyed controller state, queue discard
-      only after producers/consumers stop
+      only after producers/consumers stop (`tests/test_audio_controller.cpp`)
 
 ## Implementation notes
 

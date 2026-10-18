@@ -1,0 +1,165 @@
+{
+  "description": "Soft content, 4 frames per step (80 ms hop), vocoder L=1 and a 160-sample OLA tail -> 1280 + 320 + 160 = 1760 samples (110 ms)",
+  "algorithmic_latency_samples": 1760,
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 4,
+        "lookahead_frames": 0,
+        "content_kind": "soft",
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)",
+        "content_dim": 256
+      },
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1280
+            ]
+          },
+          {
+            "name": "state_in.conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              256,
+              6
+            ]
+          },
+          {
+            "name": "state_in.attn_k",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          },
+          {
+            "name": "state_in.attn_v",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              256
+            ]
+          },
+          {
+            "name": "state_out.conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              256,
+              6
+            ]
+          },
+          {
+            "name": "state_out.attn_k",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          },
+          {
+            "name": "state_out.attn_v",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 4,
+        "lookahead_frames": 1,
+        "content_kind": "soft",
+        "cond_frame_samples": 320,
+        "cond_inputs": [
+          "logf0",
+          "energy"
+        ],
+        "spk_emb_dim": 0,
+        "overlap_samples": 160,
+        "states": [],
+        "license": "test case (no weights)",
+        "content_dim": 256
+      },
+      "graph": {
+        "inputs": [
+          {
+            "name": "content",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              256
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1440
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

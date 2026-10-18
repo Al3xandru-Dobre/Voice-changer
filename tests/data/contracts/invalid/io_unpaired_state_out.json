@@ -1,0 +1,103 @@
+{
+  "description": "The graph has state_out.dec but no state_in.dec",
+  "error": "unpaired state 'dec': state_out.dec has no state_in.dec",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "cond_frame_samples": 320,
+        "cond_inputs": [
+          "logf0",
+          "voicing",
+          "aperiodicity",
+          "energy",
+          "spk_emb"
+        ],
+        "spk_emb_dim": 64,
+        "overlap_samples": 0,
+        "states": [
+          "dec"
+        ],
+        "license": "test case (no weights)"
+      },
+      "graph": {
+        "inputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              64
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_out.dec",
+            "dtype": "f32",
+            "shape": [
+              1,
+              512,
+              7
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

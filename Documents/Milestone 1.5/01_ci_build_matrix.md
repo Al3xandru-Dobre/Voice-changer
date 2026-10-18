@@ -2,7 +2,8 @@
 
 > **Milestone 1.5** · [Master plan](00_master.md) · Next: [Stage 02 →](02_audio_types_contract.md)
 
-**Status:** ☐ not started
+**Status:** ◐ in progress — workflow + README landed (2026-10-18); first green run
+pending a push to GitHub
 **Depends on:** Milestone 1 / Stage 01 (CMake + CTest)
 **Estimated scope:** CI configuration only, no audio logic
 
@@ -10,7 +11,8 @@
 
 Every push builds `fluxvoice` and runs `ctest` on Linux, Windows and macOS, so
 portability regressions are caught before any device-management code lands.
-Milestone 1 / Stage 01 was only verified on Linux (GCC 13, Clang 18).
+Milestone 1 / Stage 01 was only verified on Linux (GCC 13, Clang 18) — and
+once, manually, on Windows (MSVC 19.50, M1 / Stage 05).
 
 ## Context & references
 
@@ -23,33 +25,51 @@ Milestone 1 / Stage 01 was only verified on Linux (GCC 13, Clang 18).
 
 ## Tasks
 
-- [ ] `.github/workflows/build.yml`: matrix
+- [x] `.github/workflows/build.yml`: matrix
       `ubuntu-latest` (GCC + Clang) · `windows-latest` (MSVC) · `macos-latest` (Apple Clang)
-- [ ] Configure with `-DFLUXVOICE_WARNINGS_AS_ERRORS=ON`, build, `ctest --output-on-failure`
-- [ ] Cache the FetchContent `_deps` directory keyed on `CMakeLists.txt` hash
-- [ ] Fix whatever MSVC / Apple Clang surface (expect: `/W4` warnings in our
-      sources, missing includes that libstdc++ provided transitively).
-      Already seen with MSVC 19.50 (2026-10-17) and fixed in M1 / Stage 05:
-      `windows.h` (via miniaudio) defines `min`/`max` macros that broke
-      `std::min`/`std::max` (`NOMINMAX` on `miniaudio_headers`), and C4324
-      "structure was padded" on `DuplexRouter`'s queues failed `/WX`
-      (silenced in that header). Everything builds locally with `/W4 /WX`;
-      CI still to come
-- [ ] Confirm the CLI tests pass on CI runners **without audio hardware** —
-      they must never open a device
-- [ ] Record supported OS versions (master open decision 1) in README §6
+- [x] Configure with `-DFLUXVOICE_WARNINGS_AS_ERRORS=ON`, build, `ctest --output-on-failure`
+- [x] Cache the FetchContent `_deps` directory keyed on `CMakeLists.txt` hash
+      (`deps-<job>-<hash>` with a job-prefixed `restore-keys` fallback)
+- [ ] Fix whatever MSVC / Apple Clang surface. MSVC is known-clean at `/W4 /WX`
+      locally (19.50, M1 / Stage 05: `NOMINMAX` on `miniaudio_headers`, C4324
+      silenced around `DuplexRouter`'s queues). Apple Clang compiles this
+      project for the first time in CI — expect the first run to be the judge
+- [x] Confirm the CLI tests pass on CI runners **without audio hardware** —
+      they must never open a device (argument errors are rejected in the parse
+      loop, before `AudioEngine` is even constructed; `--help` exits earlier
+      still; the CI run is the proof)
+- [x] Record supported OS versions (master open decision 1) in README §6:
+      Windows 10+ · macOS 13+ · current Ubuntu LTS (24.04)
 
 ## Implementation notes
 
 - CI runners have no sound cards; miniaudio may fall back to the null backend.
   Tests that need a device belong to stage 06's manual matrix, not CI.
 - Pin action versions (`actions/checkout@<tag>`), same reasoning as pinning
-  `GIT_TAG`: reproducibility and supply-chain hygiene.
-- Windows: the Visual Studio generator is multi-config → `ctest -C Release`.
+  `GIT_TAG`: reproducibility and supply-chain hygiene. Both actions are pinned
+  to `v5` (the node-24 runtime generation; node-20 actions are being retired
+  from runners as of late 2026).
+- Windows: the Visual Studio generator is multi-config → build with
+  `--config Release` and `ctest -C Release` (both flags are harmless no-ops on
+  the single-config generators).
+- Compilers are selected per matrix entry via `CC`/`CXX` exported with
+  `$GITHUB_ENV` — but only when the entry defines them, so `windows-msvc`
+  never sees an empty `CC` variable.
+- No extra apt packages are needed: miniaudio 0.11.25 `dlopen`s ALSA /
+  PulseAudio at runtime (that is why `fluxvoice_link_audio` links only
+  `dl`/`m` on Linux), so a headerless runner still builds.
+- Runner labels as of 2026-10: `ubuntu-latest` = 24.04, `windows-latest` =
+  Server 2025 with VS 2026, `macos-latest` = macOS 26 arm64. The MSVC
+  verification from M1 / Stage 05 was VS 18 / cl 19.50, i.e. the same
+  toolchain line CI uses.
+- The 2026-10-18 session that landed this workflow had no shell available on
+  the dev machine, so nothing was executed locally — the first push runs it
+  for real.
 
 ## Files touched
 
-- `.github/workflows/build.yml`, `CMakeLists.txt` (fixes only), `README.md`
+- `.github/workflows/build.yml` (new), `README.md` (§6 platforms + §5 tree +
+  CI note)
 
 ## Definition of done
 

@@ -12,6 +12,7 @@
 
 #include <readerwriterqueue.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -50,9 +51,25 @@ public:
     // ------------------------------------------------------------------
 
     /// Handle one callback's worth of mono samples. `in` may be null (no
-    /// capture data); `out` must hold `n` samples. `n` is whatever the backend
-    /// delivered — never assume it equals the requested period.
+    /// capture data, or playback-only callback); `out` may be null
+    /// (capture-only or native loopback callback, M1.5 stages 05–06). `n` is
+    /// whatever the backend delivered — never assume it equals the requested
+    /// period.
     void process(float* out, const float* in, size_t n) {
+        if (!out) {
+            if (!in) return;
+            capture_frames_processed_.fetch_add(n, std::memory_order_relaxed);
+            if (!passthrough_.load(std::memory_order_relaxed)) {
+                for (size_t i = 0; i < n; ++i) {
+                    if (!in_q_.try_enqueue(in[i])) {
+                        input_overruns_.fetch_add(n - i, std::memory_order_relaxed);
+                        break;
+                    }
+                }
+            }
+            return;
+        }
+
         frames_processed_.fetch_add(n, std::memory_order_relaxed);
 
         if (passthrough_.load(std::memory_order_relaxed)) {
@@ -99,18 +116,54 @@ public:
         return n;
     }
 
+    /// Push processed samples while bounding queued-audio latency (M1.5 stage
+    /// 05). When `max_queued_samples > 0`, enqueues only up to the remaining
+    /// headroom so `out_q_` occupancy never grows past `max_queued_samples`;
+    /// the caller counts `num_samples - written` in `output_drops` so the
+    /// conservation identity remains exact.
+    size_t write_output_bounded(const float* src, size_t num_samples, size_t max_queued_samples) {
+        if (max_queued_samples == 0) return write_output(src, num_samples);
+        const size_t approx = out_q_.size_approx();
+        if (approx >= max_queued_samples) return 0;
+        const size_t limit = std::min(num_samples, max_queued_samples - approx);
+        return write_output(src, limit);
+    }
+
+    /// Drain and discard all buffered samples from both SPSC queues (M1.5
+    /// stage 05 switch transition).
+    /// Control-thread only: MUST be called only after the audio callback and
+    /// worker thread are both quiesced/stopped (preserves SPSC single-consumer
+    /// discipline).
+    size_t discard_queues() {
+        size_t discarded = 0;
+        float dummy = 0.0f;
+        while (in_q_.try_dequeue(dummy)) ++discarded;
+        while (out_q_.try_dequeue(dummy)) ++discarded;
+        return discarded;
+    }
+
     // ------------------------------------------------------------------
     // Telemetry — atomic, safe to read from any thread.
     // ------------------------------------------------------------------
     uint64_t input_overruns()   const { return input_overruns_.load(std::memory_order_relaxed); }
     uint64_t output_underruns() const { return output_underruns_.load(std::memory_order_relaxed); }
-    uint64_t frames_processed() const { return frames_processed_.load(std::memory_order_relaxed); }
+    uint64_t frames_processed() const {
+        const uint64_t out_frames = frames_processed_.load(std::memory_order_relaxed);
+        return out_frames > 0 ? out_frames
+                              : capture_frames_processed_.load(std::memory_order_relaxed);
+    }
+    uint64_t capture_frames_processed() const {
+        return capture_frames_processed_.load(std::memory_order_relaxed);
+    }
+    size_t   input_queued_approx()  const { return in_q_.size_approx(); }
+    size_t   output_queued_approx() const { return out_q_.size_approx(); }
 
 private:
     std::atomic<bool>     passthrough_{false};
     std::atomic<uint64_t> input_overruns_{0};
     std::atomic<uint64_t> output_underruns_{0};
     std::atomic<uint64_t> frames_processed_{0};
+    std::atomic<uint64_t> capture_frames_processed_{0};
 
     moodycamel::ReaderWriterQueue<float> in_q_;
     moodycamel::ReaderWriterQueue<float> out_q_;

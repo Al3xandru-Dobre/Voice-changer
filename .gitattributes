@@ -1,0 +1,9 @@
+# Generated binaries: never convert line endings (core.autocrlf would corrupt
+# an .onnx file that happens to contain no NUL byte).
+*.onnx binary
+*.npy binary
+
+# Files that tools regenerate byte-for-byte or compare against: LF everywhere.
+tests/data/**/*.json text eol=lf
+python_training/eval_lists/*.tsv text eol=lf
+python_training/uv.lock text eol=lf

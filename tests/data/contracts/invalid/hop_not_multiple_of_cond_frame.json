@@ -1,0 +1,32 @@
+{
+  "description": "hop = frames_per_step x frame_samples is a multiple of frame_samples by construction; the constructible version of this case is a content frame that does not split into whole conditioning frames",
+  "error": "frame_samples (320) is not a multiple of cond_frame_samples (300)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "cond_frame_samples": 300,
+        "cond_inputs": [
+          "logf0",
+          "voicing",
+          "aperiodicity",
+          "energy",
+          "spk_emb"
+        ],
+        "spk_emb_dim": 64,
+        "overlap_samples": 0,
+        "states": [
+          "dec"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

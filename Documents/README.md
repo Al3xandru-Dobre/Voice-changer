@@ -7,9 +7,9 @@ table) followed by numbered stage files `NN_<stage_name>.md`.
 | Directory | Milestone | Status |
 |---|---|---|
 | [Milestone 1/](Milestone%201/00_master.md) | DSP loopback & audio engine | In progress |
-| [Milestone 1.5/](Milestone%201.5/00_master.md) | Cross-platform audio devices (parallel to M2; blocks M4 device UI) | Planned |
+| [Milestone 1.5/](Milestone%201.5/00_master.md) | Cross-platform audio devices (parallel to M2; blocks M4 device UI) | In progress (stages 01–02) |
 | [Milestone 2/](Milestone%202/00_master.md) | Textless VC mode (encoder + vocoder, voice controls) | Planned (stage files written) |
-| [Milestone 3/](Milestone%203/00_master.md) | Wait-k S2UT mode | Draft |
+| [Milestone 3/](Milestone%203/00_master.md) | Wait-k S2UT mode (bidirectional `En↔{Es,Fr,De}`, shared latents) | Planned (stage files written) |
 | [Milestone 4/](Milestone%204/00_master.md) | UI & optimization | Draft |
 
 ## Research documents
@@ -23,15 +23,21 @@ gets a tracking note at the top rather than being rewritten.
 |---|---|---|
 | [Cross-platform audio I/O](Research_documents/CROSS_PLATFORM_AUDIO_IO_RESEARCH.md) | 2026-10-17 | Milestone 1.5 (stages 01–06); M1 stages 02, 03, 05, 06; M4 device selectors |
 | [Textless VC (Mode A)](Research_documents/M2_TEXTLESS_VC_RESEARCH.md) | 2026-10-18 | Milestone 2 (stages 01–11); notes in M1.5 stage 05, M3 and M4 masters |
+| [Simultaneous S2UT (Mode B)](Research_documents/M3_WAITK_S2UT_RESEARCH.md) | 2026-10-18 | Milestone 3 (stages 01–11); handoff notes in M4 master |
 
 The project-wide bibliography (papers, repos, tools) remains in the root
 [`RESEARCH_GUIDE.md`](../RESEARCH_GUIDE.md).
 
-## Bug reports
+## Bug reports & best practices
 
 One file per bug (tagged `BUG-NNN`, with a short name) in
 [`Bug Report/`](Bug%20Report/00_index.md) — covering both FluxVoice bugs and
 external-dependency bugs that block milestone work.
+
+Engineering rules and mistake-prevention patterns distilled from these bug
+reports and milestone findings live in [`BEST_PRACTICES.md`](BEST_PRACTICES.md)
+(with a condensed quick-reference layer in the root [`MEMORY.md`](../MEMORY.md)
+and specialist agent workflows in [`AGENTS.md`](../AGENTS.md)).
 
 ## Conventions
 

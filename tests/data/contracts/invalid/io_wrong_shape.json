@@ -1,0 +1,104 @@
+{
+  "description": "Graph exported for a 40 ms hop",
+  "error": "graph input 'audio' has shape [1,640], contract expects [1,320]",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      },
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              640
+            ]
+          },
+          {
+            "name": "state_in.conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              256,
+              6
+            ]
+          },
+          {
+            "name": "state_in.attn_k",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          },
+          {
+            "name": "state_in.attn_v",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              256,
+              6
+            ]
+          },
+          {
+            "name": "state_out.attn_k",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          },
+          {
+            "name": "state_out.attn_v",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

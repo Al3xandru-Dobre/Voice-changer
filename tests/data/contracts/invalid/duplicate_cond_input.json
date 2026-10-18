@@ -1,0 +1,30 @@
+{
+  "description": "A conditioning input listed twice",
+  "error": "duplicate cond input 'energy'",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "cond_frame_samples": 320,
+        "cond_inputs": [
+          "energy",
+          "logf0",
+          "energy"
+        ],
+        "spk_emb_dim": 0,
+        "overlap_samples": 0,
+        "states": [
+          "dec"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

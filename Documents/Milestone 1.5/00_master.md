@@ -4,7 +4,7 @@
 > [Documents index](../README.md) ·
 > Research basis: [Cross-platform audio I/O research](../Research_documents/CROSS_PLATFORM_AUDIO_IO_RESEARCH.md)
 
-**Status:** ☐ not started
+**Status:** ◐ in progress (stages 01–06 landed 2026-10-18; Windows MSVC `ctest` + WASAPI routing verified; macOS/Linux hardware matrix & CI push pending)
 **Goal:** *One application-facing audio-device API on Windows, macOS and Linux:
 discover capture/playback endpoints and OS defaults, select them reliably
 without depending on list position or name, refresh after hardware/default
@@ -70,22 +70,22 @@ M1 stages 01–03 (build, duplex, SPSC) ──► M1.5 ──► M4 UI device se
 
 | # | Stage | Research §10 | Output | Status |
 |---|---|---|---|---|
-| 01 | [Cross-platform CI build matrix](01_ci_build_matrix.md) | §11 build matrix | Linux/Windows/macOS builds + `ctest` on every push | ☐ |
-| 02 | [Audio types & contract](02_audio_types_contract.md) | Stage 1 | `AudioTypes.hpp`; no `<miniaudio.h>` outside `src/audio/` impl | ☐ |
-| 03 | [Device registry](03_device_registry.md) | Stage 2 | Snapshots; empty vs. failed vs. null-backend distinguishable | ☐ |
-| 04 | [Selection policy & CLI](04_selection_policy_cli.md) | Stage 3 | Reordered catalogs cannot redirect an explicit selection | ☐ |
-| 05 | [Refresh & recovery controller](05_refresh_recovery_controller.md) | Stage 4 | Plug/unplug/default changes follow the policy table | ☐ |
-| 06 | [Routing & OS validation](06_routing_os_validation.md) | Stage 6 | Hardware matrix passed per OS; optional WASAPI loopback | ☐ |
+| 01 | [Cross-platform CI build matrix](01_ci_build_matrix.md) | §11 build matrix | Linux/Windows/macOS builds + `ctest` on every push | ◐ workflow landed; first run pending |
+| 02 | [Audio types & contract](02_audio_types_contract.md) | Stage 1 | `AudioTypes.hpp`; no `<miniaudio.h>` outside `src/audio/` impl | ◐ code landed; ctest run pending |
+| 03 | [Device registry](03_device_registry.md) | Stage 2 | Snapshots; empty vs. failed vs. null-backend distinguishable | ◐ code + fake tests landed; ctest run pending |
+| 04 | [Selection policy & CLI](04_selection_policy_cli.md) | Stage 3 | Reordered catalogs cannot redirect an explicit selection | ◐ code + fake tests landed; ctest run pending |
+| 05 | [Refresh & recovery controller](05_refresh_recovery_controller.md) | Stage 4 | Plug/unplug/default changes follow the policy table | ☑ |
+| 06 | [Routing & OS validation](06_routing_os_validation.md) | Stage 6 | Hardware matrix passed per OS; optional WASAPI loopback | ◐ code + Windows WASAPI verified; macOS/Linux hardware pending |
 | — | UI device selectors | Stage 5 | → [Milestone 4](../Milestone%204/00_master.md) | — |
 
 ## Acceptance criteria
 
-- [ ] `fluxvoice` builds warning-free and passes `ctest` on Linux, Windows and macOS in CI
-- [ ] No file outside the audio implementation includes `<miniaudio.h>` or handles `ma_device_id`
-- [ ] Fake-backend tests cover every case in research §11 "Deterministic tests without hardware"
-- [ ] An explicitly selected device is **never** silently replaced (mic or virtual output)
-- [ ] Unplug/replug and default-device changes behave per the stage 05 policy table on each OS
-- [ ] Each advertised routing mode is recorded by a second application on its target OS
+- [ ] `fluxvoice` builds warning-free and passes `ctest` on Linux, Windows and macOS in CI (Windows MSVC verified locally: 37/37 pass)
+- [x] No file outside the audio implementation includes `<miniaudio.h>` or handles `ma_device_id` (`MiniaudioBackend.{hpp,cpp}` only)
+- [x] Fake-backend tests cover every case in research §11 "Deterministic tests without hardware" (`test_device_registry`, `test_audio_controller`)
+- [x] An explicitly selected device is **never** silently replaced (mic or virtual output)
+- [x] Unplug/replug and default-device changes behave per the stage 05 policy table (`test_audio_controller`)
+- [ ] Each advertised routing mode is recorded by a second application on its target OS (Windows WASAPI verified with `fv_probe`; macOS/Linux pending)
 - [ ] ≥ 30 min streaming between different capture/playback devices without sustained queue growth
 
 ## Key constraints
@@ -105,11 +105,11 @@ M1 stages 01–03 (build, duplex, SPSC) ──► M1.5 ──► M4 UI device se
 
 | # | Decision | Recommended default | Needed by |
 |---|---|---|---|
-| 1 | Supported OS versions / distribution targets | Win 10+, macOS 13+, current Ubuntu LTS (confirm) | Stage 01 |
-| 2 | Is system-playback capture a release requirement? | No — mic → virtual output first; WASAPI loopback optional | Stage 06 |
-| 3 | Is automatic fallback ever allowed? | **Never** silently replace an explicit mic or virtual output | Stage 04 |
-| 4 | Which backend-native tokens are persisted? | Persist "follow default" only until tokens are tested per backend | Stage 04 |
-| 5 | Refresh interval, routing, drift behavior | 1 s polling; validate on real machines | Stages 05–06 |
+| 1 | Supported OS versions / distribution targets | Win 10+, macOS 13+, Ubuntu 24.04 LTS — recorded in README §6 (stage 01, 2026-10-18) | Stage 01 ☑ |
+| 2 | Is system-playback capture a release requirement? | Decided (stage 06): No — mic → virtual output first; optional WASAPI loopback via `--loopback-input` / `fv_probe record --loopback` | Stage 06 ☑ |
+| 3 | Is automatic fallback ever allowed? | Decided (stage 04): never — `resolve()` fails with `DeviceNotFound`/`DeviceChanged` instead of substituting | Stage 04 ☑ |
+| 4 | Which backend-native tokens are persisted? | Decided (stage 04): follow-default only; explicit endpoints stay session-scoped keys, `persistent_token` reserved until per-backend testing (stage 06) | Stage 04 ☑ |
+| 5 | Refresh interval, routing, drift behavior | Decided (stage 05): 1 s polling (`ControllerConfig::refresh_interval`), coalesced notification hints, bounded retry backoff | Stages 05–06 ☑ |
 | 6 | Online verification of miniaudio/OS docs & driver terms | Do before stage 06 / any release | Stage 06 |
 
 ## Risks & mitigations

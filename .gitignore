@@ -3,8 +3,22 @@ build/
 out/
 .cache/
 
-# Exported neural models are large binaries — do not commit.
+# Exported neural models are large binaries — do not commit. Bundles are
+# models/<bundle>/...; models/README.md stays tracked.
 models/*.onnx
+models/*/
+
+# Training data, checkpoints and logs (Milestone 2). Anchored on purpose: an
+# unanchored "data/" would also hide tests/data/ (contracts, fixtures, golden
+# vectors). data/ also ignores itself via data/.gitignore.
+/data/
+/checkpoints/
+/runs/
+/python_training/checkpoints/
+/python_training/runs/
+*.pt
+*.ckpt
+*.onnx.data
 
 # Vendored dependencies: ignore contents but keep each dir's README.md.
 third_party/*/*
@@ -24,3 +38,4 @@ venv/
 .vscode/
 *.swp
 .DS_Store
+.devin

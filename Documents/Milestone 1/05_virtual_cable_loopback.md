@@ -134,6 +134,12 @@ python tools\vm_route.py          # VAIO ("Voicemeeter Input") -> B1, AUX -> B2;
 python tools\vm_route.py --check  # integrity levels + current routing; writes nothing
 #   tone round-trip (silence = dead route; also run by setup_test_rig.ps1):
 .\build\fv_probe.exe tone --output-name "Voicemeeter Input" --input-name "Voicemeeter Out B1" --seconds 4 tone.wav
+
+# Optional Windows WASAPI system-playback capture (M1.5 Stage 06):
+#   capture a playback endpoint directly via native WASAPI loopback and route
+#   processed audio into a different virtual cable playback endpoint:
+.\build\fluxvoice.exe --loopback-input <playback index|default> --output <CABLE Input index>
+.\build\fv_probe.exe record --loopback --input-name "CABLE Input" --seconds 10 loopback.wav
 ```
 
 ```bash

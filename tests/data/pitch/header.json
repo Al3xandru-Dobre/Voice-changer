@@ -1,0 +1,58 @@
+{
+  "sample_rate": 16000,
+  "frame_samples": 320,
+  "window_samples": 640,
+  "f0_min_hz": 55.0,
+  "f0_max_hz": 1000.0,
+  "tau_min": 16,
+  "tau_max": 290,
+  "integration_samples": 350,
+  "thresholds": [
+    0.05,
+    0.1,
+    0.15
+  ],
+  "f0_threshold": 0.1,
+  "voiced_max_aperiodicity": 0.4,
+  "voiced_min_z_energy": -0.5,
+  "hpf_hz": 70.0,
+  "hpf_q": 0.7071067811865475,
+  "hpf_b": [
+    0.9807500622457402,
+    -1.9615001244914805,
+    0.9807500622457402
+  ],
+  "hpf_a": [
+    1.0,
+    -1.961129530052878,
+    0.9618707189300828
+  ],
+  "energy_eps": 1e-10,
+  "silence_mean_square": 1e-08,
+  "norm_tau_s": 4.0,
+  "logf0_std_floor": 0.05,
+  "energy_std_floor": 0.5,
+  "hold_relax_s": 0.25,
+  "logf0_prior_mean": 5.087,
+  "logf0_prior_std": 0.427,
+  "energy_prior_mean": -8.5,
+  "energy_prior_std": 3.829,
+  "features": [
+    "f0_hz",
+    "aperiodicity",
+    "voicing",
+    "log_energy",
+    "logf0_held",
+    "z_logf0",
+    "z_energy"
+  ],
+  "cases": [
+    "synthetic_L0",
+    "synthetic_L1",
+    "synthetic_L2",
+    "libri_L0",
+    "libri_L1",
+    "libri_L2"
+  ],
+  "libri_utterance": "61-70968-0058"
+}

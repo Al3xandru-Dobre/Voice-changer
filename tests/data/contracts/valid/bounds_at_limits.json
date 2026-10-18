@@ -1,0 +1,50 @@
+{
+  "description": "Every bound at its limit: 192 kHz, a 1 s hop (4 x 48000), L = 64, vocab 2^20, spk_emb 4096",
+  "algorithmic_latency_samples": 6528000,
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 192000,
+        "frame_samples": 48000,
+        "frames_per_step": 4,
+        "lookahead_frames": 64,
+        "content_kind": "discrete",
+        "vocab": 1048576,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 192000,
+        "frame_samples": 48000,
+        "frames_per_step": 4,
+        "lookahead_frames": 64,
+        "content_kind": "discrete",
+        "vocab": 1048576,
+        "cond_frame_samples": 48000,
+        "cond_inputs": [
+          "logf0",
+          "voicing",
+          "aperiodicity",
+          "energy",
+          "spk_emb"
+        ],
+        "spk_emb_dim": 4096,
+        "overlap_samples": 192000,
+        "states": [
+          "dec"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

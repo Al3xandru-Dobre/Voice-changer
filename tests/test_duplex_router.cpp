@@ -67,6 +67,47 @@ void test_passthrough() {
     CHECK(r.frames_processed() == 10);
 }
 
+void test_null_output_buffer_capture_only_contract() {
+    // Capture-only / native loopback callbacks pass output == nullptr (M1.5
+    // stages 05–06). process() must enqueue captured samples without
+    // dereferencing output or counting false output underruns.
+    DuplexRouter r(1024);
+    float in[4] = {0.25f, 0.5f, -0.25f, -0.5f};
+    r.process(nullptr, in, 4);
+    CHECK(r.frames_processed() == 4);
+    CHECK(r.output_underruns() == 0);
+    CHECK(r.input_overruns() == 0);
+
+    float drained[4] = {};
+    CHECK(r.read_input(drained, 4) == 4);
+    for (int i = 0; i < 4; ++i) CHECK(drained[i] == in[i]);
+
+    // Both null is a safe no-op.
+    r.process(nullptr, nullptr, 16);
+    CHECK(r.frames_processed() == 4);
+}
+
+void test_bounded_output_and_discard_queues() {
+    DuplexRouter r(1024);
+    std::vector<float> chunk(100, 1.0f);
+    // Bound output queue to 150 samples: first 100 fit, second 100 writes at most 50.
+    const size_t w1 = r.write_output_bounded(chunk.data(), chunk.size(), 150);
+    const size_t w2 = r.write_output_bounded(chunk.data(), chunk.size(), 150);
+    const size_t w3 = r.write_output_bounded(chunk.data(), chunk.size(), 150);
+    CHECK(w1 == 100);
+    CHECK(w2 == 50);
+    CHECK(w3 == 0);
+    CHECK(r.output_queued_approx() == 150);
+
+    // Enqueue some input samples too, then discard both queues after quiesce.
+    r.process(nullptr, chunk.data(), 40);
+    CHECK(r.input_queued_approx() == 40);
+    const size_t discarded = r.discard_queues();
+    CHECK(discarded == 190);
+    CHECK(r.input_queued_approx() == 0);
+    CHECK(r.output_queued_approx() == 0);
+}
+
 void test_queue_roundtrip_with_odd_frame_counts() {
     DuplexRouter r(4096);
     std::vector<float> worker_buf(4096);
@@ -194,6 +235,8 @@ void test_concurrent_callback_and_worker() {
 
 int main() {
     test_passthrough();
+    test_null_output_buffer_capture_only_contract();
+    test_bounded_output_and_discard_queues();
     test_queue_roundtrip_with_odd_frame_counts();
     test_underrun_zero_fills_and_counts();
     test_overrun_drops_and_counts();

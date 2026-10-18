@@ -1,0 +1,70 @@
+# FluxVoice training & evaluation environment (Milestone 2 / Stage 01).
+#
+# Install (the only supported command; `uv` manages the interpreter):
+#     uv python install 3.12
+#     uv sync --frozen            # run inside python_training/
+#
+# Pins (Stage 01, 2026-10-18):
+#   * torch / torchaudio 2.11.0 — torchaudio was discontinued after 2.11, and
+#     SpeechBrain + SpeechMOS import it, so 2.11.0 is the newest *matched* pair
+#     (torch itself is at 2.14). Still >= 2.9, where the dynamo ONNX exporter is
+#     the default (Stage 06).
+#   * CUDA 12.8 wheels on Windows + Linux (runs on any driver >= 525, including
+#     R590 on the dev laptop); macOS falls back to the PyPI CPU/MPS build.
+#   * onnxruntime 1.31.x — same minor as the C++ SDK pin (Stage 07).
+#
+# Audio I/O is soundfile + soxr everywhere; torchaudio.load/save (now torchcodec
+# + FFmpeg) is not used.
+# requirements.txt is generated from uv.lock (see its header).
+
+[project]
+name = "fluxvoice-training"
+version = "0.1.0"
+description = "FluxVoice Mode A training, export and evaluation tooling"
+requires-python = "==3.12.*"
+dependencies = [
+    "torch==2.11.0",
+    "torchaudio==2.11.0",
+    "numpy>=2.4,<3",
+    "scipy>=1.16",
+    "soundfile>=0.13",
+    "soxr>=1.0",
+    "onnx==1.23.2",
+    "onnxruntime==1.31.0",
+    "transformers==5.20.1",
+    "huggingface-hub>=1.31,<3",
+    "speechbrain==1.1.2",
+    "speechmos",
+    "jiwer==4.0.0",
+    "praat-parselmouth>=0.4.5",
+    "scikit-learn>=1.7",
+    "pyloudnorm>=0.1.1",
+    "tensorboard>=2.20",
+    "tqdm>=4.66",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[tool.uv]
+# A virtual project: scripts run from this directory and import `fvml` from it.
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchaudio = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+# UTMOS22-strong (MIT). Not on PyPI; pinned to the v1.2.0 tag via the lock.
+speechmos = { git = "https://github.com/tarepan/SpeechMOS.git", tag = "v1.2.0" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

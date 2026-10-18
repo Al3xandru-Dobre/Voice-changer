@@ -1,0 +1,24 @@
+{
+  "description": "320.0 is a JSON float",
+  "error": "key 'frame_samples' must be an integer",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320.0,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

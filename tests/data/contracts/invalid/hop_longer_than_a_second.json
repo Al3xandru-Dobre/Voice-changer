@@ -1,0 +1,24 @@
+{
+  "description": "2 x 16000-sample frames at 16 kHz",
+  "error": "hop (32000 samples) is longer than one second at sample_rate 16000",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 16000,
+        "frames_per_step": 2,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

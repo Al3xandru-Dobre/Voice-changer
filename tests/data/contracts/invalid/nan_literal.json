@@ -1,0 +1,9 @@
+{
+  "description": "NaN is not JSON (Python's json module would accept it)",
+  "error": "contract is not valid JSON",
+  "models": [
+    {
+      "contract": "{\"contract_version\": 1, \"sample_rate\": NaN}"
+    }
+  ]
+}

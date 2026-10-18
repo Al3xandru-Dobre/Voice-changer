@@ -1,0 +1,9 @@
+{
+  "description": "Top level is an array",
+  "error": "contract must be a JSON object",
+  "models": [
+    {
+      "contract": "[1, 2]"
+    }
+  ]
+}

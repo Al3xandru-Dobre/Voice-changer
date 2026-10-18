@@ -1,0 +1,24 @@
+{
+  "description": "A misspelt key is reported before the key it was meant to be",
+  "error": "unknown key 'lookahed_frames'",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)",
+        "lookahed_frames": 1
+      }
+    }
+  ]
+}

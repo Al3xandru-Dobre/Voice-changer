@@ -1,0 +1,26 @@
+{
+  "description": "license given as a list",
+  "error": "key 'license' must be a string",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": [
+          "MIT"
+        ]
+      }
+    }
+  ]
+}

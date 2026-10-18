@@ -1,0 +1,9 @@
+{
+  "description": "Truncated metadata string",
+  "error": "contract is not valid JSON",
+  "models": [
+    {
+      "contract": "{\"contract_version\": 1, \"role\": "
+    }
+  ]
+}

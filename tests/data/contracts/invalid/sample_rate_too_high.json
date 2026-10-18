@@ -1,0 +1,24 @@
+{
+  "description": "Above 192 kHz",
+  "error": "sample_rate must be between 8000 and 192000 (got 384000)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 384000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

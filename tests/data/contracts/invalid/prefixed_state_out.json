@@ -1,0 +1,22 @@
+{
+  "description": "state_out. is a prefix too",
+  "error": "state 'state_out.conv' must be a base name, without the state_in./state_out. prefix",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "state_out.conv"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}

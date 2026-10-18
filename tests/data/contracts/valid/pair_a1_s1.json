@@ -1,0 +1,210 @@
+{
+  "description": "Configuration A1: L=1, 20 ms hop -> 640 samples (40 ms)",
+  "algorithmic_latency_samples": 640,
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      },
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_in.conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              256,
+              6
+            ]
+          },
+          {
+            "name": "state_in.attn_k",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          },
+          {
+            "name": "state_in.attn_v",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              256,
+              6
+            ]
+          },
+          {
+            "name": "state_out.attn_k",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          },
+          {
+            "name": "state_out.attn_v",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              50,
+              64
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "cond_frame_samples": 320,
+        "cond_inputs": [
+          "logf0",
+          "voicing",
+          "aperiodicity",
+          "energy",
+          "spk_emb"
+        ],
+        "spk_emb_dim": 64,
+        "overlap_samples": 0,
+        "states": [
+          "dec"
+        ],
+        "license": "test case (no weights)"
+      },
+      "graph": {
+        "inputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              64
+            ]
+          },
+          {
+            "name": "state_in.dec",
+            "dtype": "f32",
+            "shape": [
+              1,
+              512,
+              7
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          },
+          {
+            "name": "state_out.dec",
+            "dtype": "f32",
+            "shape": [
+              1,
+              512,
+              7
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

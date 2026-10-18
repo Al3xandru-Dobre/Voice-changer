@@ -17,17 +17,22 @@ execution-provider toggles.*
   **never a row index**, and uses the same selection rules as the CLI.
   *Depends on M1.5 stages 03–05.*
 - Dear ImGui app window (`src/ui/AppWindow.cpp` placeholder exists):
-  translation ON/OFF, Wait-k slider (k ∈ [1..10]),
-  `.onnx` model loading, live latency/underrun telemetry from
+  translation ON/OFF (`translate`), Wait-k slider (`wait_k ∈ [1..10]`),
+  source/target language dropdowns from `langs.json` (`src_lang`, `tgt_lang`
+  — see [M3 / Stage 09](../Milestone%203/09_s2ut_controls_language_switching.md)),
+  `.onnx` model loading, live latency/underrun/S2UT lag telemetry from
   `AudioEngine`'s atomic counters, and `StreamStatus` (backend, requested vs.
   resolved device, client vs. backend sample rate).
 - **Voice sliders & preset picker.** They consume
-  [M2 / Stage 09](../Milestone%202/09_voice_controls_presets.md)'s
+  [M2 / Stage 09](../Milestone%202/09_voice_controls_presets.md) and
+  [M3 / Stage 09](../Milestone%203/09_s2ut_controls_language_switching.md)'s
   `VoiceParams` descriptor table (`fluxvoice --list-params --json`): one
   slider per descriptor (name, unit, range, default), voice A/B dropdowns
   from `voices.json`, preset load/save. No engine changes needed.
-- Quantization: FP16 (`export_stateful_onnx.py --fp16`), then INT8 eval;
-  measure quality vs. RTF trade-off.
+- Quantization: FP16 (`export_stateful_onnx.py --fp16` across `encoder`,
+  `translator_enc`, `translator_dec`, and `vocoder` — see
+  [M3 / Stage 06](../Milestone%203/06_translated_prosody_stateful_onnx_export.md)),
+  then INT8 eval; measure quality (WER + ASR-BLEU) vs. RTF trade-off.
 - Execution providers: CUDA / DirectML / CoreML toggles via ORT session
   options (`third_party/onnxruntime/README.md`). DirectML is in sustained
   engineering; evaluate Windows ML (WinML) as the preferred Windows path

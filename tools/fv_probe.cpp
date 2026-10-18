@@ -75,8 +75,9 @@ extern "C" void on_stop_signal(int sig) {
 enum class Command { None, Record, Tone, Latency };
 
 struct Options {
-    Command     cmd  = Command::None;
-    bool        list = false;
+    Command     cmd      = Command::None;
+    bool        list     = false;
+    bool        loopback = false;  // record playback endpoint via native loopback (M1.5 stage 06)
     int         input = -1, output = -1;
     std::string input_name, output_name;  // substring match (see header note)
     uint32_t    rate = 48000, seconds = 10, freq = 440, count = 60, interval_ms = 500;
@@ -90,7 +91,7 @@ void print_usage(const char* argv0) {
         "\n"
         "Usage:\n"
         "  " << argv0 << " --list-devices\n"
-        "  " << argv0 << " record  --input I [--seconds S] [--rate R] out.wav\n"
+        "  " << argv0 << " record  [--loopback] --input I [--seconds S] [--rate R] out.wav\n"
         "  " << argv0 << " tone    --output O --input I [--seconds S] [--freq F] [--rate R] out.wav\n"
         "  " << argv0 << " latency --output O --input I [--count N] [--interval-ms M] [--rate R]\n"
         "                   [--csv out.csv]\n"
@@ -99,12 +100,15 @@ void print_usage(const char* argv0) {
         "  tone      play a sine into O while recording I to a WAV\n"
         "  latency   play a chirp every M ms into O, find it in I, report the delay\n"
         "\n"
-        "  --input <index>       capture device (see --list-devices)\n"
+        "  --input <index>       capture device (see --list-devices; or playback device\n"
+        "                        when --loopback is used)\n"
         "  --output <index>      playback device (see --list-devices)\n"
         "  --input-name <text>   capture device by name substring (alternative to\n"
         "                        --input; error if the text matches no device or\n"
         "                        more than one)\n"
         "  --output-name <text>  playback device by name substring\n"
+        "  --loopback            record a playback endpoint via native loopback\n"
+        "                        (Windows WASAPI; valid with 'record' only)\n"
         "  --seconds <s>         record / tone length (default 10)\n"
         "  --freq <hz>           tone frequency (default 440)\n"
         "  --count <n>           latency markers (default 60)\n"
@@ -321,6 +325,7 @@ int main(int argc, char** argv) {
 
         if (a == "-h" || a == "--help")      { print_usage(argv[0]); return 0; }
         else if (a == "--list-devices")      opt.list = true;
+        else if (a == "--loopback")          opt.loopback = true;
         else if (a == "record"  && opt.cmd == Command::None) opt.cmd = Command::Record;
         else if (a == "tone"    && opt.cmd == Command::None) opt.cmd = Command::Tone;
         else if (a == "latency" && opt.cmd == Command::None) opt.cmd = Command::Latency;
@@ -350,6 +355,7 @@ int main(int argc, char** argv) {
         const bool has_output = opt.output >= 0 || !opt.output_name.empty();
         const char* err = nullptr;
         if (opt.cmd == Command::None)                              err = "Missing command (record, tone or latency)";
+        else if (opt.loopback && opt.cmd != Command::Record)       err = "--loopback is only valid with the record command";
         else if (opt.input >= 0 && !opt.input_name.empty())        err = "--input and --input-name are mutually exclusive";
         else if (opt.output >= 0 && !opt.output_name.empty())      err = "--output and --output-name are mutually exclusive";
         else if (!has_input)                                       err = "--input or --input-name is required";
@@ -385,11 +391,21 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (opt.loopback && !ma_context_is_loopback_supported(&ctx)) {
+        std::cerr << "System-playback loopback capture is not supported by backend '"
+                  << ma_get_backend_name(ctx.backend) << "'\n";
+        return 1;
+    }
+
     // Resolve device selections, then copy the ids: the enumeration arrays are
-    // only valid until the next call.
-    const int in_idx = resolve_device(cap, n_cap, opt.input, opt.input_name, "capture");
+    // only valid until the next call. In --loopback mode, capture.pDeviceID is
+    // a PLAYBACK endpoint id (M1.5 stage 06).
+    const ma_device_info* in_list = opt.loopback ? play : cap;
+    const ma_uint32 n_in          = opt.loopback ? n_play : n_cap;
+    const char* in_label          = opt.loopback ? "loopback playback" : "capture";
+    const int in_idx = resolve_device(in_list, n_in, opt.input, opt.input_name, in_label);
     if (in_idx < 0) return 1;
-    const ma_device_id in_id = cap[in_idx].id;
+    const ma_device_id in_id = in_list[in_idx].id;
     ma_device_id out_id{};
     if (opt.cmd != Command::Record) {
         const int out_idx = resolve_device(play, n_play, opt.output, opt.output_name, "playback");
@@ -409,8 +425,11 @@ int main(int argc, char** argv) {
         total = s.sched.total();
     }
 
-    ma_device_config cfg = ma_device_config_init(
-        opt.cmd == Command::Record ? ma_device_type_capture : ma_device_type_duplex);
+    const ma_device_type dev_type =
+        opt.cmd == Command::Record
+            ? (opt.loopback ? ma_device_type_loopback : ma_device_type_capture)
+            : ma_device_type_duplex;
+    ma_device_config cfg = ma_device_config_init(dev_type);
     cfg.capture.pDeviceID  = &in_id;
     cfg.capture.format     = ma_format_f32;
     cfg.capture.channels   = 1;

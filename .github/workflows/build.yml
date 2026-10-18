@@ -1,0 +1,65 @@
+# Build + test matrix (Milestone 1.5 / Stage 01).
+#
+# Portability gate: every push to master and every PR builds fluxvoice with
+# warnings-as-errors and runs the CTest suite (all tests are hardware-free —
+# CLI cases are rejected before any audio context exists, unit tests never
+# open a device). Runners have no sound cards; miniaudio may fall back to its
+# null backend there, which the tests must tolerate. Anything needing real
+# audio hardware belongs to stage 06's manual per-OS matrix.
+#
+# Action versions are pinned to major tags (v5 = node-24 runtime) for the
+# same reproducibility / supply-chain reasons as the GIT_TAG pins in
+# CMakeLists.txt.
+name: build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux-gcc,    os: ubuntu-latest,  cc: gcc,   cxx: g++ }
+          - { name: linux-clang,  os: ubuntu-latest,  cc: clang, cxx: clang++ }
+          - { name: windows-msvc, os: windows-latest }
+          - { name: macos-clang,  os: macos-latest,  cc: clang, cxx: clang++ }
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+
+      # Exported via GITHUB_ENV so entries without cc/cxx (windows-msvc)
+      # never see an empty CC/CXX variable.
+      - name: Select compilers
+        if: matrix.cc != ''
+        run: |
+          echo "CC=${{ matrix.cc }}" >> "$GITHUB_ENV"
+          echo "CXX=${{ matrix.cxx }}" >> "$GITHUB_ENV"
+
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@v5
+        with:
+          path: build/_deps
+          key: deps-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: deps-${{ matrix.name }}-
+
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
+
+      # --config is a no-op on single-config generators and selects the
+      # configuration to build on the multi-config Visual Studio generator.
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Release

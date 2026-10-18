@@ -186,8 +186,13 @@ FluxVoice-S2UT/
 └── src/
     ├── main.cpp
     ├── audio/
-    │   ├── AudioEngine.hpp    # Device enumeration & miniaudio duplex stream
+    │   ├── AudioTypes.hpp     # App-facing device vocabulary (M1.5; no miniaudio types)
+    │   ├── AudioBackend.hpp   # Backend seam: enumerate + capabilities interface
+    │   ├── MiniaudioBackend.cpp # The seam over miniaudio (sole MINIAUDIO_IMPLEMENTATION TU)
+    │   ├── AudioDeviceRegistry.hpp/.cpp # Snapshots, generations, selection resolution (M1.5 03–04)
+    │   ├── AudioEngine.hpp    # Duplex miniaudio stream, keyed endpoints
     │   ├── DuplexRouter.hpp   # Real-time callback body + SPSC queues + counters
+    │   ├── RouteGuard.hpp     # Refuses capture/playback feedback routes
     │   ├── ChunkAssembler.hpp # Arbitrary callback sizes → fixed 80 ms model frames
     │   └── OverlapAdd.hpp     # OLA crossfader
     ├── pipeline/
@@ -204,6 +209,8 @@ FluxVoice-S2UT/
 ## 6. Building
 
 ### Prerequisites
+
+- Supported platforms (M1.5 stage 01): Windows 10+ (x64, WASAPI) · macOS 13+ (Apple Silicon & Intel, Core Audio) · current Ubuntu LTS (24.04; PipeWire-Pulse or ALSA). CI builds GCC / Clang / MSVC / Apple Clang on every push ([workflow](.github/workflows/build.yml))
 
 - CMake ≥ 3.22
 - C++20 compiler — MSVC 2022 / GCC 12+ / Clang 15+
@@ -226,7 +233,7 @@ powershell -ExecutionPolicy Bypass -File tools/setup_test_rig.ps1   # Windows: c
 
 > Header-only deps (miniaudio, readerwriterqueue) are fetched automatically via `FetchContent`.
 > Point `-DONNXRUNTIME_ROOT=/path/to/onnxruntime` at a prebuilt SDK when wiring the neural stages.
-> CI builds should pass `-DFLUXVOICE_WARNINGS_AS_ERRORS=ON` to keep our sources warning-free.
+> CI (`.github/workflows/build.yml`, M1.5 stage 01) builds Linux GCC/Clang, Windows MSVC and macOS Apple Clang with `-DFLUXVOICE_WARNINGS_AS_ERRORS=ON` and runs `ctest` on every push.
 
 ---
 

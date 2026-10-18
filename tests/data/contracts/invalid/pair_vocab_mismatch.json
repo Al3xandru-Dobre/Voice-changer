@@ -1,0 +1,50 @@
+{
+  "description": "Different codebooks",
+  "error": "vocab mismatch: encoder 100, vocoder 500",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 1,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [
+          "conv",
+          "attn_k",
+          "attn_v"
+        ],
+        "license": "test case (no weights)"
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 500,
+        "cond_frame_samples": 320,
+        "cond_inputs": [
+          "logf0",
+          "voicing",
+          "aperiodicity",
+          "energy",
+          "spk_emb"
+        ],
+        "spk_emb_dim": 64,
+        "overlap_samples": 0,
+        "states": [
+          "dec"
+        ],
+        "license": "test case (no weights)"
+      }
+    }
+  ]
+}
