@@ -468,7 +468,10 @@ def load_onnx(path):
     """Read an .onnx file and check it like the C++ loader will. Returns
     (contract, model)."""
     import onnx
-    model = onnx.load(str(path), load_external_data=False)
+    try:
+        model = onnx.load(str(path), load_external_data=False)
+    except Exception as e:
+        raise ContractError(f"{path}: invalid ONNX file: {e}") from None
     inputs, outputs = graph_io(model)
     return check_model(read_contract_text(model), inputs, outputs), model
 

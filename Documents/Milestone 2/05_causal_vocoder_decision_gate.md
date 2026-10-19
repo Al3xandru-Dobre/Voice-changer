@@ -62,11 +62,15 @@ Finally, fine-tune the vocoder on the winner's ids.
   - [x] Discriminators: MPD (`periods=(2,3,5,7,11)`) + multi-resolution STFT
         discriminator (`MultiResolutionDiscriminator`, FFTs `512/1024/2048`)
   - [x] AdamW lr 2e-4, betas (0.8, 0.99), exponential decay 0.999/epoch
-  - [x] bf16 autocast, segment 8320 samples (26 frames), batch 16 (~1.74 GiB
-        peak on the 8 GB RTX 4060 Laptop)
-  - [x] Resumable checkpoints every 30 min (`--resume auto`); TensorBoard
+  - [x] bf16 autocast, segment 12800 samples (40 frames = 800 ms > 606 ms past
+        receptive field;smoke-benchmarked at 8320 samples / 1.74 GiB peak on the
+        8 GB RTX 4060 Laptop)
+  - [x] Resumable checkpoints every 30 min (`--resume auto`); TensorBoard;
+        speaker-stratified validation subset (`select_val_items`); upfront speaker
+        name validation and non-finite loss/gradient guards
   - [x] Per-speaker F0/energy stats computed (`compute_speaker_stats`) and
-        stored with the checkpoint + written to `voices.json`
+        stored with the checkpoint + written to `voices.json`; `--lookahead-frames`
+        aligns conditioning extraction with the chosen encoder head (`L`)
 - [x] **Streaming equivalence** (`stream_check.py --role vocoder`). Generator
       `step()` (1/2/4 frames, state carried) vs. `forward()` on 30 s: max |Δ|
       and a boundary-step check. Passes on random init and on a 30-step CUDA
@@ -178,31 +182,37 @@ on UTMOS. If nothing is eligible, try in this order:
 ## Verification (2026-10-18 — code, streaming equivalence, export smoke & cost)
 
 - **Generator architecture (`fvml/vocoder.py`):**
-  - V2-class `UnitVocoder`: **1.06 M parameters, 0.89 GMAC/s**, 806 ms of past
-    receptive field, **80 state tensors / 27 496 floats** (`upsample_rates =
-    (8, 5, 4, 2)`, `upsample_kernels = (16, 10, 8, 4)`, `upsample_initial_channel
-    = 128`, MRF kernels `3/7/11`, dilations `1/3/5`).
+  - V2-class `UnitVocoder`: **1.06 M parameters, 0.89 GMAC/s**, **606 ms** (`9 696`
+    samples) of past receptive field, **80 state tensors / 27 496 floats**
+    (`upsample_rates = (8, 5, 4, 2)`, `upsample_kernels = (16, 10, 8, 4)`,
+    `upsample_initial_channel = 128`, MRF kernels `3/7/11`, dilations `1/3/5`).
   - `VocoderDiscriminator` (MPD periods `2/3/5/7/11` + MRD FFTs `512/1024/2048`):
     11.06 M parameters.
 - **Streaming equivalence (`stream_check.py --role vocoder --seconds 30`):**
   - Random init over 30.0 s (1 500 frames) at `fps` 1, 2, 4: max |Δ| =
-    **3.09e-11**, SNR = **125.6 dB**, max boundary step **1.05e-7 ≤ 2.32e-5**
-    (reference max step).
+    **3.09e-11**, SNR = **125.6 dB** (gated on `SNR >= 90 dB` + relative `max|Δ|`
+    + scale-aware boundary slope, [`BUG-017`](../Bug%20Report/BUG-017_vocoder_checks_below_noise_floor.md)),
+    max boundary step **1.05e-7 ≤ 2.32e-5** (reference max step).
   - 30-step CUDA bf16 smoke checkpoint over 30.0 s at `fps` 1, 2, 4: max |Δ| =
     **1.79e-7** (DoD ≤ 1e-4), SNR = **136.4 dB**, max boundary step **0.0532 ≤
     0.3896** (reference max step).
 - **Training smoke run (`train_unit_vocoder.py`, RTX 4060 Laptop 8 GB, CUDA bf16):**
   - Batch 16 × 8 320 samples (26 frames): **2.72 it/s, peak GPU memory
-    1.74 GiB** (150k steps ≈ 15.3 h, well inside the 8 GB VRAM budget).
+    1.74 GiB** (150k steps ≈ 15.3 h, well inside the 8 GB VRAM budget; default
+    segment raised to 12 800 samples = 800 ms so every crop exceeds the 606 ms
+    receptive field).
   - `--resume auto` verified (step 20 → 30); `--finetune-from` verified with
     student-L1 units and speaker-table expansion (`expand_speakers`).
 - **ONNX export smoke test & single-core cost (`gate_report.py --skip-eval`):**
   - All four student candidates (`student-L0/L1/L2 s1`, `student-L1 s2`) export
-    cleanly via `torch.onnx.export(..., dynamo=True)`, pass `onnx.checker` full
-    check, `fvml.contract.load_onnx`, and `validate_pair`, and match PyTorch
-    `step()` in ONNX Runtime 1.31.0 CPU (`intra_op = 1`) with exact unit match
-    and vocoder max |Δ| ≤ **4.37e-11**.
-  - Single-core CPU per-hop p95 (`encoder + vocoder`):
+    cleanly via `fvml.export.export_graph(..., exporter="dynamo")`
+    ([`BUG-016`](../Bug%20Report/BUG-016_gate_export_silent_exporter_fallback.md)),
+    pass `onnx.checker` full check, `fvml.contract.load_onnx`, and `validate_pair`,
+    and match PyTorch `step()` over multi-hop carried-state steps in ONNX Runtime
+    1.31.0 CPU (`intra_op = 1`).
+  - Single-core CPU per-hop p95 (`encoder + vocoder`, stateful carried-state loop;
+    the gate rule and `Projected T−B` use the ORT clock per
+    [`BUG-015`](../Bug%20Report/BUG-015_gate_decides_on_pytorch_clock.md)):
     - **ORT 1.31.0 (`intra_op = 1`):** **4.5–4.9 ms** at 20 ms hop (`s1`, ≤ 25%
       of hop; encoder 2.7–2.9 ms + vocoder 1.8–2.0 ms), **8.2 ms** at 40 ms hop
       (`s2`, 20% of hop). All `s1` and `s2` student candidates pass the ≤ 50%-of-hop
@@ -210,7 +220,7 @@ on UTMOS. If nothing is eligible, try in this order:
     - **PyTorch eager (`torch.set_num_threads(1)`):** 15.4–16.7 ms at `s1` (Python
       dispatch across 100+ `StreamingConv1d` modules) and **18.7 ms** at `s2`
       (40 ms hop, within the 20 ms budget even in eager PyTorch).
-- **Tests:** 46/46 CTest targets pass (`cmake --build build --config Release &&
+- **Tests:** 47/47 CTest targets pass (`cmake --build build --config Release &&
   ctest --test-dir build -C Release --output-on-failure`), including
-  `python_training_stage05` (`tests/test_vocoder.py`, 11 tests) and the expanded
+  `python_training_stage05` (`tests/test_vocoder.py`, 14 tests) and the expanded
   `tests/test_streaming.py` (47 tests).

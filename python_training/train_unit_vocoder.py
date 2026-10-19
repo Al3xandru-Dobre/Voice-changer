@@ -56,6 +56,15 @@ COND_FS = vocoder.COND_FRAME_SAMPLES
 PREROLL_COND_FRAMES = 20     # 400 ms causal warmup for HPF, YIN window and logf0_held
 
 
+def validate_speaker_name(name):
+    """Enforce the voices.json speaker-name rule ([a-z0-9_-]+) before training."""
+    if not isinstance(name, str) or not name or \
+            not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in name) or \
+            name != name.lower():
+        raise ValueError(f"invalid speaker name {name!r}: must match lowercase [a-z0-9_-]+")
+    return name
+
+
 # -- data & speaker stats -----------------------------------------------------
 def load_excluded_ids(targets_path):
     """Set of clip_ids and relative paths in targets.tsv that must stay held out."""
@@ -114,7 +123,7 @@ def join_vocoder_items(manifest_spec, units_spec, exclude_targets=None, speakers
         if abs(expect - n_frames) > 1:
             bad += 1
             continue
-        spk = str(r.get("speaker") or "default").lower()
+        spk = validate_speaker_name(str(r.get("speaker") or "default").lower())
         if spk not in seen_speakers:
             seen_speakers.add(spk)
             found_speakers.append(spk)
@@ -124,7 +133,7 @@ def join_vocoder_items(manifest_spec, units_spec, exclude_targets=None, speakers
         raise ValueError(f"no usable training utterances found for {units_spec}")
 
     if speakers_order:
-        speakers = list(speakers_order)
+        speakers = [validate_speaker_name(str(s)) for s in speakers_order]
         for s in found_speakers:
             if s not in speakers:
                 speakers.append(s)
@@ -159,14 +168,17 @@ def read_audio_samples(path, start_sample, n_samples):
     return np.pad(x, (0, n_samples - len(x))) if len(x) < n_samples else x
 
 
-def extract_cond_crop(apath, start_cond_frame, n_cond_frames, preroll=PREROLL_COND_FRAMES):
+def extract_cond_crop(apath, start_cond_frame, n_cond_frames, preroll=PREROLL_COND_FRAMES,
+                      lookahead_frames=0):
     """Extract causal [logf0_held, voicing, aperiodicity, log_energy] for conditioning
     frames [start, start + n), warming the tracker up on `preroll` preceding frames."""
     pre = min(start_cond_frame, preroll)
+    la = max(0, int(lookahead_frames))
     s0 = (start_cond_frame - pre) * COND_FS
     total_cond = pre + n_cond_frames
-    wav = read_audio_samples(apath, s0, total_cond * COND_FS)
-    feats = features.extract(wav)       # (total_cond, 7) float64
+    wav = read_audio_samples(apath, s0, (total_cond + la) * COND_FS)
+    cfg = features.PitchConfig(lookahead_frames=la) if la else None
+    feats = features.extract(wav[:total_cond * COND_FS] if la == 0 else wav, cfg=cfg)
     crop = feats[pre:pre + n_cond_frames]
     # Columns in features.FEATURES:
     # 0: f0_hz, 1: aperiodicity, 2: voicing, 3: log_energy, 4: logf0_held
@@ -247,11 +259,12 @@ class VocoderCropDataset(torch.utils.data.Dataset):
     """Random frame-aligned segment loader yielding
     (wav, units, logf0, voicing, aperiodicity, energy, spk_id)."""
 
-    def __init__(self, items, crop_unit_frames, unit_repeat=1):
+    def __init__(self, items, crop_unit_frames, unit_repeat=1, lookahead_frames=0):
         self.items = items
         self.crop_u = crop_unit_frames
         self.unit_repeat = unit_repeat
         self.crop_c = crop_unit_frames * unit_repeat
+        self.lookahead_frames = max(0, int(lookahead_frames))
         self.rng = None
 
     def __len__(self):
@@ -270,7 +283,7 @@ class VocoderCropDataset(torch.utils.data.Dataset):
 
         start_c = start_u * self.unit_repeat
         wav, logf0, voicing, aperiodicity, energy = extract_cond_crop(
-            apath, start_c, self.crop_c
+            apath, start_c, self.crop_c, lookahead_frames=self.lookahead_frames
         )
         return (
             torch.from_numpy(wav),
@@ -301,15 +314,54 @@ def worker_init(_):
 
 
 # -- validation & checkpointing -----------------------------------------------
+def select_val_items(items, limit):
+    """Speaker-stratified validation subset using `evallist.evenly_spaced` so
+    multi-speaker manifests are not dominated by whichever speaker comes first."""
+    if not items or limit is None or limit <= 0 or len(items) <= limit:
+        return list(items)
+    by_spk = {}
+    spk_order = []
+    for it in items:
+        spk = it[4]
+        if spk not in by_spk:
+            by_spk[spk] = []
+            spk_order.append(spk)
+        by_spk[spk].append(it)
+    n_spk = len(spk_order)
+    if n_spk <= 1:
+        return evallist.evenly_spaced(items, limit)
+    # Interleave evenly spaced rows per speaker, then cap to `limit`.
+    per_spk_cap = max(1, math.ceil(limit / n_spk))
+    spaced = {s: evallist.evenly_spaced(by_spk[s], min(len(by_spk[s]), per_spk_cap))
+              for s in spk_order}
+    interleaved = []
+    depth = 0
+    while len(interleaved) < limit:
+        added = False
+        for s in spk_order:
+            if depth < len(spaced[s]):
+                interleaved.append(spaced[s][depth])
+                added = True
+                if len(interleaved) >= limit:
+                    break
+        if not added:
+            break
+        depth += 1
+    return interleaved
+
+
 @torch.no_grad()
-def validate(gen, mel_loss_fn, items, unit_repeat, device, limit):
+def validate(gen, mel_loss_fn, items, unit_repeat, device, limit,
+             lookahead_frames=0, per_speaker_out=None):
     gen.eval()
+    subset = select_val_items(items, limit)
     losses = []
-    for apath, upath, n_u, spk_idx, _ in items[:limit]:
+    by_spk = {}
+    for apath, upath, n_u, spk_idx, spk in subset:
         take_u = min(n_u, max(1, 250 // unit_repeat))    # cap at ~5 s per val utterance
         raw_u = np.load(upath, mmap_mode="r")[:take_u].astype(np.int64)
         wav, logf0, voicing, aperiodicity, energy = extract_cond_crop(
-            apath, 0, take_u * unit_repeat, preroll=0
+            apath, 0, take_u * unit_repeat, preroll=0, lookahead_frames=lookahead_frames
         )
         u_t = torch.from_numpy(raw_u)[None].to(device)
         lf_t = torch.from_numpy(logf0)[None].to(device)
@@ -320,7 +372,13 @@ def validate(gen, mel_loss_fn, items, unit_repeat, device, limit):
         wav_t = torch.from_numpy(wav)[None].to(device)
         pred = gen(u_t, lf_t, v_t, ap_t, en_t, spk_t)
         mel_l1, _ = mel_loss_fn(wav_t, pred)
-        losses.append(float(mel_l1))
+        val = float(mel_l1)
+        losses.append(val)
+        by_spk.setdefault(spk, []).append(val)
+    if isinstance(per_speaker_out, dict):
+        per_speaker_out.clear()
+        for s, vals in by_spk.items():
+            per_speaker_out[s] = float(np.mean(vals))
     gen.train()
     return float(np.mean(losses)) if losses else 0.0
 
@@ -428,6 +486,9 @@ def train(args, log=print):
 
     step, best_val, elapsed0 = 0, float("inf"), 0.0
     speaker_stats = {}
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    random.seed(args.seed)
 
     if prior_ck is not None:
         old_meta = json.loads(prior_ck["labels_meta"])
@@ -450,13 +511,13 @@ def train(args, log=print):
             jobs=max(1, args.workers), existing=prior_ck.get("speaker_stats")
         )
     else:
-        torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        random.seed(args.seed)
         speaker_stats = compute_speaker_stats(
             train_items, speakers, max_utts_per_speaker=args.stats_max_utts,
             jobs=max(1, args.workers)
         )
+
+    # Validate voices.json schema upfront before any training step runs (F-4).
+    gen.voices_json(speakers, speaker_stats)
 
     opt_g = torch.optim.AdamW(gen.parameters(), lr=args.lr, betas=(0.8, 0.99),
                               weight_decay=args.weight_decay)
@@ -486,8 +547,11 @@ def train(args, log=print):
         f"GMAC/s), disc {d_params / 1e6:.2f}M params, {len(speakers)} speaker(s) {speakers}, "
         f"{len(train_items)} train / {len(val_items)} val utts, device {device}")
 
+    cond_lookahead = (args.lookahead_frames if getattr(args, "lookahead_frames", None) is not None
+                      else int(labels_meta.get("lookahead_frames") or 0))
     crop_u = max(1, round(args.segment_samples / cfg.frame_samples))
-    ds = VocoderCropDataset(train_items, crop_u, unit_repeat=cfg.unit_repeat)
+    ds = VocoderCropDataset(train_items, crop_u, unit_repeat=cfg.unit_repeat,
+                            lookahead_frames=cond_lookahead)
     sampler = WeightedStream([max(n, crop_u) for _, _, n, _, _ in train_items],
                              seed=args.seed * 1_000_003 + step)
     loader = torch.utils.data.DataLoader(
@@ -507,6 +571,8 @@ def train(args, log=print):
     t_start, t_ckpt, t_log = time.monotonic(), time.monotonic(), time.monotonic()
     acc_losses = np.zeros(4, dtype=np.float64)   # [d_loss, g_adv, fm, mel]
     acc_n = 0
+    nonfinite_streak = 0
+    max_nonfinite = 5
 
     def checkpoint(name):
         save_checkpoint(
@@ -535,10 +601,20 @@ def train(args, log=print):
             fake_s_det, _ = disc(fake.detach())
             loss_d = vocoder.discriminator_loss(real_s, fake_s_det)
 
+        if not torch.isfinite(loss_d):
+            nonfinite_streak += 1
+            log(f"[train] warning: non-finite loss_d at step {step + 1} "
+                f"({nonfinite_streak}/{max_nonfinite})")
+            if nonfinite_streak >= max_nonfinite:
+                writer.close()
+                raise RuntimeError(f"aborted after {nonfinite_streak} consecutive non-finite steps")
+            continue
+
         opt_d.zero_grad(set_to_none=True)
         loss_d.backward()
-        torch.nn.utils.clip_grad_norm_(disc.parameters(), args.clip)
-        opt_d.step()
+        dnorm = float(torch.nn.utils.clip_grad_norm_(disc.parameters(), args.clip))
+        if math.isfinite(dnorm):
+            opt_d.step()
 
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_bf16):
             real_s, real_fmap = disc(wav)
@@ -548,9 +624,30 @@ def train(args, log=print):
             loss_mel, _ = mel_loss_fn(wav, fake)
             loss_g = loss_adv + args.fm_weight * loss_fm + args.mel_weight * loss_mel
 
+        if not torch.isfinite(loss_g):
+            nonfinite_streak += 1
+            opt_g.zero_grad(set_to_none=True)
+            log(f"[train] warning: non-finite loss_g at step {step + 1} "
+                f"({nonfinite_streak}/{max_nonfinite})")
+            if nonfinite_streak >= max_nonfinite:
+                writer.close()
+                raise RuntimeError(f"aborted after {nonfinite_streak} consecutive non-finite steps")
+            continue
+
         opt_g.zero_grad(set_to_none=True)
         loss_g.backward()
         gnorm = float(torch.nn.utils.clip_grad_norm_(gen.parameters(), args.clip))
+        if not math.isfinite(gnorm):
+            nonfinite_streak += 1
+            opt_g.zero_grad(set_to_none=True)
+            log(f"[train] warning: non-finite grad_norm_g at step {step + 1} "
+                f"({nonfinite_streak}/{max_nonfinite})")
+            if nonfinite_streak >= max_nonfinite:
+                writer.close()
+                raise RuntimeError(f"aborted after {nonfinite_streak} consecutive non-finite steps")
+            continue
+
+        nonfinite_streak = 0
         opt_g.step()
         sched_g.step()
         sched_d.step()
@@ -578,9 +675,16 @@ def train(args, log=print):
             acc_n = 0
 
         if val_items and (step % args.val_every == 0 or step == args.steps):
-            val_mel = validate(gen, mel_loss_fn, val_items, cfg.unit_repeat, device, args.val_limit)
+            per_spk_val = {}
+            val_mel = validate(gen, mel_loss_fn, val_items, cfg.unit_repeat, device,
+                               args.val_limit, lookahead_frames=cond_lookahead,
+                               per_speaker_out=per_spk_val)
             writer.add_scalar("val/loss_mel", val_mel, step)
-            log(f"[val] step {step}: mel_l1 {val_mel:.4f}")
+            for spk_name, spk_mel in per_spk_val.items():
+                writer.add_scalar(f"val/loss_mel_{spk_name}", spk_mel, step)
+            spk_str = (" (" + ", ".join(f"{k}={v:.3f}" for k, v in per_spk_val.items()) + ")"
+                       if len(per_spk_val) > 1 else "")
+            log(f"[val] step {step}: mel_l1 {val_mel:.4f}{spk_str}")
             if val_mel < best_val:
                 best_val = val_mel
                 checkpoint("best.pt")
@@ -621,8 +725,10 @@ def parse_args(argv=None):
                    help="held-out target reference TSV to exclude from training ('' = none)")
     p.add_argument("--upsample-initial-channel", type=int, default=128,
                    help="generator initial width (128 = V2-class ~1M params; 256/512 = V1-class)")
-    p.add_argument("--segment-samples", type=int, default=8320,
-                   help="training segment length in samples (8192-16384; rounded to frame boundary)")
+    p.add_argument("--segment-samples", type=int, default=12800,
+                   help="training segment length in samples (default 12800 = 800 ms > 606 ms RF)")
+    p.add_argument("--lookahead-frames", type=int, default=None,
+                   help="pitch tracker lookahead frames (default: from units_meta.json or 0)")
     p.add_argument("--steps", type=int, default=150_000,
                    help="training steps (150k for gate vocoder; 50k for post-gate fine-tune)")
     p.add_argument("--steps-per-epoch", type=int, default=1000,
@@ -652,23 +758,29 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    for stream_io in (sys.stdout, sys.stderr):
+        if hasattr(stream_io, "reconfigure"):
+            stream_io.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     args = parse_args(argv)
     if bool(args.val_manifest) != bool(args.val_units):
         print("[train_unit_vocoder] error: --val-manifest and --val-units go together",
               file=sys.stderr)
         return 1
     if args.resume and args.resume != "auto" and not args.run_name:
-        ck = torch.load(args.resume, map_location="cpu", weights_only=True)
-        args.run_name = ck.get("run_name")
+        try:
+            ck = torch.load(args.resume, map_location="cpu", weights_only=True)
+            args.run_name = ck.get("run_name") if isinstance(ck, dict) else None
+        except Exception as e:
+            print(f"[train_unit_vocoder] error: {e}", file=sys.stderr)
+            return 1
     if not args.run_name:
         if args.resume == "auto":
             print("[train_unit_vocoder] error: --resume auto needs --run-name", file=sys.stderr)
             return 1
         args.run_name = "voc_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    sys.stdout.reconfigure(line_buffering=True)
     try:
         return train(args)
-    except (FileNotFoundError, ValueError, units.UnitsMismatch) as e:
+    except (FileNotFoundError, ValueError, KeyError, TypeError, RuntimeError, units.UnitsMismatch) as e:
         print(f"[train_unit_vocoder] error: {e}", file=sys.stderr)
         return 1
 

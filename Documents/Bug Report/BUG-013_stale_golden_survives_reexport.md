@@ -8,7 +8,7 @@
 | **Name** | *Stale golden* — re-export from a different checkpoint leaves `golden/` (and `report["golden"]`) pointing at deleted or overwritten files |
 | **Reported** | 2026-10-18 (static review; see Environment) |
 | **Severity** | Medium (Stage 07's C++-vs-golden parity check silently verifies the wrong model) |
-| **Status** | ☐ open |
+| **Status** | ☑ fixed — verified 2026-10-19, see [Resolution](#resolution-verified-2026-10-19) |
 | **Component** | `python_training/export_stateful_onnx.py` — `run()` bundle-lifecycle branch, `write_golden()` |
 | **Blocks** | [Stage 07](../Milestone%202/07_ort_cpp_runtime.md) golden check (`fv_vc_file` vs `models/<bundle>/golden/`); contradicts [Stage 06](../Milestone%202/06_stateful_onnx_export.md)'s design decision *"a run with a different checkpoint deletes that role's variants …, and the chain results, so the bundle never mixes models"* |
 
@@ -110,3 +110,19 @@ different-model cleanup branch (and the shrink case) was written for the
 Until fixed, delete `models/<bundle>/golden/` by hand whenever a role is
 re-exported from a different checkpoint, and re-run the full export (without
 `--skip-parity`) for both roles before Stage 07 consumes the bundle.
+
+## Resolution (verified 2026-10-19)
+
+1. In `export_stateful_onnx.py::run()`, the different-model (`not same_source`)
+   branch now calls `_purge_golden(bundle, report, ...)`, deleting `bundle / "golden"`
+   and popping `report["golden"]` alongside `"chain"` and `"chain_cost"`.
+2. On `--skip-parity` runs, `_golden_is_current(bundle, report.get("golden"))`
+   verifies that every variant's `.onnx` file referenced in `golden/manifest.json`
+   still exists and matches its recorded SHA-256, purging `golden/` if not; on
+   `same_source` `--skip-parity` runs, prior `parity`/`cost` entries for surviving
+   variants are preserved.
+3. `write_golden()` unlinks any orphaned `units_s*.npy` / `audio_s*.wav` files in
+   `golden/` not referenced by the newly written manifest.
+4. `test_cli_builds_a_bundle` in `python_training/tests/test_export.py` pins all
+   three cases (same-checkpoint `--skip-parity` preservation, different-checkpoint
+   `--skip-parity` golden removal, and shrink-without-orphans regeneration).

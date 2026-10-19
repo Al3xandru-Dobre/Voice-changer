@@ -8,7 +8,7 @@
 | **Name** | *Silent fallback* — `export_ok = ✓` no longer means "this design exports with `dynamo=True`" |
 | **Reported** | 2026-10-18 |
 | **Severity** | Medium (the gate's "a design that can't export can't win" check can pass for the wrong reason; the measured ORT numbers then belong to a different graph than Stage 06 ships) |
-| **Status** | ◐ workaround (`PYTHONIOENCODING=utf-8`, already set for CTest; the swallow itself is still there) |
+| **Status** | ☑ fixed — verified 2026-10-19, see [Resolution](#resolution-verified-2026-10-19) |
 | **Component** | `python_training/gate_report.py` — `_export_module_to_onnx` (lines 150-184), `export_smoke_test` (`except Exception`, line 317), `format_gate_markdown` |
 | **Blocks** | [Stage 05](../Milestone%202/05_causal_vocoder_decision_gate.md) export-smoke task and its Verification claim ("export cleanly via `torch.onnx.export(..., dynamo=True)`"); trust in the "Export OK" column of the gate table |
 
@@ -150,3 +150,19 @@ recorded in a field that nothing reads.
 Run every Stage 05/06 Python tool with `PYTHONIOENCODING=utf-8` (CTest already
 does) and check `export_smoke.encoder_exporter` / `vocoder_exporter` in
 `gate_report.json` reads `dynamo` before trusting a row.
+
+## Resolution (verified 2026-10-19)
+
+1. `gate_report.py` now reuses `fvml.export.encoder_graph`, `vocoder_graph`,
+   `export_graph`, and `finalize` (eliminating the duplicate wrappers and
+   `_export_module_to_onnx`), so both stages share a single exporter policy,
+   opset/IR cap (`26`/`13`), and stdout-capture context.
+2. `export_smoke_test` and `gate_report.py` default to `--exporter dynamo`
+   (refusing silent fallback unless `--exporter auto` is explicitly passed) and
+   surface any fallback exporter and reason in `format_gate_markdown()`.
+3. `gate_report.py`, `stream_check.py`, `train_unit_vocoder.py`, `probe_units.py`,
+   and `export_stateful_onnx.py` all reconfigure `sys.stdout` and `sys.stderr`
+   with `encoding="utf-8", errors="replace", line_buffering=True` at entry.
+4. `test_export_smoke_and_streaming_chain` in `tests/test_vocoder.py` pins that
+   a simulated `dynamo=True` failure causes `export_smoke_test(..., exporter="dynamo")`
+   to return `ok=False` while `exporter="auto"` records the fallback reason.

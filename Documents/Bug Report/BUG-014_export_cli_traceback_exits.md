@@ -8,7 +8,7 @@
 | **Name** | *Traceback exits* — bad inputs and ORT failures crash the CLI with exit 1, the code reserved for "a gate failed" |
 | **Reported** | 2026-10-18 (static review; see Environment) |
 | **Severity** | Low–medium (automation misreads failures; documented exit-status contract broken; no wrong model is produced) |
-| **Status** | ☐ open |
+| **Status** | ☑ fixed — verified 2026-10-19, see [Resolution](#resolution-verified-2026-10-19) |
 | **Component** | `python_training/export_stateful_onnx.py` — `main()` exception boundary; also `fvml/export.py` boundary calls (`audio.load`, `ort.InferenceSession`, `torch.load`) |
 | **Blocks** | [Stage 06](../Milestone%202/06_stateful_onnx_export.md) CLI contract ("Exit status: 0 = …; 1 = a gate failed …; 2 = bad arguments or an export/contract error"); scripting/CI around the exporter |
 
@@ -93,3 +93,19 @@ The CLI wraps its own `ExportError`s but calls library boundaries
 
 Treat any traceback (or exit 1 without a `verdict: … FAILED` log line) as an
 error, not a gate failure, when scripting the exporter.
+
+## Resolution (verified 2026-10-19)
+
+1. External boundaries in `fvml/contract.py` (`load_onnx`), `fvml/export.py`
+   (`ort_session`, `head_index`, `voices_json`), `fvml/vocoder.py`
+   (`VocoderConfig.from_dict`, `UnitVocoder.from_checkpoint`), and
+   `export_stateful_onnx.py` (`load_encoder`, `load_vocoder`, `parity_paths`,
+   `parity_audio`, `_load_json_dict`, `load_report`, and the `voices.json`
+   bundle check) wrap library exceptions into `ExportError` / `ContractError`
+   naming the offending path or field.
+2. `export_stateful_onnx.py::main()` catches `(fx.ExportError, fc.ContractError,
+   FileNotFoundError, OSError, RuntimeError, ValueError, KeyError)` and returns
+   exit code `2` with a single `[export] error: ...` line on `stderr`.
+3. `test_cli_rejects_bad_input` in `python_training/tests/test_export.py` pins
+   exit code `2` (and no traceback) on missing parity audio, malformed
+   `--gate-report`, corrupt checkpoint files, and corrupt `export_report.json`.

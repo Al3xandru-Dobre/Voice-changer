@@ -129,6 +129,8 @@ class VocoderConfig:
 
     @classmethod
     def from_dict(cls, d):
+        if not isinstance(d, dict):
+            raise ValueError(f"expected VocoderConfig dict, got {type(d).__name__}")
         out = {}
         for k, v in d.items():
             if k == "resblock_dilations":
@@ -137,7 +139,10 @@ class VocoderConfig:
                 out[k] = tuple(v)
             else:
                 out[k] = v
-        return cls(**out)
+        try:
+            return cls(**out)
+        except TypeError as e:
+            raise ValueError(f"invalid VocoderConfig fields: {e}") from e
 
 
 class ConditioningPreNet(nn.Module):
@@ -441,6 +446,8 @@ class UnitVocoder(StreamingModule):
     @classmethod
     def from_checkpoint(cls, path, map_location="cpu"):
         ckpt = torch.load(path, map_location=map_location, weights_only=True)
+        if not isinstance(ckpt, dict) or "config" not in ckpt or "model" not in ckpt:
+            raise ValueError(f"{path}: checkpoint must contain 'config' and 'model'")
         cfg_data = ckpt["config"]
         if isinstance(cfg_data, str):
             cfg_data = json.loads(cfg_data)

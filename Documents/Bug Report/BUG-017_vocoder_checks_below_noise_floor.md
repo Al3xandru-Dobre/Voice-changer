@@ -8,7 +8,7 @@
 | **Name** | *Quiet tolerance* — at random initialisation the generator's output peaks at 3.9e-5, so an absolute `max|Δ| ≤ 1e-4` check cannot fail |
 | **Reported** | 2026-10-18 |
 | **Severity** | Low–medium (the check that the Definition of Done relies on is meaningful on a trained checkpoint; but every random-init check, the unit tests and the quoted Verification pass criteria are vacuous, and broken caches pass them) |
-| **Status** | ◐ diagnosed |
+| **Status** | ☑ fixed — verified 2026-10-19, see [Resolution](#resolution-verified-2026-10-19) |
 | **Component** | `python_training/fvml/vocoder.py` (`_init_conv_weights`, std 0.01), `python_training/stream_check.py` (`VOCODER_MAX_ABS = 1e-4`, `check_vocoder`), `python_training/gate_report.py` (`export_smoke_test`: `voc_max_abs <= 1e-4`), `python_training/tests/test_vocoder.py` |
 | **Blocks** | [Stage 05](../Milestone%202/05_causal_vocoder_decision_gate.md) streaming-equivalence and export-smoke evidence; regression protection for the `python_training_stage05` CTest entry |
 
@@ -131,3 +131,21 @@ Until fixed, read the `snr_db` printed by `stream_check.py --role vocoder`
 rather than the `ok`/`FAIL` flag, and require ≥ 90 dB; run
 `python_training_stage03_04` together with `python_training_stage05` after any
 change to `fvml/streaming.py`.
+
+## Resolution (verified 2026-10-19)
+
+1. `stream_check.check_vocoder` now gates on `snr_db >= 90.0` (`VOCODER_MIN_SNR_DB`),
+   relative `max_abs <= 1e-4 * max(1.0, ref_rms)`, scale-aware boundary slope,
+   and `ref_peak > 0.0`, and reports `ref_rms` and `ref_peak`.
+2. `export_smoke_test` in `gate_report.py` runs `smoke_hops = 4` carried-state
+   hops (feeding `state_out` back as `state_in` on every step) and requires
+   `snr_db >= 50.0` (`MIN_VOCODER_SNR_DB`) and `ref_peak > 0.0` alongside the
+   relative `max_abs` check.
+3. `small_vocoder` in `tests/test_vocoder.py` initializes with `std=0.2` so
+   test outputs have `ref_peak > 1e-2` and `ref_rms > 1e-3`;
+   `test_vocoder_check_catches_broken_caches` verifies that dropping
+   `StreamingConvTranspose1d` caches or dilated `StreamingConv1d` caches causes
+   `check_vocoder` to fail (`pass = False`, `snr_db < 90 dB`).
+4. `test_vocoder_whole_model_is_causal` empirically verifies that
+   `past_context_samples() == 9696` (606 ms) matches the perturbation horizon of
+   frame 0.

@@ -30,7 +30,15 @@ def small_cfg():
 @pytest.fixture(scope="module")
 def small_vocoder(small_cfg):
     torch.manual_seed(0)
-    return vocoder.UnitVocoder(small_cfg).eval()
+    m = vocoder.UnitVocoder(small_cfg).eval()
+    # Default training init (std=0.01 across ~100 convs) peaks at ~4e-5; boost
+    # the test fixture's weight gain so equivalence/parity checks run at O(0.1)
+    # amplitude above the 1e-4 absolute tolerance (BUG-017).
+    with torch.no_grad():
+        for p in m.parameters():
+            if p.dim() > 1:
+                p.normal_(0.0, 0.2)
+    return m
 
 
 def test_vocoder_size_shapes_and_contract(small_vocoder, small_cfg):
@@ -106,10 +114,41 @@ def test_vocoder_step_equals_forward_and_boundary_slope(small_vocoder, fps):
     wav = (0.2 * np.sin(2 * np.pi * 180.0 * np.arange(16 * FS) / 16000.0)).astype(np.float32)
     wav += (0.02 * rng.standard_normal(len(wav))).astype(np.float32)
     rep = stream_check.check_vocoder(small_vocoder, wav, fps_list=(fps,), seed=fps)
+    assert rep["ref_peak"] > 1e-2 and rep["ref_rms"] > 1e-3
     assert rep["pass"]
     r = rep["fps"][fps]
     assert r["max_abs"] <= 1e-4
-    assert r["max_boundary_step"] <= r["max_step_ref"] + 1e-6
+    assert r["snr_db"] >= 90.0
+    assert r["max_boundary_step"] <= r["max_step_ref"] * 1.001 + 1e-6
+
+
+def test_vocoder_check_catches_broken_caches(small_vocoder, monkeypatch):
+    """BUG-017: dropping transposed-conv or dilated-conv caches must fail check_vocoder."""
+    wav = (0.2 * np.sin(2 * np.pi * 180.0 * np.arange(12 * FS) / 16000.0)).astype(np.float32)
+    orig_t = vocoder.StreamingConvTranspose1d.step
+
+    def drop_t_cache(self, x, cache):
+        y, c = orig_t(self, x, cache)
+        return y, torch.zeros_like(c)
+
+    monkeypatch.setattr(vocoder.StreamingConvTranspose1d, "step", drop_t_cache)
+    rep_t = stream_check.check_vocoder(small_vocoder, wav, fps_list=(1,), seed=0)
+    assert not rep_t["pass"]
+    assert rep_t["fps"][1]["snr_db"] < 90.0
+    monkeypatch.setattr(vocoder.StreamingConvTranspose1d, "step", orig_t)
+
+    orig_c = vocoder.StreamingConv1d.step
+
+    def drop_dilated_cache(self, x, cache):
+        y, c = orig_c(self, x, cache)
+        if self.dilation[0] > 1:
+            return y, torch.zeros_like(c)
+        return y, c
+
+    monkeypatch.setattr(vocoder.StreamingConv1d, "step", drop_dilated_cache)
+    rep_d = stream_check.check_vocoder(small_vocoder, wav, fps_list=(1,), seed=0)
+    assert not rep_d["pass"]
+    assert rep_d["fps"][1]["snr_db"] < 90.0
 
 
 def test_vocoder_whole_model_is_causal(small_cfg):
@@ -134,6 +173,102 @@ def test_vocoder_whole_model_is_causal(small_cfg):
             diff = (out - ref).abs()[0]
             assert diff[:(t + 1) * FS].max().item() == 0.0
             assert diff[(t + 1) * FS:(t + 2) * FS].max().item() > 0.0
+
+        # Empirical past receptive field: perturbing frame 0 cannot affect samples
+        # at or beyond frame_samples + past_context_samples().
+        ctx = m.past_context_samples()
+        assert ctx == 9696
+        n_long = 35
+        u_long = torch.zeros((1, n_long), dtype=torch.int64)
+        lf_long = torch.full((1, n_long), 5.0, dtype=torch.float64)
+        vo_long = torch.ones((1, n_long), dtype=torch.float64)
+        ap_long = torch.full((1, n_long), 0.1, dtype=torch.float64)
+        en_long = torch.full((1, n_long), -5.0, dtype=torch.float64)
+        ref_long = m(u_long, lf_long, vo_long, ap_long, en_long, spk)
+        lf_pert = lf_long.clone()
+        lf_pert[:, 0] += 1.0
+        out_long = m(u_long, lf_pert, vo_long, ap_long, en_long, spk)
+        delta = (out_long - ref_long).abs()[0]
+        # With dilations (1, 3, 5) the perturbation reaches past sample 8000 (> d=1 reach)
+        # and vanishes identically after FS + ctx = 10016 samples.
+        assert delta[8000:FS + ctx].max().item() > 0.0
+        assert delta[FS + ctx:].max().item() == 0.0
+
+
+def test_generator_wiring_conditioning_film_mrf_tanh_and_unit_repeat(small_vocoder, small_cfg):
+    """Pins generator rules that previously survived mutation testing (F-1):
+    speaker embedding reaches audio (FiLM gamma and beta), all four conditioning
+    channels are wired in order, MRF averages branches, output tanh bounds
+    amplitude, and unit_repeat interleaves rather than tiles."""
+    u = torch.randint(0, small_cfg.vocab, (1, 6))
+    lf = torch.full((1, 6), 5.0)
+    vo = torch.full((1, 6), 0.8)
+    ap = torch.full((1, 6), 0.2)
+    en = torch.full((1, 6), -5.0)
+    e0 = small_vocoder.speaker_table.weight[0:1].detach().clone()
+    e1 = small_vocoder.speaker_table.weight[1:2].detach().clone()
+
+    with torch.no_grad():
+        y0 = small_vocoder(u, lf, vo, ap, en, e0)
+        y1 = small_vocoder(u, lf, vo, ap, en, e1)
+        # Speaker embedding must change the generated waveform (kills FiLM bypass).
+        assert (y0 - y1).abs().max().item() > 1e-3
+
+        # FiLM beta term: on zero input x=0, FiLM(0, spk) == beta != 0.
+        film0 = small_vocoder.films[0]
+        x_zero = torch.zeros(1, film0.proj.out_features // 2, 4)
+        assert film0(x_zero, e0).abs().max().item() > 1e-4
+
+        # Each of the 4 frame conditioning channels must affect output and map to its
+        # designated column in FRAME_COND_INPUTS = (logf0, voicing, aperiodicity, energy).
+        y_lf = small_vocoder(u, lf + 1.5, vo, ap, en, e0)
+        y_vo = small_vocoder(u, lf, vo * 0.0, ap, en, e0)
+        y_ap = small_vocoder(u, lf, vo, ap + 0.7, en, e0)
+        y_en = small_vocoder(u, lf, vo, ap, en + 3.0, e0)
+        for y_pert in (y_lf, y_vo, y_ap, y_en):
+            assert (y_pert - y0).abs().max().item() > 1e-4
+
+        # Verify exact column order [logf0, voicing, aperiodicity, energy] entering cond_net.
+        probe_v = vocoder.UnitVocoder(small_cfg).eval()
+        for col_idx in range(4):
+            probe_v.cond_net.conv1.weight.zero_()
+            probe_v.cond_net.conv1.bias.zero_()
+            probe_v.cond_net.conv1.weight[:, col_idx, :] = 1.0
+            args_base = [torch.zeros(1, 4) for _ in range(4)]
+            c_base = probe_v.cond_net(torch.stack(args_base, dim=1))
+            for test_idx in range(4):
+                args_mod = [t.clone() for t in args_base]
+                args_mod[test_idx] = torch.ones(1, 4)
+                y_base = probe_v(u[:, :4], *args_base, e0)
+                y_mod = probe_v(u[:, :4], *args_mod, e0)
+                changed = (y_mod - y_base).abs().max().item() > 0.0
+                assert changed is (test_idx == col_idx), f"col {col_idx} vs input {test_idx}"
+            assert c_base.abs().max().item() == 0.0
+
+        # CausalMRF averages across branches: with zero conv weights, each ResBlock is
+        # identity (x + 0), so MRF(x) must equal x (not len(blocks) * x).
+        mrf = vocoder.CausalMRF(8, kernels=(3, 7, 11), dilations=((1, 3, 5),) * 3).eval()
+        for p in mrf.parameters():
+            p.zero_()
+        x_in = torch.ones(1, 8, 16)
+        torch.testing.assert_close(mrf(x_in), x_in)
+
+        # Output tanh bounds big post-conv activations to (-1, 1].
+        sat_v = vocoder.UnitVocoder(small_cfg).eval()
+        sat_v.post.bias.fill_(50.0)
+        y_sat = sat_v(u[:, :2], lf[:, :2], vo[:, :2], ap[:, :2], en[:, :2], e0)
+        assert y_sat.max().item() <= 1.0 and y_sat.min().item() > 0.99
+
+        # unit_repeat=4 (Mimi 12.5 Hz -> 50 Hz): frame 0 repeats 4x then frame 1 repeats 4x.
+        mimi_v = vocoder.UnitVocoder(vocoder.VocoderConfig(
+            frame_samples=1280, cond_frame_samples=320, vocab=16,
+            unit_dim=8, cond_hidden=8, upsample_initial_channel=16,
+        )).eval()
+        emb = mimi_v._embed_content(torch.tensor([[1, 2]], dtype=torch.int64))
+        assert emb.shape == (1, 8, 8)
+        for k in range(4):
+            torch.testing.assert_close(emb[0, :, k], mimi_v.unit_emb.weight[1])
+            torch.testing.assert_close(emb[0, :, 4 + k], mimi_v.unit_emb.weight[2])
 
 
 def test_film_blend_and_expand_speakers(small_cfg):
@@ -178,6 +313,26 @@ def test_discriminators_and_losses():
     g_loss.backward()
     assert fake.grad is not None and torch.isfinite(fake.grad).all()
     assert torch.isfinite(d_loss)
+
+    # LSGAN target values: real target is 1.0 and fake target is 0.0 for D, 1.0 for G.
+    ones = [torch.ones(2, 10)]
+    zeros = [torch.zeros(2, 10)]
+    assert vocoder.discriminator_loss(ones, zeros).item() == pytest.approx(0.0, abs=1e-7)
+    assert vocoder.discriminator_loss(zeros, zeros).item() == pytest.approx(1.0, abs=1e-6)
+    assert vocoder.discriminator_loss(ones, ones).item() == pytest.approx(1.0, abs=1e-6)
+    assert vocoder.generator_adv_loss(ones).item() == pytest.approx(0.0, abs=1e-7)
+    assert vocoder.generator_adv_loss(zeros).item() == pytest.approx(1.0, abs=1e-6)
+
+    # MRD STFT magnitude must include the imaginary component (spec.real^2 + spec.imag^2):
+    # a 90-degree phase shift (sin vs cos at an exact FFT bin) has equal STFT magnitude.
+    rd = disc.mrd.discriminators[0]
+    t_idx = torch.arange(4 * FS, dtype=torch.float32)
+    freq_bin = 16.0 / rd.n_fft
+    cos_w = torch.cos(2 * np.pi * freq_bin * t_idx)[None]
+    sin_w = torch.sin(2 * np.pi * freq_bin * t_idx)[None]
+    mag_cos = rd._mag(cos_w)
+    mag_sin = rd._mag(sin_w)
+    torch.testing.assert_close(mag_cos[:, :, :, 2:-2], mag_sin[:, :, :, 2:-2], atol=1e-4, rtol=1e-4)
 
 
 def test_train_resume_finetune_and_targets_exclusion(tmp_path, monkeypatch):
@@ -242,14 +397,37 @@ def test_train_resume_finetune_and_targets_exclusion(tmp_path, monkeypatch):
         "--runs-dir", str(tmp_path / "runs"),
         "--ckpt-dir", str(tmp_path / "ckpt"),
     ]
-    assert tuv.main(common + ["--steps", "2"]) == 0
+    assert tuv.main(common + ["--steps", "2", "--steps-per-epoch", "10", "--seed", "7"]) == 0
     ck = torch.load(tmp_path / "ckpt" / "vtest" / "last.pt", weights_only=True)
     assert ck["step"] == 2
     assert ck["speakers"] == ["lj", "hifitts_92"]
+    # LR scheduler must decay with step s: lr * 0.999^(s / steps_per_epoch).
+    assert ck["scheduler_g"]["_last_lr"][0] == pytest.approx(2e-4 * (0.999 ** (2.0 / 10.0)), rel=1e-6)
+    assert ck["scheduler_g"]["_last_lr"][0] < 2e-4
     contract.ModelContract.from_json(ck["contract"])
     voices_disk = json.loads((tmp_path / "ckpt" / "vtest" / "voices.json").read_text(encoding="utf-8"))
     voc_loaded, _ = vocoder.UnitVocoder.from_checkpoint(tmp_path / "ckpt" / "vtest" / "last.pt")
     contract.validate_voices(voices_disk, voc_loaded.contract(1))
+    # Row i of voices.json must carry speaker_table.weight[i] and distinct logf0/energy stats.
+    for idx, spk_name in enumerate(["lj", "hifitts_92"]):
+        v_entry = voices_disk["voices"][idx]
+        assert v_entry["name"] == spk_name
+        np.testing.assert_allclose(
+            v_entry["embedding"],
+            voc_loaded.speaker_table.weight[idx].detach().numpy(),
+            rtol=0, atol=1e-6,
+        )
+        assert v_entry["logf0_std"] == pytest.approx(ck["speaker_stats"][spk_name]["logf0_std"])
+        assert v_entry["energy_std"] == pytest.approx(ck["speaker_stats"][spk_name]["energy_std"])
+        assert v_entry["logf0_std"] != v_entry["energy_std"]
+    assert voices_disk["voices"][0]["embedding"] != voices_disk["voices"][1]["embedding"]
+
+    # Mel loss weight (45.0) must contribute to generator parameter updates (F-1).
+    assert tuv.main(common + ["--run-name", "vtest_nomel", "--steps", "1", "--seed", "7", "--mel-weight", "0.0"]) == 0
+    ck_nomel = torch.load(tmp_path / "ckpt" / "vtest_nomel" / "last.pt", weights_only=True)
+    assert tuv.main(common + ["--run-name", "vtest_mel45", "--steps", "1", "--seed", "7", "--mel-weight", "45.0"]) == 0
+    ck_mel45 = torch.load(tmp_path / "ckpt" / "vtest_mel45" / "last.pt", weights_only=True)
+    assert not torch.allclose(ck_mel45["model"]["post.weight"], ck_nomel["model"]["post.weight"])
 
     # Resume to step 3
     assert tuv.main(common + ["--steps", "3", "--resume", "auto"]) == 0
@@ -283,7 +461,7 @@ def test_train_resume_finetune_and_targets_exclusion(tmp_path, monkeypatch):
     assert ck_ft["speakers"] == ["lj", "hifitts_92", "me"]
 
 
-def test_gate_rules_and_markdown_table():
+def test_gate_rules_and_markdown_table(tmp_path, monkeypatch):
     rows = [
         {"candidate": "student-L0 s1", "hop_ms": 20.0, "lookahead_frames": 0, "alg_latency_ms": 20.0,
          "compute_p95_ms": 8.0, "projected_t_minus_b_ms": 58.0,
@@ -325,8 +503,157 @@ def test_gate_rules_and_markdown_table():
     _, dec_fb = gate_report.apply_gate_rules(over_budget)
     assert dec_fb["winner"] is None and len(dec_fb["fallback"]) == 3
 
+    # Pin individual eligibility thresholds (max_wer_abs, max_tgt_cos_drop, min_utmos)
+    # and projected_t_minus_b_ms / alg_latency_ms arithmetic (F-1).
+    base_row = {
+        "candidate": "student-L1 s1", "hop_ms": 20.0, "lookahead_frames": 1,
+        "alg_latency_ms": 40.0, "compute_p95_ms": 5.0, "projected_t_minus_b_ms": 75.0,
+        "wer": 0.04, "cer": 0.01, "tgt_cos": 0.80, "src_cos": 0.10, "utmos": 3.5,
+        "f0_pcc": 0.85, "export_ok": True,
+    }
+    # tgt_cos drop > 0.05 is rejected, <= 0.05 is accepted.
+    ann_cos, _ = gate_report.apply_gate_rules([
+        base_row,
+        {**base_row, "candidate": "cos_ok", "tgt_cos": 0.751},
+        {**base_row, "candidate": "cos_bad", "tgt_cos": 0.749},
+    ])
+    by_c = {r["candidate"]: r for r in ann_cos}
+    assert by_c["cos_ok"]["eligible"] and not by_c["cos_bad"]["eligible"]
 
-def test_export_smoke_and_streaming_chain(tmp_path, small_vocoder):
+    # UTMOS < 3.0 is rejected, >= 3.0 is accepted.
+    ann_mos, _ = gate_report.apply_gate_rules([
+        {**base_row, "candidate": "mos_ok", "utmos": 3.0},
+        {**base_row, "candidate": "mos_bad", "utmos": 2.99},
+    ])
+    by_m = {r["candidate"]: r for r in ann_mos}
+    assert by_m["mos_ok"]["eligible"] and not by_m["mos_bad"]["eligible"]
+
+    # BUG-015: when both PyTorch and ORT clocks are present, ORT decides eligibility and T-B.
+    c_l0 = gate_report.parse_candidate_spec("student-L0:s1")
+    c_l1 = gate_report.parse_candidate_spec("student-L1:s1")
+    c_s2 = gate_report.parse_candidate_spec("student-L1:s2")
+    assert c_l0.alg_latency_ms == 20.0 and c_l1.alg_latency_ms == 40.0 and c_s2.alg_latency_ms == 60.0
+    assert gate_report.projected_t_minus_b_ms(c_l0, 4.5, io_floor_ms=25.0) == pytest.approx(54.5)
+    assert gate_report.projected_t_minus_b_ms(c_l0, 9.5, io_floor_ms=25.0) == pytest.approx(59.5)
+    assert gate_report.projected_t_minus_b_ms(c_l0, 4.5, io_floor_ms=30.0) == pytest.approx(59.5)
+    dual_rows = [
+        {**base_row, "candidate": "student-L0 s1", "hop_ms": 20.0, "lookahead_frames": 0,
+         "alg_latency_ms": 20.0, "compute_pytorch_p95_ms": 15.4, "compute_ort_p95_ms": 4.5,
+         "compute_p95_ms": 15.4, "projected_t_minus_b_pytorch_ms": 65.4,
+         "projected_t_minus_b_ort_ms": 54.5, "projected_t_minus_b_ms": 65.4},
+        {**base_row, "candidate": "student-L1 s2", "hop_ms": 40.0, "lookahead_frames": 1,
+         "alg_latency_ms": 60.0, "compute_pytorch_p95_ms": 18.7, "compute_ort_p95_ms": 8.2,
+         "compute_p95_ms": 18.7, "projected_t_minus_b_pytorch_ms": 108.7,
+         "projected_t_minus_b_ort_ms": 98.2, "projected_t_minus_b_ms": 108.7},
+    ]
+    ann_dual, dec_dual = gate_report.apply_gate_rules(dual_rows)
+    assert dec_dual["winner"] == "student-L0 s1"
+    assert dec_dual["compute_clock"] == "ort"
+    assert dec_dual["projected_t_minus_b_ms"] == pytest.approx(54.5)
+    md_dual = gate_report.format_gate_markdown(ann_dual, dec_dual)
+    assert "15.4 / **4.5**" in md_dual and "65.4 / **54.5**" in md_dual and "ORT clock" in md_dual
+
+    # BUG-015 item 4: run_gate-level test where PyTorch cost exceeds 50% of hop (15.4 ms > 10 ms)
+    # while ORT smoke cost is within budget (4.5 ms <= 10 ms).
+    pt_map = {"student-L0 s1": 15.4, "student-L1 s2": 18.7}
+    ort_map = {"student-L0 s1": 4.5, "student-L1 s2": 8.2}
+    monkeypatch.setattr(gate_report, "export_smoke_test", lambda cand, **kw: {
+        "ok": True, "encoder_exporter": "dynamo", "vocoder_exporter": "dynamo",
+        "fallback_reason": None, "ort_total_p95_ms": ort_map[cand.name],
+        "ort_total_p50_ms": ort_map[cand.name] * 0.8, "ort_total_p99_ms": ort_map[cand.name] * 1.1,
+    })
+    monkeypatch.setattr(gate_report, "measure_candidate_cost", lambda cand, **kw: {
+        "total_p95_ms": pt_map[cand.name], "hop_ms": cand.hop_ms,
+    })
+    gate_out = tmp_path / "gate_run"
+    assert gate_report.main([
+        "--skip-eval", "--candidates", "student-L0:s1,student-L1:s2", "--out", str(gate_out)
+    ]) == 0
+    rep_json = json.loads((gate_out / "gate_report.json").read_text(encoding="utf-8"))
+    by_cand = {r["candidate"]: r for r in rep_json["candidates"]}
+    assert by_cand["student-L0 s1"]["compute_p95_ms"] == pytest.approx(4.5)
+    assert by_cand["student-L0 s1"]["compute_pytorch_p95_ms"] == pytest.approx(15.4)
+    assert by_cand["student-L0 s1"]["compute_ort_p95_ms"] == pytest.approx(4.5)
+    assert by_cand["student-L0 s1"]["projected_t_minus_b_ms"] == pytest.approx(54.5)
+    assert by_cand["student-L0 s1"]["projected_t_minus_b_pytorch_ms"] == pytest.approx(65.4)
+    rep_md = (gate_out / "gate_report.md").read_text(encoding="utf-8")
+    assert "15.4 / **4.5**" in rep_md and "65.4 / **54.5**" in rep_md
+
+
+def test_trainer_stats_crops_preroll_validation_and_guards(tmp_path):
+    """Pins compute_speaker_stats, VocoderCropDataset unit_repeat scaling,
+    extract_cond_crop pre-roll, speaker-stratified validate(), upfront speaker-name
+    validation, and LR decay (F-1..F-5)."""
+    # 1. Closed-form check of compute_speaker_stats (voiced-only logf0, all-frame energy).
+    sr = 16000
+    t1 = np.arange(15 * FS) / sr
+    # 15 frames at 160 Hz, 15 frames at 240 Hz, 15 frames of near-silence (unvoiced).
+    w_160 = (0.3 * np.sin(2 * np.pi * 160.0 * t1)).astype(np.float32)
+    w_240 = (0.1 * np.sin(2 * np.pi * 240.0 * t1)).astype(np.float32)
+    w_sil = np.zeros(15 * FS, dtype=np.float32)
+    full_w = np.concatenate([w_160, w_240, w_sil])
+    p_wav = tmp_path / "stats_test.wav"
+    sf.write(p_wav, full_w, sr, subtype="FLOAT")
+
+    feats = features.extract(full_w)
+    voiced = feats[:, 0] > 0.0
+    assert voiced.sum() > 10 and (~voiced).sum() >= 10
+    expected_lf_mean = float(np.mean(np.log(feats[voiced, 0])))
+    expected_lf_std = float(np.std(np.log(feats[voiced, 0]), ddof=0))
+    expected_en_mean = float(np.mean(feats[:, 3]))
+    expected_en_std = float(np.std(feats[:, 3], ddof=0))
+    voiced_only_en_mean = float(np.mean(feats[voiced, 3]))
+    assert abs(expected_en_mean - voiced_only_en_mean) > 1.0
+
+    stats = tuv.compute_speaker_stats([(str(p_wav), "u.npy", len(feats), 0, "lj")], ["lj"])
+    assert stats["lj"]["logf0_mean"] == pytest.approx(expected_lf_mean, abs=1e-5)
+    assert stats["lj"]["logf0_std"] == pytest.approx(expected_lf_std, abs=1e-5)
+    assert stats["lj"]["energy_mean"] == pytest.approx(expected_en_mean, abs=1e-5)
+    assert stats["lj"]["energy_std"] == pytest.approx(expected_en_std, abs=1e-5)
+
+    # 2. extract_cond_crop causal pre-roll changes frame 25 vs preroll=0 and matches full extract.
+    _, lf_pre, _, _, _ = tuv.extract_cond_crop(str(p_wav), start_cond_frame=20, n_cond_frames=5, preroll=20)
+    _, lf_nopre, _, _, _ = tuv.extract_cond_crop(str(p_wav), start_cond_frame=20, n_cond_frames=5, preroll=0)
+    np.testing.assert_allclose(lf_pre, feats[20:25, 4].astype(np.float32), atol=1e-6)
+    assert np.max(np.abs(lf_pre - lf_nopre)) > 1e-3
+
+    # 3. VocoderCropDataset with unit_repeat=4 scales start_c = start_u * 4.
+    ramp_frames = 24
+    ramp = np.repeat(np.arange(ramp_frames, dtype=np.float32) / 100.0, FS)
+    p_ramp = tmp_path / "ramp.wav"
+    sf.write(p_ramp, ramp, sr)
+    p_u = tmp_path / "u_mimi.npy"
+    np.save(p_u, np.arange(6, dtype=np.int16))
+    ds_mimi = tuv.VocoderCropDataset([(str(p_ramp), str(p_u), 6, 0, "lj")], crop_unit_frames=2, unit_repeat=4)
+    ds_mimi.rng = np.random.default_rng(1)   # picks start_u > 0
+    wav_crop, u_crop, *_ = ds_mimi[0]
+    start_u = int(u_crop[0].item())
+    assert start_u > 0
+    expected_wav = ramp[start_u * 4 * FS:(start_u + 2) * 4 * FS]
+    np.testing.assert_allclose(wav_crop.numpy(), expected_wav, atol=1e-4)
+
+    # 4. Speaker-name validation upfront (F-4) and speaker-stratified validation subset (F-3).
+    with pytest.raises(ValueError, match="invalid speaker name"):
+        tuv.validate_speaker_name("cori samuel")
+    with pytest.raises(ValueError, match="invalid speaker name"):
+        tuv.validate_speaker_name("john.doe")
+
+    unbalanced = [(str(p_wav), str(p_u), 6, 0, "lj")] * 10 + [(str(p_wav), str(p_u), 6, 1, "hifitts_92")] * 4
+    strat = tuv.select_val_items(unbalanced, limit=4)
+    assert {it[4] for it in strat} == {"lj", "hifitts_92"}
+
+    # 5. validate() scores pred vs wav (positive loss on untrained model, not 0).
+    gen = vocoder.UnitVocoder(vocoder.VocoderConfig(
+        vocab=16, unit_dim=8, cond_hidden=8, n_speakers=2, spk_emb_dim=8, upsample_initial_channel=16
+    )).eval()
+    mel_fn = vocoder.MultiResolutionMelLoss()
+    per_spk = {}
+    val_loss = tuv.validate(gen, mel_fn, strat, unit_repeat=1, device=torch.device("cpu"),
+                            limit=2, per_speaker_out=per_spk)
+    assert val_loss > 0.1 and set(per_spk) == {"lj", "hifitts_92"}
+
+
+def test_export_smoke_and_streaming_chain(tmp_path, small_vocoder, monkeypatch):
     torch.manual_seed(0)
     enc = ce.ContentEncoder(ce.EncoderConfig(
         channels=(8, 16, 16, 32, 32), latent_dim=16, head_hidden=32,
@@ -334,10 +661,34 @@ def test_export_smoke_and_streaming_chain(tmp_path, small_vocoder):
     )).eval()
     for spec in ("student-L0:s1", "student-L1:s2"):
         cand = gate_report.parse_candidate_spec(spec)
-        smoke = gate_report.export_smoke_test(cand, enc=enc, voc=small_vocoder)
+        smoke = gate_report.export_smoke_test(cand, enc=enc, voc=small_vocoder,
+                                              exporter="torchscript", cost_steps=5, cost_warmup=2)
         assert smoke["ok"], smoke
+        assert smoke["smoke_hops"] >= 4
         assert smoke["encoder_units_match"]
         assert smoke["vocoder_max_abs"] <= 1e-4
+        assert smoke["vocoder_ref_peak"] > 1e-2
+
+    # BUG-016: when dynamo fails, default exporter='dynamo' must fail (not silently pass),
+    # while exporter='auto' records the fallback reason.
+    real_export = torch.onnx.export
+
+    def fail_dynamo(*args, dynamo=True, **kw):
+        if dynamo:
+            raise RuntimeError("simulated dynamo failure")
+        return real_export(*args, dynamo=False, **kw)
+
+    monkeypatch.setattr(torch.onnx, "export", fail_dynamo)
+    cand_s1 = gate_report.parse_candidate_spec("student-L0:s1")
+    smoke_strict = gate_report.export_smoke_test(cand_s1, enc=enc, voc=small_vocoder,
+                                                 exporter="dynamo", cost_steps=2, cost_warmup=1)
+    assert not smoke_strict["ok"]
+    smoke_auto = gate_report.export_smoke_test(cand_s1, enc=enc, voc=small_vocoder,
+                                               exporter="auto", cost_steps=2, cost_warmup=1)
+    assert smoke_auto["ok"]
+    assert smoke_auto["encoder_exporter"] == "torchscript"
+    assert "simulated dynamo failure" in smoke_auto["fallback_reason"]
+    monkeypatch.setattr(torch.onnx, "export", real_export)
 
     voice_entry = {
         "name": "lj",
@@ -350,15 +701,43 @@ def test_export_smoke_and_streaming_chain(tmp_path, small_vocoder):
         "license": "Public domain",
         "source": "test",
     }
-    wav = (0.1 * np.sin(2 * np.pi * 200.0 * np.arange(8 * FS) / 16000.0)).astype(np.float32)
+    t_step = np.arange(8 * FS) / 16000.0
+    f0_traj = np.where(np.arange(8 * FS) < 4 * FS, 150.0, 260.0)
+    wav = (0.2 * np.sin(2 * np.pi * np.cumsum(f0_traj) / 16000.0)).astype(np.float32) + 0.0 * t_step.astype(np.float32)
     cand = gate_report.parse_candidate_spec("student-L1:s1")
-    y, elapsed = gate_report.convert_utterance_streaming(wav, cand, enc, small_vocoder, voice_entry)
-    assert y.shape == (8 * FS,) and np.isfinite(y).all() and elapsed > 0.0
+    seen_la = []
+    orig_tracker = features.PitchTracker
+
+    def spy_tracker(cfg=None):
+        seen_la.append(cfg.lookahead_frames if cfg is not None else 0)
+        return orig_tracker(cfg)
+
+    monkeypatch.setattr(features, "PitchTracker", spy_tracker)
+    y0, elapsed = gate_report.convert_utterance_streaming(wav, cand, enc, small_vocoder, voice_entry, shift_st=0.0)
+    assert seen_la == [1]
+    monkeypatch.setattr(features, "PitchTracker", orig_tracker)
+    y12, _ = gate_report.convert_utterance_streaming(wav, cand, enc, small_vocoder, voice_entry, shift_st=12.0)
+    assert y0.shape == (8 * FS,) and np.isfinite(y0).all() and elapsed > 0.0
+    # Pitch shift must alter the conditioning and therefore the converted waveform (F-1).
+    assert np.max(np.abs(y12 - y0)) > 1e-4
 
     voices_dict = {"schema": 1, "voices": [voice_entry, {**voice_entry, "name": "v2"}]}
-    ctrl = gate_report.controls_readiness_check(
+    # Pin +12 st ratio tolerance (2.0 +/- 0.06) in controls_readiness_check (F-1).
+    monkeypatch.setattr(gate_report.f0_ref, "track",
+                        lambda audio_arr, *a, **k: np.full(10, 360.0 if np.allclose(audio_arr, y12) else 180.0))
+    ctrl_pass = gate_report.controls_readiness_check(
         [wav], cand, enc, small_vocoder, voices_dict,
         shifts_st=(-12.0, 0.0, 12.0), scales=(0.0, 1.0),
     )
-    assert ctrl["blend_50_50"]["finite"]
-    assert set(ctrl["pitch_shift"]) == {"-12.0", "0.0", "12.0"}
+    assert ctrl_pass["blend_50_50"]["finite"]
+    assert set(ctrl_pass["pitch_shift"]) == {"-12.0", "0.0", "12.0"}
+    assert ctrl_pass["plus12st_ratio"] == pytest.approx(2.0)
+    assert ctrl_pass["plus12st_dod_pass"] is True
+
+    monkeypatch.setattr(gate_report.f0_ref, "track",
+                        lambda audio_arr, *a, **k: np.full(10, 380.0 if np.allclose(audio_arr, y12) else 180.0))
+    ctrl_fail = gate_report.controls_readiness_check(
+        [wav], cand, enc, small_vocoder, voices_dict,
+        shifts_st=(0.0, 12.0), scales=(1.0,),
+    )
+    assert ctrl_fail["plus12st_dod_pass"] is False

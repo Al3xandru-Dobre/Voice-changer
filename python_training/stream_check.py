@@ -30,6 +30,7 @@ from fvml import content_encoder as ce
 MAX_ABS = 1e-5
 MIN_AGREEMENT = 0.999
 VOCODER_MAX_ABS = 1e-4
+VOCODER_MIN_SNR_DB = 90.0
 
 
 def stream(model, wav, fps):
@@ -106,7 +107,7 @@ def check(model, wav, fps_list=(1, 2, 4)):
 @torch.inference_mode()
 def check_vocoder(model, wav, fps_list=(1, 2, 4), seed=0):
     """Vocoder check (Stage 05 DoD): step() vs forward() over `wav`, checking
-    max |delta| <= 1e-4 and max_boundary_step <= max_step_ref."""
+    max |delta| <= 1e-4, SNR >= 90 dB, non-silent output, and boundary slope."""
     model = model.eval().float().cpu()
     wav_np = np.asarray(wav, dtype=np.float32)
     fs = model.cfg.frame_samples
@@ -133,11 +134,15 @@ def check_vocoder(model, wav, fps_list=(1, 2, 4), seed=0):
     spk_emb = model.speaker_table.weight[:1].detach().clone()
 
     ref = model(u, logf0, voicing, aperiodicity, energy, spk_emb)[0].numpy()
+    ref_rms = float(np.sqrt(np.mean(np.square(ref, dtype=np.float64))))
+    ref_peak = float(np.max(np.abs(ref)))
     report = {
         "role": "vocoder",
         "seconds": n_samples / model.cfg.sample_rate,
         "frames": int(n_u),
         "cond_frames": int(n_c),
+        "ref_rms": ref_rms,
+        "ref_peak": ref_peak,
         "fps": {},
         "pass": True,
     }
@@ -145,13 +150,19 @@ def check_vocoder(model, wav, fps_list=(1, 2, 4), seed=0):
         got = stream_vocoder(model, u, logf0, voicing, aperiodicity, energy, spk_emb, fps)[0].numpy()
         r = parity.compare(ref, got, atol=VOCODER_MAX_ABS, steps=True)
         b_step = max_boundary_step(got, fps * fs)
-        # Allow 1e-6 float rounding slack when comparing boundary step to signal max slope.
-        slope_ok = b_step <= (r.max_step_ref or 0.0) + 1e-6
-        ok = r.max_abs <= VOCODER_MAX_ABS and slope_ok
+        ref_step = float(r.max_step_ref or 0.0)
+        # Scale-aware slack so a quiet random-init signal cannot pass with a boundary jump.
+        slope_slack = max(1e-3 * ref_step, 1e-6 * max(ref_peak, 1e-3))
+        slope_ok = b_step <= ref_step + slope_slack
+        snr_ok = bool(r.snr_db >= VOCODER_MIN_SNR_DB)
+        abs_ok = bool(r.max_abs <= VOCODER_MAX_ABS * max(1.0, ref_rms)) and bool(r.max_abs <= VOCODER_MAX_ABS)
+        ok = bool(abs_ok and snr_ok and slope_ok and ref_peak > 0.0)
         report["fps"][fps] = {
             "max_abs": r.max_abs,
             "mean_abs": r.mean_abs,
             "snr_db": r.snr_db,
+            "ref_rms": ref_rms,
+            "ref_peak": ref_peak,
             "max_step_ref": r.max_step_ref,
             "max_step_test": r.max_step_test,
             "max_boundary_step": b_step,
@@ -189,6 +200,9 @@ def main(argv=None):
     p.add_argument("--threads", type=int, default=0, help="torch threads (0 = default)")
     p.add_argument("--out", help="write the JSON report here")
     args = p.parse_args(argv)
+    for stream_io in (sys.stdout, sys.stderr):
+        if hasattr(stream_io, "reconfigure"):
+            stream_io.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     if args.threads:
         torch.set_num_threads(args.threads)
     role = args.role or (_detect_role(args.checkpoint) if args.checkpoint else "encoder")

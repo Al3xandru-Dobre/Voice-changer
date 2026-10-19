@@ -42,6 +42,7 @@ import datetime
 import json
 import pathlib
 import platform
+import shutil
 import sys
 import time
 
@@ -112,26 +113,38 @@ def log(msg):
 # -- models ------------------------------------------------------------------------
 def load_encoder(path, head, license):
     from fvml.content_encoder import ContentEncoder
-    model, ckpt = ContentEncoder.from_checkpoint(path)
+    try:
+        model, ckpt = ContentEncoder.from_checkpoint(path)
+        meta = ckpt.get("labels_meta")
+        meta = json.loads(meta) if isinstance(meta, str) else meta
+    except FileNotFoundError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise fx.ExportError(f"{path}: invalid encoder checkpoint: {fx._one_line(e)}") from e
     model.eval()
     head = fx.head_index(model, head)
     license = license or ckpt.get("license")
     if not license:
         raise fx.ExportError("the encoder checkpoint stores no licence: pass --license")
-    meta = ckpt.get("labels_meta")
     return model, {"head": head, "license": license,
-                   "labels_meta": json.loads(meta) if isinstance(meta, str) else meta,
+                   "labels_meta": meta,
                    "step": ckpt.get("step"), "run_name": ckpt.get("run_name")}
 
 
 def load_vocoder(path, license):
     from fvml.vocoder import UnitVocoder
-    model, ckpt = UnitVocoder.from_checkpoint(path)
+    try:
+        model, ckpt = UnitVocoder.from_checkpoint(path)
+        meta = ckpt.get("labels_meta")
+        meta = json.loads(meta) if isinstance(meta, str) else meta
+    except FileNotFoundError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise fx.ExportError(f"{path}: invalid vocoder checkpoint: {fx._one_line(e)}") from e
     model.eval()
     if license:
         ckpt = {**ckpt, "license": license}
-    meta = ckpt.get("labels_meta")
-    return model, ckpt, {"labels_meta": json.loads(meta) if isinstance(meta, str) else meta,
+    return model, ckpt, {"labels_meta": meta,
                          "step": ckpt.get("step"), "license": ckpt.get("license")}
 
 
@@ -201,18 +214,21 @@ def parity_paths(args):
     if not manifest.exists():
         raise fx.ExportError(f"no parity manifest at {manifest} (prepare dev-clean with "
                              "prepare_data.py, or pass --parity-audio)")
-    rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
-            if line.strip()]
-    by_speaker = {}
-    for r in sorted(rows, key=lambda r: (str(r.get("speaker")), r["utt_id"])):
-        by_speaker.setdefault(str(r.get("speaker")), []).append(r)
-    order, depth = [], 0
-    while len(order) < len(rows):            # one utterance per speaker, in turn
-        for utts in by_speaker.values():
-            if depth < len(utts):
-                order.append(utts[depth])
-        depth += 1
-    return [paths.resolve(r["path"]) for r in order], f"manifest: {manifest.name}"
+    try:
+        rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+        by_speaker = {}
+        for r in sorted(rows, key=lambda r: (str(r.get("speaker")), r["utt_id"])):
+            by_speaker.setdefault(str(r.get("speaker")), []).append(r)
+        order, depth = [], 0
+        while len(order) < len(rows):            # one utterance per speaker, in turn
+            for utts in by_speaker.values():
+                if depth < len(utts):
+                    order.append(utts[depth])
+            depth += 1
+        return [paths.resolve(r["path"]) for r in order], f"manifest: {manifest.name}"
+    except Exception as e:  # noqa: BLE001
+        raise fx.ExportError(f"{manifest}: invalid parity manifest: {fx._one_line(e)}") from e
 
 
 def parity_audio(args):
@@ -220,7 +236,7 @@ def parity_audio(args):
     files, source = parity_paths(args)
     try:
         wav = audio.concat(files, args.parity_seconds)
-    except ValueError as e:
+    except Exception as e:  # noqa: BLE001 - soundfile raises RuntimeError subclasses
         raise fx.ExportError(f"parity audio: {e}") from None
     return wav, {"source": source, "seconds": len(wav) / audio.SAMPLE_RATE}
 
@@ -358,6 +374,16 @@ def write_golden(args, bundle, voices, wav):
                      audio=f"audio_s{fps}.wav", samples=int(len(out_audio)))
             audio.save(out / v["audio"], out_audio)
         manifest["variants"][f"s{fps}"] = v
+    keep_files = {"input.wav", "manifest.json"}
+    if cond_written:
+        keep_files.add("cond.npy")
+    for v in manifest["variants"].values():
+        keep_files.add(v["units"])
+        if "audio" in v:
+            keep_files.add(v["audio"])
+    for p in out.iterdir():
+        if p.is_file() and p.name not in keep_files:
+            p.unlink(missing_ok=True)
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     log(f"{GOLDEN}/: {len(manifest['variants'])} variant(s), "
         f"{'units + audio' if cond_written else 'units only (no vocoder yet)'}")
@@ -400,10 +426,25 @@ def versions():
     return v
 
 
+def _load_json_dict(path, label):
+    try:
+        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise fx.ExportError(f"{path}: invalid {label} JSON: {fx._one_line(e)}") from e
+    if not isinstance(data, dict):
+        raise fx.ExportError(f"{path}: {label} must be a JSON object")
+    return data
+
+
 def load_report(bundle):
     path = bundle / REPORT
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = _load_json_dict(path, "export report")
+        if not isinstance(data.get("roles"), dict):
+            raise fx.ExportError(f"{path}: export report missing 'roles' object")
+        return data
     return {"schema": 1, "roles": {}}
 
 
@@ -552,6 +593,43 @@ def model_card(bundle, report, gate):
     return "\n".join(lines) + "\n"
 
 
+def _golden_is_current(bundle, golden):
+    """True when golden/manifest.json and every file/sha256 it names still
+    match the bundle on disk."""
+    if not isinstance(golden, dict) or not (bundle / GOLDEN / "manifest.json").is_file():
+        return False
+    variants = golden.get("variants")
+    if not isinstance(variants, dict) or not variants:
+        return False
+    for v in variants.values():
+        if not isinstance(v, dict):
+            return False
+        enc_file = v.get("encoder")
+        if not enc_file or not (bundle / enc_file).is_file():
+            return False
+        if fx.sha256(bundle / enc_file) != v.get("encoder_sha256"):
+            return False
+        if not (bundle / GOLDEN / v.get("units", "")).is_file():
+            return False
+        if "vocoder" in v:
+            voc_file = v["vocoder"]
+            if not (bundle / voc_file).is_file():
+                return False
+            if fx.sha256(bundle / voc_file) != v.get("vocoder_sha256"):
+                return False
+            if not (bundle / GOLDEN / v.get("audio", "")).is_file():
+                return False
+    return True
+
+
+def _purge_golden(bundle, report, reason):
+    had_dir = (bundle / GOLDEN).exists()
+    shutil.rmtree(bundle / GOLDEN, ignore_errors=True)
+    had_rep = report.pop("golden", None) is not None
+    if had_dir or had_rep:
+        log(f"removed {GOLDEN}/: {reason}")
+
+
 # -- main --------------------------------------------------------------------------
 def run(args):
     bundle = pathlib.Path(args.bundle)
@@ -575,6 +653,12 @@ def run(args):
     same_source = all(old.get(k) == role.get(k) for k in ("checkpoint_sha256", "head", "license"))
     if same_source:                 # same model: variants exported earlier stay valid
         role["files"] = {**(old.get("files") or {}), **files}
+        if args.skip_parity and old.get("parity_input"):
+            role["parity_input"] = old["parity_input"]
+            if old.get("parity"):
+                role["parity"] = {k: v for k, v in old["parity"].items() if k in role["files"]}
+            if old.get("cost"):
+                role["cost"] = {k: v for k, v in old["cost"].items() if k in role["files"]}
     else:                           # a different model: drop the old one's variants
         for v in sorted(set(old.get("files") or {}) - set(files)):
             stale = bundle / old["files"][v]["file"]
@@ -582,6 +666,7 @@ def run(args):
             log(f"removed {stale.name}: exported from a different checkpoint")
         for key in ("chain", "chain_cost"):
             report.pop(key, None)
+        _purge_golden(bundle, report, "exported from a different checkpoint")
     if args.role == "vocoder":
         voices = fx.voices_json(model, ckpt)
         (bundle / VOICES).write_text(json.dumps(voices, indent=2) + "\n", encoding="utf-8")
@@ -593,8 +678,11 @@ def run(args):
 
     voices = None
     if (bundle / VOICES).exists():
-        voices = json.loads((bundle / VOICES).read_text(encoding="utf-8"))
-        fc.validate_voices(voices, fx.read_contract(next(bundle.glob("vocoder_s*.onnx"))))
+        voc_files = sorted(bundle.glob("vocoder_s*.onnx"))
+        if not voc_files:
+            raise fx.ExportError(f"{bundle / VOICES} exists but bundle has no vocoder_s*.onnx")
+        voices = _load_json_dict(bundle / VOICES, VOICES)
+        fc.validate_voices(voices, fx.read_contract(voc_files[0]))
 
     if not args.skip_parity:
         wav, report["parity_input"] = parity_audio(args)
@@ -614,8 +702,10 @@ def run(args):
             report["chain"] = {**(report.get("chain") or {}), **chain}
             report["chain_cost"] = {**(report.get("chain_cost") or {}), **chain_cost}
         report["golden"] = write_golden(args, bundle, voices if both else None, wav)
+    elif not _golden_is_current(bundle, report.get("golden")):
+        _purge_golden(bundle, report, "golden files no longer match the bundle")
 
-    gate = json.loads(pathlib.Path(args.gate_report).read_text(encoding="utf-8")) \
+    gate = _load_json_dict(args.gate_report, "gate report") \
         if args.gate_report else report.get("gate")
     report["gate"] = gate
     if args.gate_variant is not None:
@@ -647,11 +737,12 @@ def other_models(args, report, model, info):
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):  # Δ / → must not crash a cp1252 console
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(line_buffering=True, errors="backslashreplace")
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace", line_buffering=True)
     args = parse_args(argv)
     try:
         return run(args)
-    except (fx.ExportError, fc.ContractError, FileNotFoundError) as e:
+    except (fx.ExportError, fc.ContractError, FileNotFoundError,
+            OSError, RuntimeError, ValueError, KeyError) as e:
         print(f"[export] error: {e}", file=sys.stderr)
         return 2
 

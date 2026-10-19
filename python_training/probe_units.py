@@ -218,6 +218,9 @@ def main(argv=None):
     p.add_argument("--vocoder-checkpoint", help="--cost-vocoder: vocoder weights (default random init)")
     p.add_argument("--out", help="write the JSON report here")
     args = p.parse_args(argv)
+    for stream_io in (sys.stdout, sys.stderr):
+        if hasattr(stream_io, "reconfigure"):
+            stream_io.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     if not (args.units or args.cost):
         p.error("nothing to do: give --units (with --alignments and/or --speaker-probe) or --cost")
     if args.units and not (args.alignments or args.speaker_probe):

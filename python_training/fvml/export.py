@@ -124,11 +124,17 @@ def head_index(model, head):
     lookahead = tuple(model.cfg.lookahead)
     text = str(head)
     if text.startswith("student-L"):
-        L = int(text.removeprefix("student-L"))
+        try:
+            L = int(text.removeprefix("student-L"))
+        except ValueError:
+            raise ExportError(f"invalid head {head!r}") from None
         if L not in lookahead:
             raise ExportError(f"no head with lookahead {L}; heads have {lookahead}")
         return lookahead.index(L)
-    i = int(text)
+    try:
+        i = int(text)
+    except ValueError:
+        raise ExportError(f"invalid head {head!r}") from None
     if i not in range(len(lookahead)):
         raise ExportError(f"no head {i}; heads are 0..{len(lookahead) - 1}")
     return i
@@ -325,7 +331,11 @@ def ort_session(model):
     so.add_session_config_entry("session.inter_op.allow_spinning", "0")
     so.add_session_config_entry("session.set_denormal_as_zero", "1")
     src = str(model) if isinstance(model, (str, pathlib.Path)) else model.SerializeToString()
-    return ort.InferenceSession(src, so, providers=["CPUExecutionProvider"])
+    try:
+        return ort.InferenceSession(src, so, providers=["CPUExecutionProvider"])
+    except Exception as e:      # noqa: BLE001 - ORT pybind raises RuntimeError subclasses
+        name = pathlib.Path(model).name if isinstance(model, (str, pathlib.Path)) else "ModelProto"
+        raise ExportError(f"{name}: ONNX Runtime refused model: {_one_line(e)}") from e
 
 
 class OrtStream:
@@ -549,7 +559,7 @@ def step_cost(streams, feeds, warmup=20):
         if i >= warmup:
             times.append(time.perf_counter_ns() - t0)
     if not times:
-        raise ExportError(f"cost needs more than {warmup} warm-up hops")
+        raise ExportError(f"cost needs at least {warmup + 1} hops ({warmup} warm-up hops + 1 timed hop)")
     ms = np.asarray(times, np.float64) / 1e6
     c = streams[0].contract
     hop_ms = 1e3 * c.hop / c.sample_rate
@@ -571,13 +581,17 @@ def voices_json(model, ckpt):
     """voices.json (schema 1) from the vocoder's speaker table and the
     speaker names and per-speaker stats stored in its checkpoint."""
     get = ckpt.get if isinstance(ckpt, dict) else (lambda key: None)
-    speakers, stats = _json_value(get("speakers")), _json_value(get("speaker_stats"))
+    try:
+        speakers, stats = _json_value(get("speakers")), _json_value(get("speaker_stats"))
+        meta = _json_value(get("speaker_metadata"))
+    except (ValueError, TypeError) as e:
+        raise ExportError(f"voices.json: malformed checkpoint JSON field: {e}") from None
     if not isinstance(speakers, list) or not isinstance(stats, dict):
         raise ExportError("vocoder checkpoint needs 'speakers' (speaker-table row names, in "
                           "row order) and 'speaker_stats' ({name: logf0/energy mean and std})")
     try:
-        return model.voices_json(speakers, stats, _json_value(get("speaker_metadata")))
-    except (KeyError, ValueError) as e:      # ContractError is a ValueError
+        return model.voices_json(speakers, stats, meta)
+    except (KeyError, ValueError, TypeError) as e:      # ContractError is a ValueError
         raise ExportError(f"voices.json: {e}") from None
 
 

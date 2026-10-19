@@ -7,6 +7,7 @@ Tiny random-weight models keep it fast; most exports use the TorchScript
 exporter (about 1 s per graph), and one test per role exercises dynamo.
 """
 import json
+import pathlib
 
 import numpy as np
 import pytest
@@ -301,10 +302,16 @@ def _identity_encoder(path, opset, ir):
 
 def test_finalize_caps_ir_and_rejects_new_opsets(tmp_path):
     c = _identity_encoder(tmp_path / "ok.onnx", 17, 14)
-    assert fx.finalize(tmp_path / "ok.onnx", c, metadata={"fluxvoice.exporter": "test"}) == (17, 13)
+    assert fx.finalize(tmp_path / "ok.onnx", c,
+                       metadata={"z.last": "1", "a.first": "old"}) == (17, 13)
+    # _set_meta replaces existing keys in place and keeps metadata_props sorted.
+    assert fx.finalize(tmp_path / "ok.onnx", c,
+                       metadata={"fluxvoice.exporter": "test", "a.first": "new"}) == (17, 13)
     model = onnx.load(str(tmp_path / "ok.onnx"))
     assert model.ir_version == 13
-    assert {p.key: p.value for p in model.metadata_props}["fluxvoice.exporter"] == "test"
+    props = [(p.key, p.value) for p in model.metadata_props]
+    assert [k for k, _ in props] == sorted(k for k, _ in props)
+    assert dict(props)["fluxvoice.exporter"] == "test" and dict(props)["a.first"] == "new"
     c = _identity_encoder(tmp_path / "new.onnx", 27, 13)
     with pytest.raises(fx.ExportError, match="opset 27 > 26"):
         fx.finalize(tmp_path / "new.onnx", c)
@@ -404,15 +411,40 @@ def test_cli_builds_a_bundle(tmp_path):
         assert section in card, section
     assert "CC BY 4.0 (LibriSpeech)" in card and "Cori Samuel" in card and "torchscript" in card
 
-    # A different encoder exported at s1 only: its stale s2 file goes away.
+    # Same checkpoint with --skip-parity preserves prior parity/cost and valid golden/.
+    assert cli.main(["--role", "encoder", "--checkpoint", str(enc_ckpt),
+                     "--head", "student-L1", "--license", "CC BY 4.0 (LibriSpeech)",
+                     "--bundle", str(bundle), "--frames-per-step", "1",
+                     "--exporter", "torchscript", "--skip-parity"]) == 0
+    report_same = json.loads((bundle / "export_report.json").read_text(encoding="utf-8"))
+    assert set(report_same["roles"]["encoder"]["parity"]) == {"s1", "s2"}
+    assert (bundle / "golden" / "manifest.json").exists()
+
+    # BUG-013: a different encoder exported at s1 only with --skip-parity deletes
+    # both the stale s2 file AND golden/ (+ report["golden"]) so the bundle never mixes models.
     torch.save({"model": tiny_encoder(seed=5).state_dict(),
                 "config": json.dumps(TINY_ENC.to_dict()), "step": 1}, tmp_path / "enc2.pt")
     assert cli.main(["--role", "encoder", "--checkpoint", str(tmp_path / "enc2.pt"),
                      "--head", "1", "--license", "x", "--bundle", str(bundle),
                      "--frames-per-step", "1", "--exporter", "torchscript", "--skip-parity"]) == 0
     assert not (bundle / "encoder_s2.onnx").exists()
+    assert not (bundle / "golden").exists()
     report = json.loads((bundle / "export_report.json").read_text(encoding="utf-8"))
     assert set(report["roles"]["encoder"]["files"]) == {"s1"} and set(report["pairs"]) == {"s1"}
+    assert "golden" not in report and "chain" not in report and "chain_cost" not in report
+    assert "Not written yet." in (bundle / "MODEL_CARD.md").read_text(encoding="utf-8")
+
+    # Regenerating golden at s1 only leaves no orphaned s2 files in golden/.
+    assert cli.main(["--role", "encoder", "--checkpoint", str(tmp_path / "enc2.pt"),
+                     "--head", "1", "--license", "x", "--bundle", str(bundle),
+                     "--frames-per-step", "1", "--exporter", "torchscript",
+                     "--parity-audio", *wavs, "--parity-seconds", "5",
+                     "--golden-seconds", "2", "--cost-steps", "5"]) == 0
+    g_manifest = json.loads((bundle / "golden" / "manifest.json").read_text(encoding="utf-8"))
+    assert set(g_manifest["variants"]) == {"s1"}
+    assert (bundle / "golden" / "units_s1.npy").exists()
+    assert not (bundle / "golden" / "units_s2.npy").exists()
+    assert not (bundle / "golden" / "audio_s2.wav").exists()
 
 
 def test_gate_report_drives_the_verdict():
@@ -453,3 +485,33 @@ def test_cli_rejects_bad_input(tmp_path, capsys):
                      "--exporter", "torchscript", "--parity-audio", wavs[0],
                      "--parity-seconds", "30"]) == 2      # 2 s of audio, 30 s asked
     assert "parity audio" in capsys.readouterr().err
+
+    # BUG-014: library boundary errors (missing/corrupt parity audio, corrupt JSON,
+    # corrupt checkpoint) must exit 2 with one `[export] error:` line and no traceback.
+    assert cli.main(["--role", "encoder", "--checkpoint", str(enc_ckpt), "--head", "1",
+                     "--license", "x", "--bundle", bundle, "--frames-per-step", "1",
+                     "--exporter", "torchscript", "--parity-audio", str(tmp_path / "missing.wav")]) == 2
+    err = capsys.readouterr().err
+    assert "[export] error:" in err and "Traceback" not in err
+
+    bad_Gate = tmp_path / "not_json.txt"
+    bad_Gate.write_text("{not valid json", encoding="utf-8")
+    assert cli.main(["--role", "encoder", "--checkpoint", str(enc_ckpt), "--head", "1",
+                     "--license", "x", "--bundle", bundle, "--frames-per-step", "1",
+                     "--exporter", "torchscript", "--skip-parity",
+                     "--gate-report", str(bad_Gate)]) == 2
+    err = capsys.readouterr().err
+    assert "[export] error:" in err and "gate report" in err and "Traceback" not in err
+
+    bad_ckpt = tmp_path / "corrupt.pt"
+    bad_ckpt.write_bytes(b"not a zip or pickle checkpoint")
+    assert cli.main(["--role", "encoder", "--checkpoint", str(bad_ckpt), "--head", "1",
+                     "--license", "x", "--bundle", bundle, "--skip-parity"]) == 2
+    err = capsys.readouterr().err
+    assert "[export] error:" in err and "Traceback" not in err
+
+    (pathlib.Path(bundle) / "export_report.json").write_text("{broken", encoding="utf-8")
+    assert cli.main(["--role", "encoder", "--checkpoint", str(enc_ckpt), "--head", "1",
+                     "--license", "x", "--bundle", bundle, "--skip-parity"]) == 2
+    err = capsys.readouterr().err
+    assert "[export] error:" in err and "export report" in err and "Traceback" not in err

@@ -184,18 +184,23 @@ ONNX Runtime run chunk by chunk reproduces PyTorch run offline.
 Measured 2026-10-18 on a shared CPU (other sessions were training and testing,
 so cost varies run to run).
 
-- **Tests:** `tests/test_export.py`, 20 passed in about 35 s. The full
-  `python_training` suite gives 157 passed. Coverage:
+- **Tests:** `tests/test_export.py`, 20 passed in about 14 s (verified on both
+  Windows and Linux). The full `python_training` suite gives 160 passed (1
+  skipped when HuBERT weights are not cached locally), and native Linux GCC
+  13.3.0 / Clang 18.1.3 CTest suites pass **47/47**. Coverage:
   - state names = trunk + one head;
   - every file passes the checker and contract;
-  - IR capping, and refusal of opset 27;
+  - IR capping, refusal of opset 27, and in-place metadata replacement + sorted
+    keys;
   - a stale contract is caught;
   - dynamo export + parity for both roles;
   - fallback reason recorded;
   - parity at s1/s2;
   - conditioning equals `extract()` shifted by L and mapped to the voice;
   - voices.json from the checkpoint;
-  - CLI end to end (bundle, golden reproducible, stale-variant cleanup);
+  - CLI end to end (bundle, golden reproducible, stale-variant + stale-`golden/`
+    cleanup on model change [`BUG-013`](../Bug%20Report/BUG-013_stale_golden_survives_reexport.md),
+    and exit-code-2 boundary error handling [`BUG-014`](../Bug%20Report/BUG-014_export_cli_traceback_exits.md));
   - gate-variant / head verdicts.
   
   Mutation checks:

@@ -21,22 +21,22 @@ Responsibilities:
      intonation scale 0/1/2, 50/50 speaker-embedding blend).
 """
 import argparse
+import copy
 import csv
 import dataclasses
 import json
 import math
+import os
 import pathlib
 import sys
 import tempfile
 import time
 
 import numpy as np
-import onnx
-import onnxruntime as ort
 import torch
-import torch.nn as nn
 
-from fvml import audio, contract, evaluate, evallist, f0_ref, features, paths, vocoder
+from fvml import (audio, contract, evaluate, evallist, export as fx,
+                  f0_ref, features, parity, paths, vocoder)
 from fvml import content_encoder as ce
 import probe_units
 
@@ -113,206 +113,188 @@ def projected_t_minus_b_ms(cand, compute_p95_ms, io_floor_ms=IO_FLOOR_MS):
     return float(io_floor_ms + cand.alg_latency_ms + compute_p95_ms + cand.governor_margin_ms)
 
 
-# -- ONNX export smoke test ---------------------------------------------------
-class _EncoderStepWrapper(nn.Module):
-    """Wraps ContentEncoder.step for a single head as flat tensor I/O."""
-
-    def __init__(self, model, head):
-        super().__init__()
-        self.model = model
-        self.head = head
-        self.state_names = [n for n, _, _ in model.state_layout()]
-
-    def forward(self, audio_in, *states_in):
-        state = dict(zip(self.state_names, states_in))
-        out, new_state = self.model.step(audio_in, state)
-        logits = out["logits"][self.head]
-        content = logits.argmax(dim=-1).to(torch.int64)
-        return (content, *[new_state[n] for n in self.state_names])
+def _eval_cpu_model(model):
+    """Return an eval-mode CPU float32 view of `model` without mutating a caller's
+    training/CUDA module in place."""
+    is_cpu_f32 = all(p.device.type == "cpu" and p.dtype == torch.float32
+                     for p in model.parameters())
+    if is_cpu_f32 and not model.training:
+        return model
+    return copy.deepcopy(model).eval().float().cpu()
 
 
-class _VocoderStepWrapper(nn.Module):
-    """Wraps UnitVocoder.step as flat tensor I/O matching ModelContract v1."""
-
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-        self.state_names = [n for n, _, _ in model.state_layout()]
-
-    def forward(self, units_in, logf0, voicing, aperiodicity, energy, spk_emb, *states_in):
-        state = dict(zip(self.state_names, states_in))
-        audio_out, new_state = self.model.step(
-            units_in, logf0, voicing, aperiodicity, energy, spk_emb, state
-        )
-        return (audio_out, *[new_state[n] for n in self.state_names])
-
-
-def _export_module_to_onnx(wrapper, args_tuple, input_names, output_names, model_contract, out_path):
-    """Export `wrapper` to `out_path`, embed `model_contract`, and validate with ONNX + contract."""
-    wrapper.eval()
-    exporter_used = None
-    last_err = None
-    for use_dynamo in (True, False):
+def _host_load_info():
+    load_1m = None
+    if hasattr(os, "getloadavg"):
         try:
-            if use_dynamo:
-                torch.onnx.export(wrapper, args_tuple, str(out_path), dynamo=True,
-                                  opset_version=18, external_data=False,
-                                  input_names=input_names, output_names=output_names)
-                exporter_used = "dynamo"
-            else:
-                torch.onnx.export(wrapper, args_tuple, str(out_path), dynamo=False,
-                                  opset_version=17,
-                                  input_names=input_names, output_names=output_names)
-                exporter_used = "torchscript"
-            break
-        except Exception as e:
-            last_err = e
-    if exporter_used is None:
-        raise RuntimeError(f"ONNX export failed: {last_err}")
-
-    proto = onnx.load(str(out_path), load_external_data=True)
-    if proto.ir_version > 10:
-        proto.ir_version = 10
-    for imp in proto.opset_import:
-        if imp.domain in ("", "ai.onnx") and imp.version > 18:
-            imp.version = 18
-    proto = onnx.shape_inference.infer_shapes(proto)
-    contract.embed(proto, model_contract.to_json())
-    onnx.checker.check_model(proto, full_check=True)
-    onnx.save_model(proto, str(out_path), save_as_external_data=False)
-    contract.load_onnx(str(out_path))
-    return exporter_used
+            load_1m = round(float(os.getloadavg()[0]), 2)
+        except OSError:
+            load_1m = None
+    return {"cpu_count": os.cpu_count(), "load_avg_1m": load_1m}
 
 
+# -- ONNX export smoke test & stateful ORT timing -----------------------------
 @torch.inference_mode()
-def export_smoke_test(cand, enc=None, voc=None):
-    """Export a per-step ONNX graph of the candidate encoder + vocoder and run
-    one step in ONNX Runtime CPU. Returns a report dict with `ok: bool`."""
+def export_smoke_test(cand, enc=None, voc=None, *, exporter="dynamo",
+                      cost_steps=200, cost_warmup=30, smoke_hops=4):
+    """Export a per-step ONNX graph of the candidate encoder + vocoder via
+    `fvml.export`, run `smoke_hops` carried-state steps in ONNX Runtime CPU vs
+    PyTorch `step()`, and measure stateful single-core ORT step latency."""
     if cand.tokenizer == "mimi-q0":
         return {"ok": False, "reason": "mimi-q0 stateful ONNX ring-KV export not enabled before kill-test pass"}
     try:
+        probe_units.single_core()
         fps = cand.frames_per_step
         head = ce.LOOKAHEAD.index(cand.lookahead_frames)
-        enc_m = (enc or ce.ContentEncoder()).eval().float().cpu()
-        voc_m = (voc or vocoder.UnitVocoder(
+        enc_m = _eval_cpu_model(enc) if enc is not None else ce.ContentEncoder().eval().float().cpu()
+        voc_m = (_eval_cpu_model(voc) if voc is not None else vocoder.UnitVocoder(
             vocoder.VocoderConfig(vocab=enc_m.cfg.vocab, frame_samples=cand.frame_samples)
-        )).eval().float().cpu()
+        ).eval().float().cpu())
 
-        enc_states = [n for n, _, _ in enc_m.state_layout()]
-        voc_states = [n for n, _, _ in voc_m.state_layout()]
-        enc_contract = contract.ModelContract(
-            role="encoder",
-            sample_rate=enc_m.cfg.vocab and ce.SAMPLE_RATE,
-            frame_samples=ce.FRAME_SAMPLES,
-            frames_per_step=fps,
-            lookahead_frames=cand.lookahead_frames,
-            content_kind="discrete",
-            vocab=enc_m.cfg.vocab,
-            states=tuple(enc_states),
-            license="MIT",
-        )
+        enc_contract = fx.encoder_contract(enc_m, head, fps, license="MIT")
         voc_contract = voc_m.contract(frames_per_step=fps)
         contract.validate_pair(enc_contract, voc_contract)
 
+        enc_graph = fx.encoder_graph(enc_m, head, fps)
+        voc_graph = fx.vocoder_graph(voc_m, voc_contract)
+
         hop = enc_contract.hop
         cond_frames = voc_contract.cond_frames
-        enc_init = enc_m.init_state(1)
-        voc_init = voc_m.init_state(1)
-
-        audio_in = torch.randn(1, hop, dtype=torch.float32)
-        units_in = torch.zeros(1, fps, dtype=torch.int64)
-        logf0 = torch.full((1, cond_frames), 5.0, dtype=torch.float32)
-        voicing = torch.ones(1, cond_frames, dtype=torch.float32)
-        aperiodicity = torch.full((1, cond_frames), 0.1, dtype=torch.float32)
-        energy = torch.full((1, cond_frames), -5.0, dtype=torch.float32)
         spk_emb = voc_m.speaker_table.weight[:1].detach().clone()
-
-        enc_wrap = _EncoderStepWrapper(enc_m, head)
-        voc_wrap = _VocoderStepWrapper(voc_m)
+        spk_np = spk_emb.numpy()
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = pathlib.Path(tmp)
             enc_path = tmp_dir / f"encoder_s{fps}.onnx"
             voc_path = tmp_dir / f"vocoder_s{fps}.onnx"
 
-            enc_exp = _export_module_to_onnx(
-                enc_wrap,
-                (audio_in, *[enc_init[n] for n in enc_states]),
-                ["audio", *[f"state_in.{n}" for n in enc_states]],
-                ["units", *[f"state_out.{n}" for n in enc_states]],
-                enc_contract,
-                enc_path,
-            )
-            voc_exp = _export_module_to_onnx(
-                voc_wrap,
-                (units_in, logf0, voicing, aperiodicity, energy, spk_emb,
-                 *[voc_init[n] for n in voc_states]),
-                ["units", "logf0", "voicing", "aperiodicity", "energy", "spk_emb",
-                 *[f"state_in.{n}" for n in voc_states]],
-                ["audio", *[f"state_out.{n}" for n in voc_states]],
-                voc_contract,
-                voc_path,
-            )
+            enc_rec = fx.export_graph(enc_graph, enc_path, exporter=exporter)
+            fx.finalize(enc_path, enc_contract, drop_outputs=enc_graph.debug_outputs,
+                        metadata={"fluxvoice.exporter": enc_rec["exporter"]})
 
-            sess_opts = ort.SessionOptions()
-            sess_opts.intra_op_num_threads = 1
-            sess_opts.inter_op_num_threads = 1
-            enc_sess = ort.InferenceSession(str(enc_path), sess_opts,
-                                            providers=["CPUExecutionProvider"])
-            voc_sess = ort.InferenceSession(str(voc_path), sess_opts,
-                                            providers=["CPUExecutionProvider"])
+            voc_rec = fx.export_graph(voc_graph, voc_path, exporter=exporter)
+            fx.finalize(voc_path, voc_contract,
+                        metadata={"fluxvoice.exporter": voc_rec["exporter"]})
 
-            enc_feed = {"audio": audio_in.numpy(),
-                        **{f"state_in.{n}": enc_init[n].numpy() for n in enc_states}}
-            enc_ort_outs = enc_sess.run(None, enc_feed)
-            pt_enc_outs = enc_wrap(audio_in, *[enc_init[n] for n in enc_states])
-            enc_units_match = bool(np.array_equal(enc_ort_outs[0], pt_enc_outs[0].numpy()))
+            enc_stream = fx.OrtStream(enc_path)
+            voc_stream = fx.OrtStream(voc_path)
 
-            voc_feed = {
-                "units": enc_ort_outs[0],
-                "logf0": logf0.numpy(),
-                "voicing": voicing.numpy(),
-                "aperiodicity": aperiodicity.numpy(),
-                "energy": energy.numpy(),
-                "spk_emb": spk_emb.numpy(),
-                **{f"state_in.{n}": voc_init[n].numpy() for n in voc_states},
-            }
-            voc_ort_outs = voc_sess.run(None, voc_feed)
-            pt_voc_outs = voc_wrap(
-                torch.from_numpy(enc_ort_outs[0]), logf0, voicing, aperiodicity,
-                energy, spk_emb, *[voc_init[n] for n in voc_states]
-            )
-            voc_max_abs = float(np.max(np.abs(voc_ort_outs[0] - pt_voc_outs[0].numpy())))
+            # Multi-hop carried-state equivalence check (state_out fed back as state_in).
+            rng = np.random.default_rng(0)
+            n_check = max(3, int(smoke_hops))
+            enc_state_pt = enc_m.init_state(1)
+            voc_state_pt = voc_m.init_state(1)
+            enc_stream.reset()
+            voc_stream.reset()
 
-            # Also measure single-core ORT step latency (encoder + vocoder) over 50 steps.
+            ort_units_list, pt_units_list = [], []
+            ort_audio_list, pt_audio_list = [], []
+            for h_idx in range(n_check):
+                audio_np = (0.2 * np.sin(2.0 * np.pi * (180.0 + 15.0 * h_idx)
+                            * np.arange(hop, dtype=np.float32) / cand.sample_rate)
+                            + 0.05 * rng.standard_normal(hop).astype(np.float32))[None]
+                lf_np = (5.0 + 0.15 * np.sin(np.arange(cond_frames, dtype=np.float32) + h_idx))[None]
+                vo_np = np.full((1, cond_frames), 0.9 if h_idx % 2 == 0 else 0.4, dtype=np.float32)
+                ap_np = np.full((1, cond_frames), 0.1 + 0.05 * (h_idx % 3), dtype=np.float32)
+                en_np = np.full((1, cond_frames), -5.0 + 0.5 * (h_idx % 2), dtype=np.float32)
+
+                e_ort = enc_stream.step({"audio": audio_np})["units"]
+                e_pt_out, enc_state_pt = enc_m.step(torch.from_numpy(audio_np), enc_state_pt)
+                e_pt = e_pt_out["logits"][head].argmax(dim=-1).to(torch.int64).numpy()
+                ort_units_list.append(e_ort)
+                pt_units_list.append(e_pt)
+
+                v_ort = voc_stream.step({
+                    "units": e_ort,
+                    "logf0": lf_np,
+                    "voicing": vo_np,
+                    "aperiodicity": ap_np,
+                    "energy": en_np,
+                    "spk_emb": spk_np,
+                })["audio"]
+                y_pt, voc_state_pt = voc_m.step(
+                    torch.from_numpy(e_ort),
+                    torch.from_numpy(lf_np),
+                    torch.from_numpy(vo_np),
+                    torch.from_numpy(ap_np),
+                    torch.from_numpy(en_np),
+                    spk_emb,
+                    voc_state_pt,
+                )
+                ort_audio_list.append(v_ort[0])
+                pt_audio_list.append(y_pt[0].numpy())
+
+            enc_units_match = bool(np.array_equal(np.concatenate(ort_units_list, axis=-1),
+                                                  np.concatenate(pt_units_list, axis=-1)))
+            pt_audio_all = np.concatenate(pt_audio_list)
+            ort_audio_all = np.concatenate(ort_audio_list)
+            r_voc = parity.compare(pt_audio_all, ort_audio_all, atol=1e-4, steps=False)
+            voc_max_abs = float(r_voc.max_abs)
+            voc_snr_db = float(r_voc.snr_db)
+            voc_ref_peak = float(np.max(np.abs(pt_audio_all)))
+            voc_ref_rms = float(np.sqrt(np.mean(np.square(pt_audio_all, dtype=np.float64))))
+
+            # Carried-state single-core ORT step timing over cost_warmup + cost_steps hops.
+            n_timed = max(1, int(cost_steps))
+            n_warm = max(1, int(cost_warmup))
+            enc_stream.reset()
+            voc_stream.reset()
             ort_enc_times, ort_voc_times = [], []
-            for i in range(60):
+            audio_chunks = (0.1 * rng.standard_normal((n_warm + n_timed, 1, hop))).astype(np.float32)
+            lf_chunks = (5.0 + 0.1 * rng.standard_normal((n_warm + n_timed, 1, cond_frames))).astype(np.float32)
+            vo_chunks = np.ones((n_warm + n_timed, 1, cond_frames), dtype=np.float32)
+            ap_chunks = np.full((n_warm + n_timed, 1, cond_frames), 0.1, dtype=np.float32)
+            en_chunks = np.full((n_warm + n_timed, 1, cond_frames), -5.0, dtype=np.float32)
+            for i in range(n_warm + n_timed):
                 t0 = time.perf_counter()
-                e_out = enc_sess.run(None, enc_feed)
+                e_out = enc_stream.step({"audio": audio_chunks[i]})
                 t1 = time.perf_counter()
-                voc_feed["units"] = e_out[0]
-                voc_sess.run(None, voc_feed)
+                voc_stream.step({
+                    "units": e_out["units"],
+                    "logf0": lf_chunks[i],
+                    "voicing": vo_chunks[i],
+                    "aperiodicity": ap_chunks[i],
+                    "energy": en_chunks[i],
+                    "spk_emb": spk_np,
+                })
                 t2 = time.perf_counter()
-                if i >= 10:
+                if i >= n_warm:
                     ort_enc_times.append(t1 - t0)
                     ort_voc_times.append(t2 - t1)
             ort_enc_p = probe_units.percentiles(ort_enc_times)
             ort_voc_p = probe_units.percentiles(ort_voc_times)
             ort_tot_p = probe_units.percentiles(np.asarray(ort_enc_times) + np.asarray(ort_voc_times))
 
-        ok = enc_units_match and voc_max_abs <= 1e-4
+        voc_rel_ok = (voc_max_abs <= 1e-4 * max(1.0, voc_ref_rms)) and (voc_max_abs <= 1e-4)
+        voc_snr_ok = voc_snr_db >= fx.MIN_VOCODER_SNR_DB
+        exporter_ok = (exporter != "dynamo") or (
+            enc_rec["exporter"] == "dynamo" and voc_rec["exporter"] == "dynamo"
+        )
+        ok = bool(enc_units_match and voc_rel_ok and voc_snr_ok and voc_ref_peak > 0.0 and exporter_ok)
+        fb_reason = enc_rec["fallback_reason"] or voc_rec["fallback_reason"]
+        host_info = _host_load_info()
+        jitter_warn = bool(ort_tot_p["p99_ms"] > 3.0 * max(ort_tot_p["p50_ms"], 1e-6))
         return {
             "ok": ok,
-            "encoder_exporter": enc_exp,
-            "vocoder_exporter": voc_exp,
+            "smoke_hops": n_check,
+            "encoder_exporter": enc_rec["exporter"],
+            "vocoder_exporter": voc_rec["exporter"],
+            "fallback_reason": fb_reason,
             "encoder_units_match": enc_units_match,
             "vocoder_max_abs": voc_max_abs,
+            "vocoder_snr_db": None if not np.isfinite(voc_snr_db) else voc_snr_db,
+            "vocoder_ref_peak": voc_ref_peak,
+            "vocoder_ref_rms": voc_ref_rms,
             "ort_encoder_p50_ms": ort_enc_p["p50_ms"],
             "ort_encoder_p95_ms": ort_enc_p["p95_ms"],
             "ort_vocoder_p50_ms": ort_voc_p["p50_ms"],
             "ort_vocoder_p95_ms": ort_voc_p["p95_ms"],
             "ort_total_p50_ms": ort_tot_p["p50_ms"],
             "ort_total_p95_ms": ort_tot_p["p95_ms"],
+            "ort_total_p99_ms": ort_tot_p["p99_ms"],
+            "ort_steps": n_timed,
+            "jitter_warning": jitter_warn,
+            **host_info,
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -328,10 +310,10 @@ def measure_candidate_cost(cand, enc=None, voc=None, steps=200, warmup=30):
     cond_frames = hop // vocoder.COND_FRAME_SAMPLES
     rng = np.random.default_rng(0)
 
-    voc_m = (voc or vocoder.UnitVocoder(
+    voc_m = (_eval_cpu_model(voc) if voc is not None else vocoder.UnitVocoder(
         vocoder.VocoderConfig(vocab=2048 if cand.tokenizer == "mimi-q0" else 100,
                               frame_samples=cand.frame_samples)
-    )).eval().float().cpu()
+    ).eval().float().cpu())
     voc_state = voc_m.init_state(1)
     spk_emb = voc_m.speaker_table.weight[:1].detach().clone()
     voice_dummy = {"logf0_mean": 5.0, "logf0_std": 0.3, "energy_mean": -6.0, "energy_std": 2.5}
@@ -352,7 +334,7 @@ def measure_candidate_cost(cand, enc=None, voc=None, steps=200, warmup=30):
         }
 
     head = ce.LOOKAHEAD.index(cand.lookahead_frames)
-    enc_m = (enc or ce.ContentEncoder()).eval().float().cpu()
+    enc_m = (_eval_cpu_model(enc) if enc is not None else ce.ContentEncoder().eval().float().cpu())
     enc_state = enc_m.init_state(1)
 
     wav_chunks = (0.1 * rng.standard_normal((warmup + steps, hop))).astype(np.float32)
@@ -399,17 +381,23 @@ def measure_candidate_cost(cand, enc=None, voc=None, steps=200, warmup=30):
 @torch.inference_mode()
 def convert_utterance_streaming(wav, cand, enc, voc, voice_entry, *,
                                 scale=1.0, shift_st=0.0, spk_emb_override=None):
-    """Convert one 16 kHz utterance through the full streaming chain at `cand.frames_per_step`.
+    """Convert one 16 kHz utterance through the full streaming chain at
+    `cand.frames_per_step`, flushing `cand.lookahead_frames` tail frames and
+    dropping the leading `L` delay frames so output aligns with the input.
     Returns (converted_wav_float32, compute_seconds)."""
-    enc_m = enc.eval().float().cpu()
-    voc_m = voc.eval().float().cpu()
+    enc_m = _eval_cpu_model(enc)
+    voc_m = _eval_cpu_model(voc)
     fps = cand.frames_per_step
     hop = cand.hop_samples
     cond_frames = hop // vocoder.COND_FRAME_SAMPLES
     head = ce.LOOKAHEAD.index(cand.lookahead_frames)
 
     wav_np = np.asarray(wav, dtype=np.float32)
-    n_hops = max(1, -(-len(wav_np) // hop))
+    orig_hops = max(1, -(-len(wav_np) // hop))
+    orig_len = orig_hops * hop
+    drop_samples = cand.lookahead_frames * cand.frame_samples
+    flush_hops = -(-drop_samples // hop) if drop_samples > 0 else 0
+    n_hops = orig_hops + flush_hops
     padded = np.zeros(n_hops * hop, dtype=np.float32)
     padded[:len(wav_np)] = wav_np
 
@@ -441,7 +429,8 @@ def convert_utterance_streaming(wav, cand, enc, voc, voice_entry, *,
         y_hop, voc_state = voc_m.step(u_hop, lf_t, vo_t, ap_t, en_t, spk_emb, voc_state)
         out_chunks.append(y_hop[0].numpy())
     elapsed = time.perf_counter() - t0
-    return np.concatenate(out_chunks)[:len(padded)], elapsed
+    full_out = np.concatenate(out_chunks)
+    return full_out[drop_samples:drop_samples + orig_len], elapsed
 
 
 def convert_eval_list(sources_tsv, cand, enc, voc, voice_entry, out_dir, limit=None):
@@ -466,7 +455,9 @@ def convert_eval_list(sources_tsv, cand, enc, voc, voice_entry, out_dir, limit=N
 def apply_gate_rules(rows, rules=ELIGIBILITY):
     """Annotate candidate dicts with `eligible: bool`, `ineligible_reasons: list`,
     and choose the winner (lowest projected_t_minus_b_ms among eligible, tie-break
-    on highest utmos, then lowest wer). Returns (annotated_rows, decision_dict)."""
+    on highest utmos, then lowest wer). Computes eligibility on the shipping ORT
+    clock (`compute_ort_p95_ms`) whenever present, falling back to `compute_p95_ms`.
+    Returns (annotated_rows, decision_dict)."""
     valid_wers = [r["wer"] for r in rows if r.get("wer") is not None and not math.isnan(r["wer"])]
     valid_cos = [r["tgt_cos"] for r in rows if r.get("tgt_cos") is not None and not math.isnan(r["tgt_cos"])]
     best_wer = min(valid_wers) if valid_wers else None
@@ -479,7 +470,19 @@ def apply_gate_rules(rows, rules=ELIGIBILITY):
         if not r.get("export_ok", False):
             reasons.append("export smoke test failed")
         hop_ms = r["hop_ms"]
-        p95 = r.get("compute_p95_ms")
+        ort_p95 = r.get("compute_ort_p95_ms")
+        if ort_p95 is None and isinstance(r.get("export_smoke"), dict):
+            ort_p95 = r["export_smoke"].get("ort_total_p95_ms")
+        if ort_p95 is not None:
+            p95 = ort_p95
+            r["compute_ort_p95_ms"] = ort_p95
+            r["compute_p95_ms"] = ort_p95
+            r["compute_clock"] = "ort"
+            if r.get("projected_t_minus_b_ort_ms") is not None:
+                r["projected_t_minus_b_ms"] = r["projected_t_minus_b_ort_ms"]
+        else:
+            p95 = r.get("compute_p95_ms")
+            r.setdefault("compute_clock", "ort" if "compute_pytorch_p95_ms" not in r else "pytorch")
         if p95 is None or p95 > rules["max_compute_hop_ratio"] * hop_ms:
             reasons.append(f"compute p95 {p95} ms > {rules['max_compute_hop_ratio'] * hop_ms:.1f} ms (50% of hop)")
         wer = r.get("wer")
@@ -515,21 +518,26 @@ def apply_gate_rules(rows, rules=ELIGIBILITY):
                 r.get("wer") or 1.0,
             ),
         )
+        clock = winner.get("compute_clock", "ort").upper()
         decision = {
             "winner": winner["candidate"],
+            "frames_per_step": winner.get("frames_per_step"),
             "hop_ms": winner["hop_ms"],
             "lookahead_frames": winner["lookahead_frames"],
+            "compute_clock": winner.get("compute_clock", "ort"),
             "projected_t_minus_b_ms": winner["projected_t_minus_b_ms"],
             "fallback": None,
             "reason": (f"Selected {winner['candidate']} with lowest projected T-B "
-                       f"({winner['projected_t_minus_b_ms']:.1f} ms) among {len(eligible)} "
-                       f"eligible candidate(s)."),
+                       f"({winner['projected_t_minus_b_ms']:.1f} ms, {clock} clock) among "
+                       f"{len(eligible)} eligible candidate(s)."),
         }
     else:
         decision = {
             "winner": None,
+            "frames_per_step": None,
             "hop_ms": None,
             "lookahead_frames": None,
+            "compute_clock": "ort",
             "projected_t_minus_b_ms": None,
             "fallback": [
                 "1. soft units (open decision 2)",
@@ -542,24 +550,48 @@ def apply_gate_rules(rows, rules=ELIGIBILITY):
 
 
 def format_gate_markdown(rows, decision):
-    """Render the Stage 05 Markdown gate table."""
+    """Render the Stage 05 Markdown gate table (showing both PyTorch and ORT
+    clocks when available, and marking the exporter / fallback state)."""
     def fmt(v, digits=2, pct=False):
         if v is None or (isinstance(v, float) and math.isnan(v)):
             return "—"
         return f"{100.0 * v:.{digits}f}%" if pct else f"{v:.{digits}f}"
 
+    def fmt_pair(r, pt_key, ort_key, single_key):
+        pt = r.get(pt_key)
+        ort_v = r.get(ort_key)
+        if pt is not None or ort_v is not None:
+            ort_str = f"**{fmt(ort_v, 1)}**" if ort_v is not None else "—"
+            return f"{fmt(pt, 1)} / {ort_str}"
+        return fmt(r.get(single_key), 1)
+
+    def fmt_export(r):
+        smoke = r.get("export_smoke") if isinstance(r.get("export_smoke"), dict) else {}
+        enc_e = r.get("encoder_exporter") or smoke.get("encoder_exporter")
+        voc_e = r.get("vocoder_exporter") or smoke.get("vocoder_exporter")
+        fb = r.get("fallback_reason") or smoke.get("fallback_reason")
+        if not r.get("export_ok"):
+            return f"✗ ({fb})" if fb else "✗"
+        if fb or (enc_e and enc_e != "dynamo") or (voc_e and voc_e != "dynamo"):
+            exp_tag = voc_e or enc_e or "fallback"
+            return f"✓ ({exp_tag}: {fb})" if fb else f"✓ ({exp_tag})"
+        return "✓"
+
     lines = [
-        "| Candidate | Hop (ms) | L | Alg. latency (ms) | Compute p95 (ms) | Projected T−B (ms) | WER | CER | Tgt cos | Src cos | UTMOS | F0 PCC | Export OK | Eligible |",
+        "| Candidate | Hop (ms) | L | Alg. latency (ms) | Compute p95 PyTorch / ORT (ms) | Projected T−B PyTorch / ORT (ms) | WER | CER | Tgt cos | Src cos | UTMOS | F0 PCC | Export OK | Eligible |",
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
+        comp_cell = fmt_pair(r, "compute_pytorch_p95_ms", "compute_ort_p95_ms", "compute_p95_ms")
+        proj_cell = fmt_pair(r, "projected_t_minus_b_pytorch_ms",
+                             "projected_t_minus_b_ort_ms", "projected_t_minus_b_ms")
         lines.append(
             f"| {r['candidate']} | {r['hop_ms']:.0f} | {r['lookahead_frames']} "
-            f"| {r['alg_latency_ms']:.0f} | {fmt(r.get('compute_p95_ms'), 1)} "
-            f"| {fmt(r.get('projected_t_minus_b_ms'), 1)} | {fmt(r.get('wer'), 2, pct=True)} "
+            f"| {r['alg_latency_ms']:.0f} | {comp_cell} "
+            f"| {proj_cell} | {fmt(r.get('wer'), 2, pct=True)} "
             f"| {fmt(r.get('cer'), 2, pct=True)} | {fmt(r.get('tgt_cos'), 3)} "
             f"| {fmt(r.get('src_cos'), 3)} | {fmt(r.get('utmos'), 2)} "
-            f"| {fmt(r.get('f0_pcc'), 3)} | {'✓' if r.get('export_ok') else '✗'} "
+            f"| {fmt(r.get('f0_pcc'), 3)} | {fmt_export(r)} "
             f"| {'✓' if r.get('eligible') else '✗'} |"
         )
     lines.append("")
@@ -680,14 +712,25 @@ def run_gate(args, log=print):
             raise ValueError(f"target voice {tv!r} not in vocoder voices {list(voices_by_name)}")
 
     metrics = tuple(m.strip() for m in args.metrics.split(",") if m.strip())
+    exporter = getattr(args, "exporter", "dynamo")
     rows = []
     for cand in cands:
         log(f"[gate] candidate {cand.name} (hop={cand.hop_ms:.0f} ms, L={cand.lookahead_frames})")
-        smoke = export_smoke_test(cand, enc=enc, voc=voc)
+        smoke = export_smoke_test(cand, enc=enc, voc=voc, exporter=exporter,
+                                  cost_steps=args.cost_steps, cost_warmup=args.cost_warmup)
         cost = measure_candidate_cost(cand, enc=enc, voc=voc,
                                       steps=args.cost_steps, warmup=args.cost_warmup)
-        p95_ms = cost["total_p95_ms"]
+        pt_p95_ms = cost["total_p95_ms"]
+        ort_p95_ms = smoke.get("ort_total_p95_ms")
+        p95_ms = ort_p95_ms if ort_p95_ms is not None else pt_p95_ms
         proj_tb = projected_t_minus_b_ms(cand, p95_ms, io_floor_ms=args.io_floor_ms)
+        proj_tb_pt = (projected_t_minus_b_ms(cand, pt_p95_ms, io_floor_ms=args.io_floor_ms)
+                      if pt_p95_ms is not None else None)
+        proj_tb_ort = (projected_t_minus_b_ms(cand, ort_p95_ms, io_floor_ms=args.io_floor_ms)
+                       if ort_p95_ms is not None else None)
+        if smoke.get("jitter_warning"):
+            log(f"[gate] warning: {cand.name} ORT p99 ({smoke.get('ort_total_p99_ms'):.2f} ms) "
+                f"> 3x p50 ({smoke.get('ort_total_p50_ms'):.2f} ms) — host CPU may be loaded")
 
         row = {
             "candidate": cand.name,
@@ -696,8 +739,16 @@ def run_gate(args, log=print):
             "hop_ms": cand.hop_ms,
             "lookahead_frames": cand.lookahead_frames,
             "alg_latency_ms": cand.alg_latency_ms,
+            "compute_clock": "ort" if ort_p95_ms is not None else "pytorch",
             "compute_p95_ms": p95_ms,
+            "compute_ort_p95_ms": ort_p95_ms,
+            "compute_pytorch_p95_ms": pt_p95_ms,
             "projected_t_minus_b_ms": proj_tb,
+            "projected_t_minus_b_ort_ms": proj_tb_ort,
+            "projected_t_minus_b_pytorch_ms": proj_tb_pt,
+            "encoder_exporter": smoke.get("encoder_exporter"),
+            "vocoder_exporter": smoke.get("vocoder_exporter"),
+            "fallback_reason": smoke.get("fallback_reason"),
             "cost": cost,
             "export_smoke": smoke,
             "export_ok": bool(smoke.get("ok", False)),
@@ -743,8 +794,11 @@ def run_gate(args, log=print):
     report = {
         "candidates": annotated,
         "decision": decision,
+        "frames_per_step": decision.get("frames_per_step"),
         "encoder_checkpoint": args.encoder_checkpoint,
         "vocoder_checkpoint": args.vocoder_checkpoint,
+        "exporter": exporter,
+        "host": _host_load_info(),
         "voices": target_voices,
     }
 
@@ -785,6 +839,8 @@ def parse_args(argv=None):
     p.add_argument("--cost-steps", type=int, default=200)
     p.add_argument("--cost-warmup", type=int, default=30)
     p.add_argument("--io-floor-ms", type=float, default=IO_FLOOR_MS)
+    p.add_argument("--exporter", choices=fx.EXPORTERS, default="dynamo",
+                   help="ONNX exporter for the smoke test (default: dynamo; 'auto' allows fallback)")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--out", required=True, help="output directory for gate_report.{json,md}")
@@ -792,11 +848,13 @@ def parse_args(argv=None):
 
 
 def main(argv=None):
+    for stream_io in (sys.stdout, sys.stderr):
+        if hasattr(stream_io, "reconfigure"):
+            stream_io.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     args = parse_args(argv)
-    sys.stdout.reconfigure(line_buffering=True)
     try:
         return run_gate(args)
-    except (FileNotFoundError, ValueError, KeyError) as e:
+    except (FileNotFoundError, ValueError, KeyError, RuntimeError) as e:
         print(f"[gate_report] error: {e}", file=sys.stderr)
         return 1
 

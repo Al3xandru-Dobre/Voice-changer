@@ -8,7 +8,7 @@
 | **Name** | *Wrong clock* — eligibility and projected T−B come from Python/PyTorch dispatch time, while the stage file's table and conclusions are written from ONNX Runtime time |
 | **Reported** | 2026-10-18 |
 | **Severity** | High for the Stage 05 decision (the gate, once the long runs finish, would pick a different winner than the stage file says it should); no effect on any model or on the real-time path |
-| **Status** | ◐ diagnosed (code path traced; decision flip reproduced deterministically with the stage file's own numbers) |
+| **Status** | ☑ fixed — verified 2026-10-19, see [Resolution](#resolution-verified-2026-10-19) |
 | **Component** | `python_training/gate_report.py` — `run_gate` (line 689), `measure_candidate_cost`, `apply_gate_rules`, `format_gate_markdown` |
 | **Blocks** | [Stage 05](../Milestone%202/05_causal_vocoder_decision_gate.md) "Decision" task and open decisions 4 and 7 in the [master plan](../Milestone%202/00_master.md); the Stage 06 `--gate-report` hand-off and the Stage 11 exit report |
 
@@ -133,3 +133,21 @@ numbers existing, not of the rule using the right one.
 Until fixed, read `gate_report.json` → `candidates[].export_smoke.ort_total_p95_ms`
 and `cost.total_p95_ms` side by side, and take the decision by hand from the
 ORT column. Do not paste `gate_report.md` into the stage file unedited.
+
+## Resolution (verified 2026-10-19)
+
+1. `export_smoke_test` in `python_training/gate_report.py` now times a
+   carried-state loop over `cost_warmup + cost_steps` hops (default 30 + 200)
+   through `fvml.export.OrtStream` (`intra_op=1`, `inter_op=1`, sequential,
+   spin-wait off, denormals-as-zero) and records `cpu_count`, `load_avg_1m`, and
+   `jitter_warning` (`p99 > 3 × p50`).
+2. `run_gate()` and `apply_gate_rules()` select `compute_ort_p95_ms` (and
+   `projected_t_minus_b_ort_ms`) as the decision-driving compute metric whenever
+   present, while preserving `compute_pytorch_p95_ms` and
+   `projected_t_minus_b_pytorch_ms`.
+3. `format_gate_markdown()` prints both `PyTorch / **ORT**` columns and labels
+   the decision clock (`ORT clock`) in the decision line.
+4. `test_gate_rules_and_markdown_table` in `python_training/tests/test_vocoder.py`
+   pins both `apply_gate_rules` and a `run_gate`-level test where PyTorch
+   (`15.4 ms > 10 ms`) and ORT (`4.5 ms <= 10 ms`) disagree, verifying that
+   `student-L0 s1` (`54.5 ms`) wins under the ORT clock.
