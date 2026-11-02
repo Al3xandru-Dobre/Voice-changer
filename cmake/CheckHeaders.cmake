@@ -10,10 +10,21 @@
 # settings cannot supply declarations the header forgot.
 
 file(GLOB_RECURSE _fv_check_headers CONFIGURE_DEPENDS
-     "${CMAKE_SOURCE_DIR}/src/*.hpp")
+     "${CMAKE_SOURCE_DIR}/src/*.hpp"
+     "${CMAKE_SOURCE_DIR}/frontend/core/*.hpp")
 list(APPEND _fv_check_headers
      "${CMAKE_SOURCE_DIR}/tools/LatencyProbe.hpp"
-     "${CMAKE_SOURCE_DIR}/tests/TestSupport.hpp")
+     "${CMAKE_SOURCE_DIR}/tests/TestSupport.hpp"
+     "${CMAKE_SOURCE_DIR}/tests/FakeAudioBackend.hpp"
+     "${CMAKE_SOURCE_DIR}/frontend/platform/Tray.hpp")
+# The SDL3 / Dear ImGui-facing headers need those include paths; they are
+# checked only when the GUI is built.
+if(TARGET fluxvoice_imgui)
+    file(GLOB _fv_gui_headers CONFIGURE_DEPENDS
+         "${CMAKE_SOURCE_DIR}/frontend/imgui/*.hpp"
+         "${CMAKE_SOURCE_DIR}/frontend/platform/SdlTray.hpp")
+    list(APPEND _fv_check_headers ${_fv_gui_headers})
+endif()
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/header_checks")
 
@@ -25,7 +36,7 @@ foreach(_hdr IN LISTS _fv_check_headers)
     # path; MAKE_C_IDENTIFIER is not injective (foo-bar vs foo_bar), so a
     # collision fails the configure loudly instead of silently dropping a TU.
     file(RELATIVE_PATH _rel "${CMAKE_SOURCE_DIR}" "${_hdr}")
-    string(REGEX REPLACE "^(src|tools|tests)/" "" _inc "${_rel}")
+    string(REGEX REPLACE "^(src|tools|tests|frontend)/" "" _inc "${_rel}")
     string(MAKE_C_IDENTIFIER "${_rel}" _stem)
     set(_tu "${CMAKE_CURRENT_BINARY_DIR}/header_checks/${_stem}.cpp")
     if(_tu IN_LIST _fv_check_srcs)
@@ -40,9 +51,12 @@ foreach(_hdr IN LISTS _fv_check_headers)
 endforeach()
 
 add_library(fluxvoice_header_checks OBJECT ${_fv_check_srcs})
-target_include_directories(fluxvoice_header_checks PRIVATE src tools tests)
+target_include_directories(fluxvoice_header_checks PRIVATE src tools tests frontend)
 target_link_libraries(fluxvoice_header_checks PRIVATE
     miniaudio_headers rwqueue_headers nlohmann_json_headers Threads::Threads)
+if(TARGET fluxvoice_imgui)
+    target_link_libraries(fluxvoice_header_checks PRIVATE fluxvoice_imgui)
+endif()
 fluxvoice_set_warnings(fluxvoice_header_checks)
 set_target_properties(fluxvoice_header_checks PROPERTIES
     UNITY_BUILD OFF DISABLE_PRECOMPILE_HEADERS ON)

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "Whisper",
+  "description": "Stretch tier: voicing driven towards zero, with a little extra gain to compensate.",
+  "params": {
+    "whisper": 1.0,
+    "gain": 3.0
+  }
+}

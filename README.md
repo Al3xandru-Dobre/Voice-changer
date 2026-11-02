@@ -168,6 +168,13 @@ FluxVoice-S2UT/
 ├── Documents/                 # Milestone plans (staged implementation docs)
 │   ├── Milestone 1/, 1.5/, 2/…4/
 │   └── Research_documents/    # Dated research reports feeding the plans
+├── frontend/                  # Milestone 4 desktop UI (SDL3 + Dear ImGui) — see frontend/README.md
+│   ├── core/                  # Toolkit-free model layer (devices, voices, studio, translation, tray, settings)
+│   ├── platform/              # System-tray seam (NullTray) + SDL3 tray implementation
+│   ├── imgui/                 # Window shell, theme, widgets, one view per section, Mini panel
+│   ├── app/main.cpp           # fluxvoice_gui entry point
+│   └── assets/                # langs.default.json, sample catalogue/index.json
+├── presets/                   # Built-in voice presets (Neutral, Deep, Bright, Robot, Whisper)
 ├── models/                    # Exported .onnx graphs (git-ignored)
 │   ├── encoder_mimi.onnx
 │   ├── translator_s2ut_waitk.onnx
@@ -180,7 +187,8 @@ FluxVoice-S2UT/
 │   ├── miniaudio/             # Single-header audio I/O
 │   ├── readerwriterqueue/     # moodycamel lock-free SPSC queue
 │   ├── onnxruntime/           # Prebuilt ONNX Runtime C++ SDK
-│   └── imgui/                 # Lightweight GUI
+│   ├── imgui/                 # Dear ImGui (fetched, pinned v1.92.9)
+│   └── SDL3/                  # SDL3 (fetched, pinned 3.4.18): window, GL, dialogs, tray
 ├── tests/                     # CTest unit tests (no audio device needed)
 ├── tools/                     # fv_probe (record / tone / latency), loopback + soak analyzers, OLA sine WAVs
 └── src/
@@ -195,6 +203,9 @@ FluxVoice-S2UT/
     │   ├── RouteGuard.hpp     # Refuses capture/playback feedback routes
     │   ├── ChunkAssembler.hpp # Arbitrary callback sizes → fixed 80 ms model frames
     │   └── OverlapAdd.hpp     # OLA crossfader
+    ├── voice/
+    │   ├── VoiceParams.hpp    # kParams descriptor table + VoiceParams snapshot (M2/M3 Stage 09)
+    │   └── Presets.hpp/.cpp   # presets/*.json loader/saver, descriptor JSON dump
     ├── pipeline/
     │   ├── PipelineTiming.hpp # Chunk / context / overlap geometry @ 16 kHz
     │   ├── KVStateCache.hpp   # Recurrent ONNX tensor state across chunks
@@ -216,6 +227,7 @@ FluxVoice-S2UT/
 - C++20 compiler — MSVC 2022 / GCC 12+ / Clang 15+
 - ONNX Runtime C++ SDK — optional (`-DONNXRUNTIME_ROOT=`); the SDK's OS, architecture and execution-provider build (CUDA / DirectML / CoreML are not interchangeable) must match the target. *Needed only when the neural stages get wired in — the default build is ORT-free.*
 - Virtual audio cable — VB-Cable (Windows) / BlackHole (macOS) / PipeWire virtual sink (Linux). **Runtime only**, for live routing: building and the whole `ctest` suite are hardware-free and need neither a cable nor an audio device
+- Desktop frontend (`fluxvoice_gui`, on by default, `-DFLUXVOICE_BUILD_GUI=OFF` to skip): SDL3 and Dear ImGui are fetched and built automatically. Linux needs the X11 extension headers at configure time (`libx11-dev libxext-dev libxcursor-dev libxi-dev libxrandr-dev libxfixes-dev libxss-dev libxinerama-dev libxtst-dev libxkbcommon-dev libgl1-mesa-dev libegl1-mesa-dev`; add `libwayland-dev libdecor-0-dev` for native Wayland) and `libayatana-appindicator3-1` at runtime for the tray. Windows and macOS need nothing extra
 
 ### Quick start
 
@@ -225,6 +237,8 @@ cmake --build build -j
 ctest --test-dir build                           # unit + CLI tests (no audio device needed)
 ./build/fluxvoice --list-devices                 # enumerate audio devices
 ./build/fluxvoice --passthrough                  # M1: click-free loopback test (Enter / Ctrl+C stops)
+./build/frontend/fluxvoice_gui                   # M4: desktop panel (devices, voices, studio, translate, catalogue, tray)
+./build/frontend/fluxvoice_gui --minimized       #     start in the system tray; --mini opens the compact panel
 tools/pw_loopback_check.sh --mode queue --load   # Linux: tone loopback via null sinks + glitch analysis
 ./build/fv_probe --list-devices                  # M1 stages 05–06: record / measure a cable route
 tools/pw_latency_check.sh                        # Linux: path latencies via null sinks + fv_probe
@@ -274,7 +288,7 @@ Detailed staged plans live in [`Documents/`](Documents/). Each milestone has a `
 | 1.5 | **Cross-platform audio devices** | Stable device selection, hot-plug refresh/recovery, typed errors; CI + hardware validation on Windows/macOS/Linux (runs parallel to M2) | [Documents/Milestone 1.5](Documents/Milestone%201.5/00_master.md) |
 | 2 | **Textless VC mode** | Causal encoder + custom Unit-HiFi-GAN exported to ONNX; Mode A runs in C++ with stateful KV/CNN caches | [Documents/Milestone 2](Documents/Milestone%202/00_master.md) |
 | 3 | **Wait-*k* S2UT mode** | Causal S2UT transformer on discrete units; `WaitKPolicy` bridges encoder → vocoder in C++ | [Documents/Milestone 3](Documents/Milestone%203/00_master.md) |
-| 4 | **UI & optimization** | ImGui dashboard, FP16/INT8 quantization, GPU execution-provider toggles | [Documents/Milestone 4](Documents/Milestone%204/00_master.md) |
+| 4 | **UI & optimization** | SDL3 + Dear ImGui desktop frontend with system tray, Mini panel, Voice Studio, translation and catalogue panels ([`frontend/README.md`](frontend/README.md)); FP16/INT8 quantization and GPU execution-provider toggles pending | [Documents/Milestone 4](Documents/Milestone%204/00_master.md) |
 
 ---
 

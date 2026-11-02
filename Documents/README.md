@@ -10,7 +10,7 @@ table) followed by numbered stage files `NN_<stage_name>.md`.
 | [Milestone 1.5/](Milestone%201.5/00_master.md) | Cross-platform audio devices (parallel to M2; blocks M4 device UI) | In progress (stages 01–02) |
 | [Milestone 2/](Milestone%202/00_master.md) | Textless VC mode (encoder + vocoder, voice controls) | Planned (stage files written) |
 | [Milestone 3/](Milestone%203/00_master.md) | Wait-k S2UT mode (bidirectional `En↔{Es,Fr,De}`, shared latents) | Planned (stage files written) |
-| [Milestone 4/](Milestone%204/00_master.md) | UI & optimization | Draft |
+| [Milestone 4/](Milestone%204/00_master.md) | UI & optimization | In progress (desktop frontend landed; optimization pending) |
 
 ## Research documents
 
