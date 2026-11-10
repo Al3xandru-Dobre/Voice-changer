@@ -105,12 +105,17 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
 ### 3.3 Underruns are permanent latency in a single duplex stream
 - **Discovery ([Milestone 1 / Stage 06](Milestone%201/06_latency_verification.md)):** In a single miniaudio duplex stream, every callback enqueues `n` captured samples and dequeues `n` playback samples. By conservation of samples:
   ```text
-  queued = output_underruns - input_overruns - output_drops
+  queued = prefilled + output_underruns - input_overruns - output_drops - skipped
   ```
   Because the callback zero-fills missing samples on an underrun (`output_underruns += missing`) and the worker later pushes the delayed samples anyway, **every underrun permanently increases `queued` (and thus end-to-end latency) for the rest of the session** unless samples are explicitly dropped (`output_drops`).
+  `prefilled` counts startup silence actually inserted and `skipped` counts
+  governor-discarded output; both are zero in M1 diagnostic modes. Start a new
+  accounting baseline after discarding queues on a stream switch. This
+  single-duplex identity does not describe independently clocked native
+  system-playback-loopback capture and playback callbacks.
 - **Rule:**
   1. **Warm up all ONNX sessions before `engine.start()`** so first-run kernel/arena allocations do not trigger a startup underrun spike.
-  2. Implement a `LatencyGovernor` ([Milestone 2 / Stage 08](Milestone%202/08_realtime_mode_a_pipeline.md)) that drains excess `queued` samples during silent frames (incrementing `output_drops` so the conservation equation stays exact).
+  2. Use `LatencyGovernor` ([Milestone 2 / Stage 08](Milestone%202/08_realtime_mode_a_pipeline.md)) to skip newly generated output during silence (counting `skipped` separately from queue-overflow `output_drops`). Never consume the callback's output queue from the worker or skip model input. Prefill in the controller's prepare hook before callbacks start, not in `on_resume`; discard it on failed prepare/start.
   3. Ramp out/in over ~2 ms on underrun edges (using a few scalar floats in `DuplexRouter`) to prevent step discontinuities (clicks).
 
 ### 3.4 `out_q_` occupancy cannot measure hardware clock drift
@@ -233,6 +238,7 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Write include paths with exact case and forward slashes against the `src/`, `tools/`, `tests/` roots — Windows' case-insensitive filesystem forgives mismatches that break Linux CI.
   - Third-party headers stay SYSTEM includes; warning flags apply only to first-party sources. Keep native/vendor diagnostics scoped with `#pragma … push/pop` (the miniaudio implementation TU) — never file-wide or global disables.
   - Clang's `-Wmissing-field-initializers` fires on partial aggregate initialization when a *trailing* member has no default: express intentional emptiness in the declaration (`std::optional<…> m = std::nullopt;`, `Capability c = Capability::Unknown;`) and pin it with a regression test — never silence the warning or bulk-fill every fixture. Likewise `-Wunused-function`: delete dead internal helpers rather than reaching for `[[maybe_unused]]` or a suppression.
+  - Allocation-counter tests should keep replacement `operator new/delete` in a separate translation unit (`tests/AllocationCounter.cpp`, IPO disabled for the instrumented target). GCC 13 can otherwise inline the intentional `malloc/free` replacements into STL callers and emit `-Wmismatched-new-delete`. Keep warnings enabled; the strict pipeline-test build guards this instrumentation regression.
 
 ### 5.4 OS macros vs compiler/frontend, platform libraries, ISO C++20
 - **Rule:**

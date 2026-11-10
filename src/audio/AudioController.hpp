@@ -40,6 +40,7 @@ struct ControllerConfig {
     std::uint32_t sample_rate       = 16000;
     std::uint32_t period_ms         = 20;
     bool passthrough                = false;
+    bool fade_underruns              = false; // enable for VC, not identity diagnostics
     /// Maximum queued output samples before the worker drops excess samples
     /// (4 x 80 ms hops = 320 ms @ 16 kHz by default; 0 = unbounded).
     std::size_t max_queued_samples  = 5120;
@@ -79,6 +80,10 @@ public:
     void set_worker_hooks(std::function<void()> on_quiesce,
                           std::function<void()> on_reset,
                           std::function<void()> on_resume = {});
+    // Runs after open/route validation, but BEFORE starting callbacks. Use for
+    // contract-rate verification and startup prefill, with the worker stopped.
+    // False aborts startup and discards any partially inserted output.
+    void set_prepare_hook(std::function<bool()> on_prepare);
 
     // ------------------------------------------------------------------
     // Catalog & status (control thread only)
@@ -202,6 +207,7 @@ private:
     std::function<void()> on_quiesce_;
     std::function<void()> on_reset_;
     std::function<void()> on_resume_;
+    std::function<bool()> on_prepare_;
 };
 
 } // namespace fluxvoice

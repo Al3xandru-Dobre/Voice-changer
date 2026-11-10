@@ -45,6 +45,13 @@ public:
     void set_passthrough(bool on) { passthrough_.store(on, std::memory_order_relaxed); }
     bool passthrough() const      { return passthrough_.load(std::memory_order_relaxed); }
 
+    // Control thread, callbacks stopped. Diagnostics remain bit-exact by
+    // default; VC enables ~2 ms fades at the contract's client sample rate.
+    void configure_underrun_fade(std::uint32_t sample_rate, bool enabled = true) {
+        fade_samples_ = enabled ? std::max<std::size_t>(1, std::size_t{sample_rate} * 2 / 1000) : 0;
+        reset_output_edges();
+    }
+
     // ------------------------------------------------------------------
     // Real-time side — called from the audio callback only.
     // No allocation, no locks, no logging, no blocking.
@@ -88,11 +95,15 @@ public:
             }
         }
 
-        // Output queue → device (zero-fill on underrun — never block).
+        // Output queue -> device; missing frames count even while a short
+        // synthesized fade replaces the hard zero-fill edge.
         std::size_t got = 0;
         while (got < n && out_q_.try_dequeue(out[got])) ++got;
+        if (fade_samples_ > 0) {
+            soften_output(out, got, n);
+        }
         if (got < n) {
-            std::memset(out + got, 0, (n - got) * sizeof(float));
+            if (fade_samples_ == 0) std::memset(out + got, 0, (n - got) * sizeof(float));
             output_underruns_.fetch_add(n - got, std::memory_order_relaxed);
         }
     }
@@ -139,6 +150,7 @@ public:
         float dummy = 0.0f;
         while (in_q_.try_dequeue(dummy)) ++discarded;
         while (out_q_.try_dequeue(dummy)) ++discarded;
+        reset_output_edges();
         return discarded;
     }
 
@@ -159,6 +171,47 @@ public:
     std::size_t   output_queued_approx() const { return out_q_.size_approx(); }
 
 private:
+    void reset_output_edges() {
+        last_output_ = fade_origin_ = 0.0f;
+        fade_out_left_ = fade_in_left_ = 0;
+        underrunning_ = false;
+    }
+
+    void soften_output(float* out, std::size_t got, std::size_t n) {
+        for (std::size_t i = 0; i < got; ++i) {
+            if (underrunning_) {
+                underrunning_ = false;
+                fade_in_left_ = fade_samples_;
+                fade_origin_ = last_output_;
+            }
+            if (fade_in_left_ > 0) {
+                const float gain = static_cast<float>(fade_samples_ - fade_in_left_ + 1) /
+                                   static_cast<float>(fade_samples_);
+                out[i] = fade_origin_ * (1.0f - gain) + out[i] * gain;
+                --fade_in_left_;
+            }
+            last_output_ = out[i];
+        }
+        if (got < n && !underrunning_) {
+            underrunning_ = true;
+            fade_origin_ = last_output_;
+            fade_out_left_ = fade_samples_;
+            fade_in_left_ = 0;
+        }
+        for (std::size_t i = got; i < n; ++i) {
+            out[i] = fade_out_left_ > 0 ?
+                fade_origin_ * static_cast<float>(fade_out_left_ - 1) /
+                    static_cast<float>(fade_samples_) : 0.0f;
+            if (fade_out_left_ > 0) --fade_out_left_;
+            last_output_ = out[i];
+        }
+    }
+
+    // Callback-owned scalars; configure/reset only after callback quiescence.
+    std::size_t fade_samples_ = 0;
+    std::size_t fade_out_left_ = 0, fade_in_left_ = 0;
+    float last_output_ = 0.0f, fade_origin_ = 0.0f;
+    bool underrunning_ = false;
     std::atomic<bool>     passthrough_{false};
     std::atomic<std::uint64_t> input_overruns_{0};
     std::atomic<std::uint64_t> output_underruns_{0};

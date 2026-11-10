@@ -51,6 +51,10 @@ void AudioController::set_worker_hooks(std::function<void()> on_quiesce,
     on_resume_  = std::move(on_resume);
 }
 
+void AudioController::set_prepare_hook(std::function<bool()> on_prepare) {
+    on_prepare_ = std::move(on_prepare);
+}
+
 Result<DeviceSnapshot> AudioController::refresh(TimePoint now) {
     return refresh_catalog_internal(now);
 }
@@ -226,6 +230,7 @@ Result<StreamStatus> AudioController::open_resolved_internal(TimePoint now,
     status_.state = StreamState::Opening;
     router_.set_passthrough(cfg_.passthrough &&
                             status_.capture_mode == CaptureMode::OrdinaryMicrophone);
+    router_.configure_underrun_fade(cfg_.sample_rate, cfg_.fade_underruns);
 
     const auto fail = [&](AudioError err) -> Result<StreamStatus> {
         status_.last_error        = err;
@@ -310,9 +315,16 @@ Result<StreamStatus> AudioController::open_resolved_internal(TimePoint now,
                 "\" records playback device \"" + info_.playback_name + "\" (feedback loop)."});
     }
 
+    if (on_prepare_ && !on_prepare_()) {
+        backend_.stop_stream();
+        router_.discard_queues();
+        return fail(AudioError{AudioErrorCategory::FormatUnsupported, "prepare stream", 0,
+                               info_.backend, "Stream preparation failed (contract rate or prefill)."});
+    }
     auto start_res = backend_.start_stream();
     if (!is_ok(start_res)) {
         backend_.stop_stream();
+        router_.discard_queues();
         return fail(std::get<AudioError>(std::move(start_res)));
     }
 

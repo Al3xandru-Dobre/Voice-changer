@@ -663,6 +663,58 @@ void test_stage06_system_playback_loopback_and_unsupported_backends() {
     CHECK(std::get<AudioError>(mac_loop).message.find("macOS Core Audio") != std::string::npos);
 }
 
+void test_period_request_survives_reconfigure() {
+    FakeControllableBackend fb;
+    fb.capture = {fb.make_ep(EndpointDirection::Capture, 1, "Mic", true)};
+    fb.playback = {fb.make_ep(EndpointDirection::Playback, 2, "CABLE Input", true)};
+    ControllerConfig cfg;
+    cfg.period_ms = 5;
+    AudioController ctrl(fb, cfg);
+    CHECK(is_ok(ctrl.open_and_start(FollowSystemDefault{}, FollowSystemDefault{})));
+    CHECK(fb.last_request.period_ms == 5);
+    CHECK(ctrl.stream_info().capture_internal_period == 480); // actual != requested
+    for (std::uint32_t period : {10u, 20u, 40u}) {
+        cfg.period_ms = period;
+        ctrl.set_config(cfg);
+        CHECK(is_ok(ctrl.reconfigure(FollowSystemDefault{}, FollowSystemDefault{})));
+        CHECK(fb.last_request.period_ms == period);
+    }
+}
+
+void test_prepare_before_callbacks_and_failure_cleanup() {
+    FakeControllableBackend fb;
+    fb.capture = {fb.make_ep(EndpointDirection::Capture, 1, "Mic", true)};
+    fb.playback = {fb.make_ep(EndpointDirection::Playback, 2, "CABLE Input", true)};
+    AudioController ctrl(fb);
+    int prepared = 0;
+    ctrl.set_prepare_hook([&] {
+        CHECK(fb.is_stream_open() && !fb.is_stream_running());
+        CHECK(ctrl.router().input_queued_approx() == 0);
+        CHECK(ctrl.router().output_queued_approx() == 0);
+        float silence[64]{};
+        CHECK(ctrl.router().write_output(silence, 64) == 64);
+        ++prepared;
+        return true;
+    });
+    CHECK(is_ok(ctrl.open_and_start(FollowSystemDefault{}, FollowSystemDefault{})));
+    CHECK(prepared == 1 && ctrl.router().output_queued_approx() == 64);
+    fb.next_start_error = AudioError{AudioErrorCategory::DeviceBusy, "start", -1, "fake", "busy"};
+    CHECK(!is_ok(ctrl.reconfigure(FollowSystemDefault{}, FollowSystemDefault{})));
+    CHECK(!fb.is_stream_open() && ctrl.router().output_queued_approx() == 0);
+    CHECK(is_ok(ctrl.reconfigure(FollowSystemDefault{}, FollowSystemDefault{})));
+    CHECK(prepared == 3 && ctrl.router().output_queued_approx() == 64);
+    ctrl.set_prepare_hook([&] {
+        float silence[16]{};
+        ctrl.router().write_output(silence, 16);
+        return false;
+    });
+    const auto starts = fb.start_calls;
+    CHECK(!is_ok(ctrl.reconfigure(FollowSystemDefault{}, FollowSystemDefault{})));
+    CHECK(fb.start_calls == starts && !fb.is_stream_open());
+    CHECK(ctrl.router().output_queued_approx() == 0);
+    CHECK(ctrl.status().state == StreamState::AwaitingUser);
+}
+
 } // namespace
 
 int main() {
@@ -676,5 +728,7 @@ int main() {
     test_stalled_callback_is_not_live_and_recovers();
     test_retryable_catalog_failure_enters_bounded_recovery();
     test_stage06_system_playback_loopback_and_unsupported_backends();
+    test_period_request_survives_reconfigure();
+    test_prepare_before_callbacks_and_failure_cleanup();
     return test::finish("audio_controller");
 }

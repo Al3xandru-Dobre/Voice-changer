@@ -140,15 +140,9 @@ endif()
 # std::min / std::max in every header included after it.
 target_compile_definitions(miniaudio_headers INTERFACE $<$<PLATFORM_ID:Windows>:NOMINMAX>)
 
-# Optional: prebuilt ONNX Runtime SDK (needed from Milestone 2).
-set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to a prebuilt ONNX Runtime SDK")
-if(ONNXRUNTIME_ROOT)
-    add_library(onnxruntime_sdk INTERFACE)
-    target_include_directories(onnxruntime_sdk SYSTEM INTERFACE ${ONNXRUNTIME_ROOT}/include)
-    target_link_directories(onnxruntime_sdk INTERFACE ${ONNXRUNTIME_ROOT}/lib)
-    target_link_libraries(onnxruntime_sdk INTERFACE onnxruntime)
-    message(STATUS "ONNX Runtime SDK: ${ONNXRUNTIME_ROOT}")
-endif()
+# Optional: ONNX Runtime C++ SDK (Milestone 2 / Stage 07).
+# Pass -DONNXRUNTIME_ROOT=/path/to/sdk or -DFLUXVOICE_FETCH_ORT=ON.
+include("${CMAKE_SOURCE_DIR}/cmake/OnnxRuntime.cmake")
 
 # ---------------------------------------------------------------------------
 # Executable
@@ -159,6 +153,8 @@ add_executable(fluxvoice
     src/audio/AudioDeviceRegistry.cpp
     src/audio/MiniaudioBackend.cpp
     src/pipeline/InferencePipeline.cpp
+    src/pipeline/ModelBundle.cpp
+    src/pipeline/OrtModel.cpp
     src/ui/AppWindow.cpp
 )
 
@@ -182,16 +178,16 @@ function(fluxvoice_link_audio target)
 endfunction()
 
 fluxvoice_link_audio(fluxvoice)
+target_link_libraries(fluxvoice PRIVATE nlohmann_json_headers)
 
-if(ONNXRUNTIME_ROOT)
-    target_link_libraries(fluxvoice PRIVATE onnxruntime_sdk)
-    target_compile_definitions(fluxvoice PRIVATE FLUXVOICE_WITH_ORT=1)
+if(FLUXVOICE_HAS_ORT)
+    fluxvoice_link_ort(fluxvoice)
 endif()
 
 # util/ProcessMemory.hpp calls GetProcessMemoryInfo: link psapi explicitly
 # instead of relying on #pragma comment(lib, ...), which is not portable.
 if(WIN32)
-    target_link_libraries(fluxvoice PRIVATE psapi)
+    target_link_libraries(fluxvoice PRIVATE psapi avrt)
 endif()
 
 # Route-measurement companion (M1 stages 05-06): records, plays a test tone or
@@ -199,6 +195,23 @@ endif()
 add_executable(fv_probe tools/fv_probe.cpp)
 target_include_directories(fv_probe PRIVATE tools)
 fluxvoice_link_audio(fv_probe)
+
+# Offline Mode A voice-conversion runner (M2 stage 07): runs encoder ->
+# PitchTracker -> vocoder step by step on a mono WAV without audio hardware.
+add_executable(fv_vc_file
+    tools/fv_vc_file.cpp
+    src/pipeline/InferencePipeline.cpp
+    src/pipeline/ModelBundle.cpp
+    src/pipeline/OrtModel.cpp
+)
+target_include_directories(fv_vc_file PRIVATE src)
+target_link_libraries(fv_vc_file PRIVATE nlohmann_json_headers Threads::Threads)
+if(FLUXVOICE_HAS_ORT)
+    fluxvoice_link_ort(fv_vc_file)
+endif()
+if(WIN32)
+    target_link_libraries(fv_vc_file PRIVATE psapi)
+endif()
 
 # ---------------------------------------------------------------------------
 # Warnings
@@ -232,6 +245,7 @@ endfunction()
 
 fluxvoice_set_warnings(fluxvoice)
 fluxvoice_set_warnings(fv_probe)
+fluxvoice_set_warnings(fv_vc_file)
 
 # ---------------------------------------------------------------------------
 # Tests  (run with: ctest --test-dir build)
@@ -251,7 +265,8 @@ if(FLUXVOICE_BUILD_TESTS)
     include("${CMAKE_SOURCE_DIR}/cmake/CheckHeaders.cmake")
 
     foreach(_t duplex_router chunk_assembler overlap_add route_guard latency_probe audio_types
-               device_registry audio_controller)
+               device_registry audio_controller inference_pipeline latency_governor timing_histogram
+               kv_state_cache mode_a_worker voice_catalog worker_priority)
         add_executable(test_${_t} tests/test_${_t}.cpp)
         target_include_directories(test_${_t} PRIVATE src tests tools)
         target_link_libraries(test_${_t} PRIVATE rwqueue_headers Threads::Threads)
@@ -266,6 +281,21 @@ if(FLUXVOICE_BUILD_TESTS)
         src/audio/AudioController.cpp
         src/audio/AudioDeviceRegistry.cpp
         src/pipeline/InferencePipeline.cpp)
+    target_link_libraries(test_audio_controller PRIVATE nlohmann_json_headers)
+    target_sources(test_inference_pipeline PRIVATE
+        src/pipeline/InferencePipeline.cpp tests/AllocationCounter.cpp)
+    set_target_properties(test_inference_pipeline PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    target_link_libraries(test_inference_pipeline PRIVATE nlohmann_json_headers)
+    target_sources(test_mode_a_worker PRIVATE
+        src/pipeline/InferencePipeline.cpp tests/AllocationCounter.cpp)
+    target_link_libraries(test_mode_a_worker PRIVATE nlohmann_json_headers)
+    set_target_properties(test_mode_a_worker PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    target_link_libraries(test_voice_catalog PRIVATE nlohmann_json_headers)
+    add_test(NAME voice_catalog_fixture COMMAND test_voice_catalog
+             ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity/voices.json)
+    if(WIN32)
+        target_link_libraries(test_worker_priority PRIVATE avrt)
+    endif()
 
     # M2 stage 02: model contract v1, ORT-free. Runs the cases in
     # tests/data/contracts/ (shared with the Python twin) and the fixture manifest.
@@ -274,6 +304,45 @@ if(FLUXVOICE_BUILD_TESTS)
     target_link_libraries(test_model_contract PRIVATE nlohmann_json_headers)
     fluxvoice_set_warnings(test_model_contract)
     add_test(NAME model_contract COMMAND test_model_contract ${CMAKE_SOURCE_DIR}/tests/data)
+
+    # M2 stage 07: ONNX Runtime C++ model wrapper & fixture execution (ORT builds only).
+    if(FLUXVOICE_HAS_ORT)
+        add_executable(test_ort_model
+            tests/test_ort_model.cpp
+            src/pipeline/OrtModel.cpp
+            src/pipeline/InferencePipeline.cpp
+        )
+        target_include_directories(test_ort_model PRIVATE src tests)
+        target_link_libraries(test_ort_model PRIVATE
+            nlohmann_json_headers rwqueue_headers Threads::Threads)
+        if(WIN32)
+            target_link_libraries(test_ort_model PRIVATE psapi)
+        endif()
+        fluxvoice_link_ort(test_ort_model)
+        fluxvoice_set_warnings(test_ort_model)
+        add_test(NAME ort_model COMMAND test_ort_model ${CMAKE_SOURCE_DIR}/tests/data/fixtures)
+    else()
+        add_test(NAME cli_vc_without_ort
+                 COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice>
+                         -P ${CMAKE_SOURCE_DIR}/tests/check_cli_vc_without_ort.cmake)
+    endif()
+
+    add_test(NAME vc_file_help COMMAND fv_vc_file --help)
+    add_test(NAME cli_vc_validation
+             COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice>
+                     -DFIXTURES=${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity
+                     -DHAS_ORT=${FLUXVOICE_HAS_ORT}
+                     -P ${CMAKE_SOURCE_DIR}/tests/check_vc_cli.cmake)
+    set_tests_properties(vc_file_help PROPERTIES PASS_REGULAR_EXPRESSION "Usage:")
+    set(_vc_file_bad_no_args        --voice identity)
+    set(_vc_file_bad_no_voice       --model-dir ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity in.wav out.wav)
+    set(_vc_file_bad_fps            --model-dir ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity --voice identity --frames-per-step 3 in.wav out.wav)
+    set(_vc_file_bad_missing_wavs   --model-dir ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity --voice identity)
+    set(_vc_file_bad_unknown_opt    --bogus)
+    foreach(_case no_args no_voice fps missing_wavs unknown_opt)
+        add_test(NAME vc_file_rejects_${_case} COMMAND fv_vc_file ${_vc_file_bad_${_case}})
+        set_tests_properties(vc_file_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
+    endforeach()
 
     # BUG-008: the root .gitignore keeps tests/data/ tracked and ignores the M2
     # data root, weights and run output. Needs a git checkout (not a tarball).
@@ -363,6 +432,14 @@ if(FLUXVOICE_BUILD_TESTS)
         # The dynamo exporter prints emoji; keep a cp1252 console pipe from crashing it.
         set_tests_properties(python_training_stage06 PROPERTIES TIMEOUT 600
                              ENVIRONMENT "PYTHONIOENCODING=utf-8")
+        if(FLUXVOICE_HAS_ORT)
+            add_test(NAME python_training_stage07_golden
+                     COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                             tests/test_vc_file_golden.py
+                     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+            set_tests_properties(python_training_stage07_golden PROPERTIES TIMEOUT 300
+                                 ENVIRONMENT "PYTHONIOENCODING=utf-8;FLUXVOICE_VC_FILE=$<TARGET_FILE:fv_vc_file>")
+        endif()
     endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)
@@ -386,8 +463,13 @@ if(FLUXVOICE_BUILD_TESTS)
     set(_bad_args_input_float        --input 1.5)
     set(_bad_args_input_upper        --input DEFAULT)
     set(_bad_args_input_and_loopback --input 0 --loopback-input 0)
+    set(_bad_args_period_low         --period-ms 4)
+    set(_bad_args_period_high        --period-ms 41)
+    set(_bad_args_period_missing     --period-ms)
+    set(_bad_args_period_junk        --period-ms 10ms)
     foreach(_case unknown missing_value non_numeric negative trailing_junk rate_range
-                  duration_zero stats_zero input_word input_float input_upper input_and_loopback)
+                  duration_zero stats_zero input_word input_float input_upper input_and_loopback
+                  period_low period_high period_missing period_junk)
         add_test(NAME cli_rejects_${_case} COMMAND fluxvoice ${_bad_args_${_case}})
         set_tests_properties(cli_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()

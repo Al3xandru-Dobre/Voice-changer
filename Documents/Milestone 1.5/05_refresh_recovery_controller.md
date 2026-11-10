@@ -58,15 +58,20 @@ Running / Recovering / Error -> Stopping -> Idle
 - [x] Bound queued-audio latency and define the overload/drop policy (queue
       capacity is a safety limit, not a target delay). Reuse
       [M2 / Stage 08](../Milestone%202/08_realtime_mode_a_pipeline.md)'s
-      `LatencyGovernor` and its `InferencePipeline::reset()` contract (worker
-      thread only, after quiesce). Whichever stage lands second adapts to the
-      other.
+      `LatencyGovernor` and its `InferencePipeline::reset()` contract (exclusive
+      ownership after quiesce; control thread is allowed after worker join and
+      callback stop).
 - [x] Fake-backend tests: notification bursts, retry limits, shutdown during
       recovery, no callback touching destroyed controller state, queue discard
       only after producers/consumers stop (`tests/test_audio_controller.cpp`)
 
 ## Implementation notes
 
+- M2 Stage 08 adds a prepare hook between successful open/route validation and
+  callback start. VC uses it for client-rate verification and silence prefill;
+  a failed prepare/start discards the prefill while all queue roles are stopped.
+  The post-stop reset hook also resets `ModeAWorker` and its per-stream queue
+  accounting baseline. Do not prefill in `on_resume` after callbacks have started.
 - Notifications cover an **opened stream** (started/stopped/rerouted/
   interrupted), not system-wide hot-plug, and coverage varies per backend.
   Treat them as hints; polling is the portable baseline.

@@ -23,7 +23,7 @@
 
 | Invariant | Formula / Rule | Why it matters |
 |---|---|---|
-| **Single-duplex queue conservation** | `queued = output_underruns - input_overruns - output_drops` | Exact sample count held between capture and playback. **Every underrun adds permanent latency** until drained by `LatencyGovernor` (`output_drops`) during silence. |
+| **Single-duplex queue conservation** | `queued = prefilled + output_underruns - input_overruns - output_drops - skipped` | Exact per-stream count, including startup samples actually inserted and governor output skips. Diagnostic modes have `prefilled = skipped = 0`. Rebaseline after queue discards; independently clocked native loopback callbacks do not obey this identity. **Every underrun adds permanent latency** until output is discarded. |
 | **Clock drift visibility** | `out_q_` occupancy **cannot** show hardware clock drift | Single miniaudio duplex device absorbs drift internally/in OS buffers. Measure drift end-to-end with `fv_probe latency` over >= 30 min (chirp slope/sawtooth). |
 | **Added latency (`T - B`)** | `T - B = IO_floor + hop + lookahead + compute_p99 + governor_margin` | Measure `B` (cable baseline) and `T` (through `fluxvoice`) with `fv_probe latency` across two virtual cables. |
 | **Target-domain F0 mapping** | `logf0_tgt = mu_tgt + scale * sigma_tgt * z + shift_st * ln(2) / 12` | Maps whitened source pitch `z` to target speaker stats so source F0 never leaks into the vocoder. |

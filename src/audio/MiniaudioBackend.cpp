@@ -309,6 +309,7 @@ fluxvoice::Result<fluxvoice::StreamInfo> MiniaudioBackend::open_stream(
         cap_cfg.capture.channels         = kStreamChannels;
         cap_cfg.sampleRate               = req.sample_rate;
         cap_cfg.periodSizeInMilliseconds = req.period_ms;
+        if (req.period_ms <= 10) cap_cfg.performanceProfile = ma_performance_profile_low_latency;
         cap_cfg.dataCallback             = &MiniaudioBackend::on_data;
         cap_cfg.notificationCallback     = &MiniaudioBackend::on_notification;
         cap_cfg.pUserData                = this;
@@ -323,6 +324,7 @@ fluxvoice::Result<fluxvoice::StreamInfo> MiniaudioBackend::open_stream(
         play_cfg.playback.channels        = kStreamChannels;
         play_cfg.sampleRate               = req.sample_rate;
         play_cfg.periodSizeInMilliseconds = req.period_ms;
+        if (req.period_ms <= 10) play_cfg.performanceProfile = ma_performance_profile_low_latency;
         play_cfg.dataCallback             = &MiniaudioBackend::on_data;
         play_cfg.notificationCallback     = &MiniaudioBackend::on_notification;
         play_cfg.pUserData                = this;
@@ -356,6 +358,7 @@ fluxvoice::Result<fluxvoice::StreamInfo> MiniaudioBackend::open_stream(
     cfg.playback.channels        = kStreamChannels;
     cfg.sampleRate               = req.sample_rate;
     cfg.periodSizeInMilliseconds = req.period_ms;
+    if (req.period_ms <= 10) cfg.performanceProfile = ma_performance_profile_low_latency;
     cfg.dataCallback             = &MiniaudioBackend::on_data;
     cfg.notificationCallback     = &MiniaudioBackend::on_notification;
     cfg.pUserData                = this;

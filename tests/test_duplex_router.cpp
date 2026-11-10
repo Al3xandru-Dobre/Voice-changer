@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdlib>
 #include <new>
@@ -165,25 +166,67 @@ void test_overrun_drops_and_counts() {
     CHECK(r.input_overruns() == in.size() - stored);
 }
 
+void test_underrun_fades_across_callbacks() {
+    for (std::uint32_t rate : {16000u, 48000u}) {
+        DuplexRouter r(4096);
+        r.configure_underrun_fade(rate);
+        const std::size_t fade = std::size_t{rate} * 2 / 1000;
+        std::vector<float> ones(fade, 1.0f), out(fade);
+        CHECK(r.write_output(ones.data(), ones.size()) == ones.size());
+        r.process(out.data(), nullptr, out.size());
+        CHECK(out == ones); // no modification before an underrun
+        float previous = 1.0f;
+        // Carry a single fade across tiny/irregular callbacks.
+        for (std::size_t i = 0; i < fade; ++i) {
+            r.process(out.data(), nullptr, 1);
+            CHECK(out[0] >= 0.0f && out[0] <= previous);
+            CHECK(std::abs(out[0] - previous) <= 1.0f / static_cast<float>(fade) + 1e-6f);
+            previous = out[0];
+        }
+        CHECK(previous == 0.0f && r.output_underruns() == fade);
+        CHECK(r.write_output(ones.data(), ones.size()) == ones.size());
+        for (std::size_t i = 0; i < fade; ++i) {
+            r.process(out.data(), nullptr, 1);
+            CHECK(out[0] >= previous);
+            CHECK(std::abs(out[0] - previous) <= 1.0f / static_cast<float>(fade) + 1e-6f);
+            previous = out[0];
+        }
+        CHECK(previous == 1.0f && r.output_underruns() == fade);
+
+        r.process(out.data(), nullptr, 1); // resume before ramp-out reaches zero
+        previous = out[0];
+        std::fill(ones.begin(), ones.end(), -1.0f);
+        CHECK(r.write_output(ones.data(), ones.size()) == ones.size());
+        r.process(out.data(), nullptr, 1);
+        CHECK(std::abs(out[0] - previous) <= 2.0f / static_cast<float>(fade) + 1e-6f);
+        r.discard_queues(); // resets callback-owned edges, no old-route tail
+        r.process(out.data(), nullptr, out.size());
+        CHECK(std::all_of(out.begin(), out.end(), [](float x) { return x == 0.0f; }));
+    }
+}
+
 #ifndef FLUXVOICE_TSAN
 void test_process_never_allocates() {
     DuplexRouter r(1 << 16);
     std::vector<float> in(4096, 0.1f), out(4096), worker(4096);
 
-    for (bool passthrough : {true, false}) {
-        r.set_passthrough(passthrough);
-        const long before = g_allocs.load();
-        for (int k = 0; k < 500; ++k) {
-            const size_t n = 1 + static_cast<size_t>(k * 37) % 1500;  // irregular sizes
-            r.process(out.data(), in.data(), n);
-            r.process(out.data(), nullptr, n);
-            if (!passthrough) {  // keep queues cycling, incl. overflow/underflow edges
-                const size_t got = r.read_input(worker.data(), worker.size());
-                r.write_output(worker.data(), got / 2);
+    for (bool fades : {false, true}) {
+        r.configure_underrun_fade(16000, fades);
+        for (bool passthrough : {true, false}) {
+            r.set_passthrough(passthrough);
+            const long before = g_allocs.load();
+            for (int k = 0; k < 500; ++k) {
+                const size_t n = 1 + static_cast<size_t>(k * 37) % 1500;  // irregular sizes
+                r.process(out.data(), in.data(), n);
+                r.process(out.data(), nullptr, n);
+                if (!passthrough) {  // keep queues cycling, incl. overflow/underflow edges
+                    const size_t got = r.read_input(worker.data(), worker.size());
+                    r.write_output(worker.data(), got / 2);
+                }
             }
+            // Worker calls included: try_enqueue/try_dequeue never allocate.
+            CHECK(g_allocs.load() == before);
         }
-        // Worker-side calls are included: try_enqueue/try_dequeue never allocate.
-        CHECK(g_allocs.load() == before);
     }
 }
 #endif // FLUXVOICE_TSAN
@@ -241,6 +284,7 @@ int main() {
     test_queue_roundtrip_with_odd_frame_counts();
     test_underrun_zero_fills_and_counts();
     test_overrun_drops_and_counts();
+    test_underrun_fades_across_callbacks();
 #ifndef FLUXVOICE_TSAN
     test_process_never_allocates();
 #endif

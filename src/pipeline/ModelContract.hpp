@@ -18,6 +18,8 @@
 // Spec: Documents/Milestone 2/02_model_contract_fixtures.md.
 #pragma once
 
+#include "pipeline/KVStateCache.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -48,25 +50,9 @@ inline constexpr int kMaxSpkEmbDim       = 1 << 12;
 
 enum class ModelRole   { kEncoder, kVocoder };
 enum class ContentKind { kDiscrete, kSoft };
-enum class TensorDtype { kF32, kI64, kF16, kOther };
 
 inline const char* to_string(ModelRole r)   { return r == ModelRole::kEncoder ? "encoder" : "vocoder"; }
 inline const char* to_string(ContentKind k) { return k == ContentKind::kDiscrete ? "discrete" : "soft"; }
-inline const char* to_string(TensorDtype d) {
-    switch (d) {
-    case TensorDtype::kF32: return "f32";
-    case TensorDtype::kI64: return "i64";
-    case TensorDtype::kF16: return "f16";
-    default:                return "other";
-    }
-}
-
-inline TensorDtype dtype_from_string(std::string_view s) {
-    if (s == "f32") return TensorDtype::kF32;
-    if (s == "i64") return TensorDtype::kI64;
-    if (s == "f16") return TensorDtype::kF16;
-    return TensorDtype::kOther;
-}
 
 /// One graph input or output. `shape` uses -1 for a dynamic dimension;
 /// `has_shape` is false when the graph gives no shape at all (unknown rank —

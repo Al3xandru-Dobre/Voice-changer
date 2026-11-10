@@ -14,6 +14,8 @@ file(GLOB_RECURSE _fv_check_headers CONFIGURE_DEPENDS
      "${CMAKE_SOURCE_DIR}/frontend/core/*.hpp")
 list(APPEND _fv_check_headers
      "${CMAKE_SOURCE_DIR}/tools/LatencyProbe.hpp"
+     "${CMAKE_SOURCE_DIR}/tests/FakeModelStep.hpp"
+     "${CMAKE_SOURCE_DIR}/tests/AllocationCounter.hpp"
      "${CMAKE_SOURCE_DIR}/tests/TestSupport.hpp"
      "${CMAKE_SOURCE_DIR}/tests/FakeAudioBackend.hpp"
      "${CMAKE_SOURCE_DIR}/frontend/platform/Tray.hpp")

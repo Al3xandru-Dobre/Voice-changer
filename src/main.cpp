@@ -11,6 +11,8 @@
 // device listing, selection, refresh and recovery go through
 // AudioDeviceRegistry and AudioController (stages 03–06).
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <chrono>
@@ -18,8 +20,12 @@
 #include <csignal>
 #include <cstdint>
 #include <cstring>
+#include <exception>
+#include <filesystem>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -36,12 +42,18 @@
 #include "audio/MiniaudioBackend.hpp"
 #include "audio/RouteGuard.hpp"
 #include "pipeline/InferencePipeline.hpp"
+#include "pipeline/LatencyGovernor.hpp"
+#include "pipeline/ModeAWorker.hpp"
+#include "pipeline/ModelBundle.hpp"
+#include "pipeline/OrtModel.hpp"
+#include "pipeline/PipelineGeometry.hpp"
 #include "pipeline/PipelineTiming.hpp"
 #include "util/ProcessMemory.hpp"
+#include "util/WorkerPriority.hpp"
 
 namespace {
 
-enum class Mode { Passthrough, Queue, Chunked };
+enum class Mode { Passthrough, Queue, Chunked, VC };
 
 // Set by SIGINT/SIGTERM, Enter on stdin, or --duration expiry. A lock-free
 // atomic is async-signal-safe to store to from a signal handler.
@@ -55,7 +67,7 @@ extern "C" void on_stop_signal(int sig) {
 
 void print_usage(const char* argv0) {
     std::cout <<
-        "FluxVoice-S2UT — real-time textless voice changer (Milestone 1 / 1.5 build)\n"
+        "FluxVoice-S2UT — real-time textless voice changer (Mode A)\n"
         "\n"
         "Usage: " << argv0 << " [options]\n"
         "\n"
@@ -66,6 +78,12 @@ void print_usage(const char* argv0) {
         "                                thread (default when no mode flag is given)\n"
         "  --chunked                     Queue loopback, but the worker regroups audio into\n"
         "                                80 ms model frames first (adds one hop of latency)\n"
+        "  --vc                          Voice-conversion mode (Mode A; requires ONNX Runtime)\n"
+        "  --model-dir <bundle>          Encoder/vocoder bundle and voices.json (requires --vc)\n"
+        "  --voice <name>                Target voice (requires --vc)\n"
+        "  --frames-per-step <1|2|4>      Hop variant (default: smallest available)\n"
+        "  --latency-target-ms <ms>       Queued-audio target (default: model budget)\n"
+        "  --list-voices                 Validate/list bundle voices and exit (no audio/ORT needed)\n"
         "  --input  <index|default>      Capture device: index from --list-devices, or\n"
         "                                \"default\" to follow the OS default endpoint\n"
         "  --output <index|default>      Playback device: index or \"default\" (same rules)\n"
@@ -74,6 +92,7 @@ void print_usage(const char* argv0) {
         "                                \"default\" (WASAPI native loopback; mutually\n"
         "                                exclusive with --input)\n"
         "  --sample-rate <hz>            Sample rate (default 16000)\n"
+        "  --period-ms <5..40>            Requested device period (default 20 ms)\n"
         "  --duration <seconds>          Stop automatically after this many seconds\n"
         "                                (otherwise stop with Enter or Ctrl+C)\n"
         "  --stats <seconds>             Print a [stats] line (counters, queued audio, RSS)\n"
@@ -136,7 +155,8 @@ int list_devices(fluxvoice::AudioDeviceRegistry& registry) {
     return 0;
 }
 
-void print_stream_info(const StreamInfo& si, const fluxvoice::StreamStatus& status) {
+void print_stream_info(const StreamInfo& si, const fluxvoice::StreamStatus& status,
+                       std::uint32_t requested_period_ms) {
     std::cout << "Backend : " << si.backend << '\n'
               << "Capture : " << si.capture_name
               << "  (backend " << si.capture_internal_rate << " Hz, period "
@@ -145,7 +165,14 @@ void print_stream_info(const StreamInfo& si, const fluxvoice::StreamStatus& stat
               << "  (backend " << si.playback_internal_rate << " Hz, period "
               << si.playback_internal_period << " frames)\n"
               << "Client  : " << si.client_sample_rate << " Hz mono f32, requested period "
-              << AudioEngine::kDefaultPeriodMs << " ms\n";
+              << requested_period_ms << " ms\n";
+    const auto period_ms = [](std::uint32_t frames, std::uint32_t rate) {
+        return rate ? 1000.0 * frames / rate : 0.0;
+    };
+    std::cout << "Periods : capture="
+              << period_ms(si.capture_internal_period, si.capture_internal_rate)
+              << " ms, playback="
+              << period_ms(si.playback_internal_period, si.playback_internal_rate) << " ms\n";
     // Requested policy vs. the endpoint actually opened (M1.5 stages 04–06).
     const auto policy = [](const fluxvoice::DeviceSelection& sel) {
         return std::holds_alternative<fluxvoice::FollowSystemDefault>(sel) ? "default"
@@ -160,22 +187,52 @@ void print_stream_info(const StreamInfo& si, const fluxvoice::StreamStatus& stat
 /// Glitch counters and derived values at one instant (control thread only).
 struct Snapshot {
     uint64_t frames, overruns, underruns, drops;
+    // Reserved for the VC worker's output skips and startup silence. The
+    // diagnostic modes insert neither; do not fabricate inference telemetry.
+    std::uint64_t skipped = 0, prefilled = 0;
     // Samples held between capture and playback (queues + worker). Every
     // callback enqueues and dequeues the same count, so this is exact by
-    // conservation: underruns - overruns - drops.
+    // conservation: prefilled + underruns - overruns - drops - skipped.
     int64_t queued;
     size_t  rss;
+    bool vc = false;
+    fluxvoice::TimingSnapshot timing{};
+    std::uint64_t errors = 0;
+    double lat_ms = 0.0;
 };
 
-Snapshot snapshot(const DuplexRouter& router, const std::atomic<uint64_t>& drops) {
+Snapshot snapshot(const DuplexRouter& router, const std::atomic<uint64_t>& drops,
+                  const fluxvoice::ModeAWorker* worker = nullptr,
+                  const fluxvoice::InferencePipeline* pipeline = nullptr,
+                  const StreamInfo* stream = nullptr) {
     Snapshot s{};
     s.frames    = router.frames_processed();
     s.overruns  = router.input_overruns();
     s.underruns = router.output_underruns();
     s.drops     = drops.load(std::memory_order_relaxed);
-    s.queued    = static_cast<int64_t>(s.underruns) - static_cast<int64_t>(s.overruns) -
-                  static_cast<int64_t>(s.drops);
+    s.queued    = fluxvoice::queued_samples(s.underruns, s.overruns, s.drops,
+                                           s.skipped, s.prefilled);
     s.rss       = fluxvoice::resident_bytes();
+    if (worker && pipeline && stream) {
+        const auto w = worker->snapshot();
+        s.vc = true;
+        s.overruns = w.overruns;
+        s.underruns = w.underruns;
+        s.drops = w.drops;
+        s.skipped = w.skipped;
+        s.prefilled = w.prefilled;
+        s.queued = w.queued;
+        s.timing = pipeline->timing();
+        s.errors = pipeline->errors();
+        const auto period_ms = [](std::uint32_t frames, std::uint32_t rate) {
+            return rate ? 1000.0 * frames / rate : 0.0;
+        };
+        s.lat_ms = 1000.0 * (static_cast<double>(pipeline->geometry().algorithmic_samples()) +
+                            static_cast<double>(std::max<std::int64_t>(s.queued, 0))) /
+                            pipeline->geometry().sample_rate +
+                   period_ms(stream->capture_internal_period, stream->capture_internal_rate) +
+                   period_ms(stream->playback_internal_period, stream->playback_internal_rate);
+    }
     return s;
 }
 
@@ -186,7 +243,12 @@ std::string stats_line(double t, const Snapshot& s) {
     o.precision(1);
     o << "[stats] t=" << t << " frames=" << s.frames << " overruns=" << s.overruns
       << " underruns=" << s.underruns << " drops=" << s.drops << " queued=" << s.queued
+      << " skipped=" << s.skipped << " prefilled=" << s.prefilled
       << " rss_kb=" << s.rss / 1024;
+    if (s.vc)
+        o << " inf_p50_us=" << s.timing.p50_us << " inf_p95_us=" << s.timing.p95_us
+          << " inf_max_us=" << s.timing.max_us << " misses=" << s.timing.misses
+          << " errors=" << s.errors << " lat_ms=" << s.lat_ms;
     return o.str();
 }
 
@@ -195,6 +257,7 @@ const char* mode_name(Mode m) {
         case Mode::Passthrough: return "callback passthrough";
         case Mode::Queue:       return "SPSC queue loopback";
         case Mode::Chunked:     return "SPSC queue loopback, 80 ms chunked";
+        case Mode::VC:          return "Mode A voice conversion";
     }
     return "?";
 }
@@ -203,10 +266,14 @@ const char* mode_name(Mode m) {
 
 int main(int argc, char** argv) {
     bool opt_list = false;
+    bool list_voices = false, vc_options = false, explicit_rate = false, selected_mode = false;
     Mode mode = Mode::Queue;
+    std::string model_dir, voice_name;
+    std::uint32_t frames_per_step = 0, latency_target_ms = 0;
     int opt_input = -1, opt_output = -1, opt_loopback = -1;
     bool has_input_arg = false, has_loopback_arg = false;
     uint32_t sample_rate = AudioEngine::kDefaultSampleRate;
+    std::uint32_t period_ms = AudioEngine::kDefaultPeriodMs;
     uint32_t duration_s = 0;  // 0 = run until Enter / Ctrl+C
     uint32_t stats_s = 0;     // 0 = no periodic [stats] lines
 
@@ -222,6 +289,24 @@ int main(int argc, char** argv) {
                           << "' (expected an integer in [" << lo << ", " << hi << "])\n";
                 return false;
             }
+            return true;
+        };
+        auto text = [&](std::string& out) {
+            if (i + 1 >= argc || argv[i + 1][0] == '\0' || argv[i + 1][0] == '-') {
+                std::cerr << "Missing value for " << a << '\n';
+                return false;
+            }
+            out = argv[++i];
+            vc_options = true;
+            return true;
+        };
+        auto select_mode = [&](Mode choice) {
+            if (selected_mode && choice != mode) {
+                std::cerr << "Audio mode flags are mutually exclusive\n";
+                return false;
+            }
+            mode = choice;
+            selected_mode = true;
             return true;
         };
         // --input/--output/--loopback-input take a --list-devices index or the
@@ -248,13 +333,30 @@ int main(int argc, char** argv) {
         };
 
         if (a == "--list-devices")            opt_list = true;
-        else if (a == "--passthrough")        mode = Mode::Passthrough;
-        else if (a == "--queue-loopback")     mode = Mode::Queue;
-        else if (a == "--chunked")            mode = Mode::Chunked;
+        else if (a == "--passthrough")      { if (!select_mode(Mode::Passthrough)) return 1; }
+        else if (a == "--queue-loopback")   { if (!select_mode(Mode::Queue)) return 1; }
+        else if (a == "--chunked")          { if (!select_mode(Mode::Chunked)) return 1; }
+        else if (a == "--vc")               { if (!select_mode(Mode::VC)) return 1; }
+        else if (a == "--model-dir")        { if (!text(model_dir)) return 1; }
+        else if (a == "--voice")            { if (!text(voice_name)) return 1; }
+        else if (a == "--frames-per-step") {
+            vc_options = true;
+            if (!value(1, 4, frames_per_step)) return 1;
+            if (frames_per_step == 3) {
+                std::cerr << "--frames-per-step must be 1, 2 or 4\n";
+                return 1;
+            }
+        }
+        else if (a == "--latency-target-ms") {
+            vc_options = true;
+            if (!value(1, 10000, latency_target_ms)) return 1;
+        }
+        else if (a == "--list-voices")      { list_voices = vc_options = true; }
         else if (a == "--input")            { if (!endpoint(opt_input)) return 1; has_input_arg = true; }
         else if (a == "--output")           { if (!endpoint(opt_output)) return 1; }
         else if (a == "--loopback-input")   { if (!endpoint(opt_loopback)) return 1; has_loopback_arg = true; }
-        else if (a == "--sample-rate")      { if (!value(8000, 192000, sample_rate)) return 1; }
+        else if (a == "--sample-rate")      { if (!value(8000, 192000, sample_rate)) return 1; explicit_rate = true; }
+        else if (a == "--period-ms")        { if (!value(5, 40, period_ms)) return 1; }
         else if (a == "--duration")         { if (!value(1, 7 * 24 * 3600, duration_s)) return 1; }
         else if (a == "--stats")            { if (!value(1, 24 * 3600, stats_s)) return 1; }
         else if (a == "-h" || a == "--help") { print_usage(argv[0]); return 0; }
@@ -265,12 +367,77 @@ int main(int argc, char** argv) {
         std::cerr << "--input and --loopback-input are mutually exclusive\n";
         return 1;
     }
+    if (vc_options && mode != Mode::VC) {
+        std::cerr << "Voice-conversion options require --vc\n";
+        return 1;
+    }
+    if (mode == Mode::VC && (has_loopback_arg || opt_list)) {
+        std::cerr << "--vc requires ordinary duplex capture, not --loopback-input/--list-devices\n";
+        return 1;
+    }
+    if (mode == Mode::VC && !list_voices && !fluxvoice::ort_available()) {
+        std::cerr << "--vc: " << fluxvoice::kBuiltWithoutOrtMessage << '\n';
+        return 1;
+    }
+    if (mode == Mode::VC && (model_dir.empty() || (!list_voices && voice_name.empty()))) {
+        std::cerr << "--vc requires --model-dir <bundle> and --voice <name> (or --list-voices)\n";
+        return 1;
+    }
+    std::unique_ptr<fluxvoice::ModelBundle> bundle;
+    std::unique_ptr<fluxvoice::InferencePipeline> vc_pipeline;
+    if (mode == Mode::VC) {
+        try {
+            std::string error;
+            if (list_voices) {
+                std::vector<fluxvoice::VoiceEntry> voices;
+                if (!fluxvoice::read_voice_catalog(
+                        std::filesystem::path(model_dir) / "voices.json", std::nullopt, voices, error)) {
+                    std::cerr << error << '\n';
+                    return 1;
+                }
+                for (const auto& voice : voices)
+                    std::cout << voice.name << "  " << voice.display << "  [" << voice.license << "]\n";
+                return 0;
+            }
+            bundle = std::make_unique<fluxvoice::ModelBundle>();
+            if (!bundle->load(model_dir, static_cast<int>(frames_per_step), error)) {
+                std::cerr << error << '\n';
+                return 1;
+            }
+            const auto* voice = fluxvoice::find_voice(bundle->voices, voice_name, error);
+            if (!voice) { std::cerr << error << '\n'; return 1; }
+            const auto contract_rate = static_cast<std::uint32_t>(bundle->encoder.contract().sample_rate);
+            if (explicit_rate && sample_rate != contract_rate) {
+                std::cerr << "--sample-rate must equal the model contract rate (" << contract_rate << ")\n";
+                return 1;
+            }
+            sample_rate = contract_rate;
+            fluxvoice::PipelineOptions options;
+            options.latency_target_samples = std::size_t{sample_rate} * latency_target_ms / 1000;
+            vc_pipeline = std::make_unique<fluxvoice::InferencePipeline>(
+                bundle->encoder, bundle->vocoder, voice->stats, voice->embedding, options);
+            if (!vc_pipeline->warm_up(20)) {
+                std::cerr << "Warm-up failed: " << vc_pipeline->last_error() << '\n';
+                return 1;
+            }
+            if (vc_pipeline->governor().target_samples() + vc_pipeline->geometry().hop >
+                DuplexRouter::kQueueCapacity) {
+                std::cerr << "Latency target plus one hop exceeds the audio queue capacity\n";
+                return 1;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Cannot prepare Mode A: " << e.what() << '\n';
+            return 1;
+        }
+    }
 
     MiniaudioBackend backend;
     fluxvoice::ControllerConfig ctrl_cfg;
     ctrl_cfg.sample_rate = sample_rate;
-    ctrl_cfg.period_ms   = AudioEngine::kDefaultPeriodMs;
+    ctrl_cfg.period_ms   = period_ms;
     ctrl_cfg.passthrough = (mode == Mode::Passthrough && !has_loopback_arg);
+    ctrl_cfg.fade_underruns = (mode == Mode::VC);
+    if (mode == Mode::VC) ctrl_cfg.max_queued_samples = 0; // governor owns intentional skips
 
     ChunkAssembler chunks(fluxvoice::PipelineTiming::kChunkSamples,
                           fluxvoice::PipelineTiming::kContextSamples);
@@ -278,9 +445,17 @@ int main(int argc, char** argv) {
 
     std::atomic<bool> worker_run{false};
     std::atomic<uint64_t> output_drops{0};
+    std::array<float, 4096> buf{};
     std::thread worker;
+    std::unique_ptr<fluxvoice::ModeAWorker> vc_worker;
 
     fluxvoice::AudioController controller(backend, ctrl_cfg);
+    if (vc_pipeline) {
+        vc_worker = std::make_unique<fluxvoice::ModeAWorker>(controller.router(), *vc_pipeline);
+        controller.set_prepare_hook([&] {
+            return controller.stream_info().client_sample_rate == sample_rate && vc_worker->prepare();
+        });
+    }
     fluxvoice::AudioDeviceRegistry& registry = controller.registry();
 
     const fluxvoice::BackendStatus backend_status = registry.status();
@@ -343,17 +518,27 @@ int main(int argc, char** argv) {
     auto reset_dsp = [&] {
         chunks.reset();
         pipeline.reset();
+        if (vc_worker) vc_worker->reset();
     };
     auto start_worker = [&] {
         if (!use_worker || worker.joinable()) return;
         worker_run.store(true, std::memory_order_relaxed);
         worker = std::thread([&] {
-            std::vector<float> buf(4096);
+            const fluxvoice::WorkerPriority priority;
+            std::cerr << "[worker] priority=" << priority.method()
+                      << " elevated=" << (priority.elevated() ? "yes" : "no")
+                      << " result=" << priority.result() << '\n';
             auto emit = [&](const float* p, size_t n) {
                 output_drops.fetch_add(n - controller.write_output(p, n),
                                        std::memory_order_relaxed);
             };
             while (worker_run.load(std::memory_order_relaxed)) {
+                if (vc_worker) {
+                    if (!vc_worker->pump()) break;
+                    if (controller.router().input_queued_approx() == 0)
+                        std::this_thread::sleep_for(std::chrono::microseconds(500));
+                    continue;
+                }
                 size_t n = controller.read_input(buf.data(), buf.size());
                 if (n == 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -389,7 +574,13 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, on_stop_signal);
     std::signal(SIGTERM, on_stop_signal);
 
-    print_stream_info(controller.stream_info(), controller.status());
+    print_stream_info(controller.stream_info(), controller.status(), period_ms);
+    if (vc_pipeline)
+        std::cout << "Pipeline: s" << vc_pipeline->geometry().frames_per_step
+                  << ", hop=" << vc_pipeline->geometry().hop
+                  << " samples, algorithmic=" << vc_pipeline->geometry().algorithmic_samples()
+                  << " samples, target=" << vc_pipeline->governor().target_samples()
+                  << " samples, voice=" << voice_name << '\n';
     std::cout << "FluxVoice running (" << mode_name(mode) << "). ";
     if (duration_s > 0) std::cout << "Stopping after " << duration_s << " s; Ctrl+C to stop early.\n";
     else                std::cout << "Press Enter or Ctrl+C to stop.\n";
@@ -403,8 +594,17 @@ int main(int argc, char** argv) {
     const auto deadline = t0 + std::chrono::seconds(duration_s);
     auto next_stats = t0 + std::chrono::seconds(stats_s);
     int exit_code = 0;
+    const auto take_snapshot = [&] {
+        return snapshot(controller.router(), output_drops, vc_worker.get(), vc_pipeline.get(),
+                        &controller.stream_info());
+    };
     while (!g_stop.load()) {
         const auto now = std::chrono::steady_clock::now();
+        if (vc_worker && vc_worker->failed()) {
+            std::cerr << "Inference stopped after repeated failures: " << vc_worker->error() << '\n';
+            exit_code = 1;
+            break;
+        }
         controller.tick(now);
         const fluxvoice::StreamState st = controller.status().state;
         if (st == fluxvoice::StreamState::AwaitingUser || st == fluxvoice::StreamState::Error) {
@@ -417,7 +617,7 @@ int main(int argc, char** argv) {
         if (duration_s > 0 && now >= deadline) break;
         if (stats_s > 0 && now >= next_stats) {
             const double t = std::chrono::duration<double>(now - t0).count();
-            std::cout << stats_line(t, snapshot(controller.router(), output_drops)) << std::endl;
+            std::cout << stats_line(t, take_snapshot()) << std::endl;
             next_stats += std::chrono::seconds(stats_s);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -426,7 +626,7 @@ int main(int argc, char** argv) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     // Before teardown: callbacks that run after the worker stops would count
     // as underruns that are not the stream's fault (BEST_PRACTICES §3.5).
-    const Snapshot end = snapshot(controller.router(), output_drops);
+    const Snapshot end = take_snapshot();
     const uint32_t active_rate =
         controller.stream_info().client_sample_rate > 0
             ? controller.stream_info().client_sample_rate
@@ -440,6 +640,7 @@ int main(int argc, char** argv) {
               << ", input overruns = " << end.overruns
               << ", output underruns = " << end.underruns
               << ", output drops = " << end.drops << '\n'
+              << "Governor: skipped = " << end.skipped << ", prefilled = " << end.prefilled << '\n'
               << "Queued audio: " << end.queued << " samples ("
               << 1000.0 * static_cast<double>(end.queued) / static_cast<double>(active_rate)
               << " ms); RSS " << end.rss / 1024 << " KB\n";

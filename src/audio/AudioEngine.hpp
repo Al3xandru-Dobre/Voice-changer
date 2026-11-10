@@ -73,7 +73,8 @@ public:
               const fluxvoice::EndpointKey* output = nullptr,
               std::uint32_t sample_rate = kDefaultSampleRate,
               bool passthrough = false,
-              fluxvoice::CaptureMode capture_mode = fluxvoice::CaptureMode::OrdinaryMicrophone) {
+              fluxvoice::CaptureMode capture_mode = fluxvoice::CaptureMode::OrdinaryMicrophone,
+              std::uint32_t period_ms = kDefaultPeriodMs) {
         if (!backend_.ok() || backend_.is_stream_open()) return false;
 
         router_.set_passthrough(passthrough);
@@ -83,7 +84,7 @@ public:
         req.capture_key  = input;
         req.playback_key = output;
         req.sample_rate  = sample_rate;
-        req.period_ms    = kDefaultPeriodMs;
+        req.period_ms    = period_ms;
         req.passthrough  = passthrough;
 
         auto res = backend_.open_stream(req, &AudioEngine::data_callback, this);
