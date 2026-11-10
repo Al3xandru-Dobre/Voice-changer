@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "title": "FluxVoice sample catalogue",
+  "description": "Example index in the format the Catalogue panel reads. Entries describe voice packs the user can obtain; the application never downloads anything itself. Replace or extend with real packs.",
+  "entries": [
+    {
+      "id": "fixture-identity",
+      "display": "Identity (passthrough fixture)",
+      "bundle": "identity",
+      "languages": ["en"],
+      "license": "CC0-1.0 (generated fixture, no trained weights)",
+      "attribution": "tools/make_fixture_models.py",
+      "tags": ["test", "neutral"],
+      "size_mb": 0.01,
+      "page": "https://github.com/al3xandru-dobre/voice-changer/tree/master/tests/data/fixtures"
+    },
+    {
+      "id": "hifitts-example",
+      "display": "Hi-Fi TTS example speaker",
+      "bundle": "fluxvoice-en-v1",
+      "languages": ["en"],
+      "license": "CC BY 4.0",
+      "attribution": "Hi-Fi Multi-Speaker English TTS Dataset (Bakhturina et al., 2021)",
+      "tags": ["female", "read-speech"],
+      "size_mb": 42,
+      "page": "https://www.openslr.org/109/"
+    },
+    {
+      "id": "research-nc-example",
+      "display": "Research-only example (non-commercial)",
+      "bundle": "fluxvoice-research",
+      "languages": ["en", "es", "fr", "de"],
+      "license": "CC BY-NC-SA 4.0",
+      "attribution": "Example entry showing how a non-commercial licence is badged",
+      "tags": ["multilingual", "research"],
+      "size_mb": 120
+    }
+  ]
+}

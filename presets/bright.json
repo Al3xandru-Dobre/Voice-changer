@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "Bright",
+  "description": "Four semitones up with a slightly livelier contour.",
+  "params": {
+    "pitch_shift": 4.0,
+    "intonation": 1.1
+  }
+}

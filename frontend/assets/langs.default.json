@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "langs": [
+    { "code": "en", "id": 0, "name": "English" },
+    { "code": "es", "id": 1, "name": "Spanish" },
+    { "code": "fr", "id": 2, "name": "French" },
+    { "code": "de", "id": 3, "name": "German" }
+  ],
+  "default_wait_k": {
+    "es->en": 3,
+    "fr->en": 3,
+    "de->en": 4,
+    "en->es": 3,
+    "en->fr": 3,
+    "en->de": 4
+  }
+}

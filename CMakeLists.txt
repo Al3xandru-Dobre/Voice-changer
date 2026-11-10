@@ -9,6 +9,7 @@ option(FLUXVOICE_FETCH_DEPS      "Fetch header-only dependencies via FetchConten
 option(FLUXVOICE_STRICT_WARNINGS "Enable strict compiler warnings"                 ON)
 option(FLUXVOICE_WARNINGS_AS_ERRORS "Treat warnings from our sources as errors (CI)" OFF)
 option(FLUXVOICE_BUILD_TESTS     "Register CTest smoke/unit tests"                  ON)
+option(FLUXVOICE_BUILD_GUI       "Build the SDL3 + Dear ImGui desktop frontend (fluxvoice_gui)" ON)
 
 # ---------------------------------------------------------------------------
 # Language settings
@@ -57,6 +58,38 @@ if(FLUXVOICE_FETCH_DEPS)
 
     FetchContent_MakeAvailable(miniaudio readerwriterqueue nlohmann_json)
 
+    if(FLUXVOICE_BUILD_GUI)
+        # SDL3 (window, OpenGL context, events, native dialogs, system tray) —
+        # release tarball pinned by hash, built static with only the subsystems
+        # the frontend uses. Dear ImGui has no CMake project of its own; its
+        # sources are compiled into fluxvoice_imgui below.
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+        set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
+        set(SDL_UNINSTALL OFF CACHE BOOL "" FORCE)
+        set(SDL_AUDIO OFF CACHE BOOL "" FORCE)      # miniaudio owns audio I/O
+        set(SDL_JOYSTICK OFF CACHE BOOL "" FORCE)
+        set(SDL_HAPTIC OFF CACHE BOOL "" FORCE)
+        set(SDL_SENSOR OFF CACHE BOOL "" FORCE)
+        set(SDL_CAMERA OFF CACHE BOOL "" FORCE)
+        set(SDL_GPU OFF CACHE BOOL "" FORCE)
+        set(SDL_RENDER OFF CACHE BOOL "" FORCE)     # ImGui renders through OpenGL 3 directly
+        set(SDL_HIDAPI OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(SDL3
+            URL      https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18.tar.gz
+            URL_HASH SHA256=9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3)
+        FetchContent_Declare(imgui
+            GIT_REPOSITORY https://github.com/ocornut/imgui.git
+            GIT_TAG        v1.92.9
+            GIT_SHALLOW    TRUE
+            SOURCE_SUBDIR  "__no_cmakelists__")
+        FetchContent_MakeAvailable(SDL3 imgui)
+        set(FLUXVOICE_IMGUI_DIR ${imgui_SOURCE_DIR})
+    endif()
+
     add_library(miniaudio_headers INTERFACE)
     target_include_directories(miniaudio_headers SYSTEM INTERFACE ${miniaudio_SOURCE_DIR})
 
@@ -75,6 +108,32 @@ else()
 
     add_library(nlohmann_json_headers INTERFACE)
     target_include_directories(nlohmann_json_headers SYSTEM INTERFACE ${CMAKE_SOURCE_DIR}/third_party/nlohmann_json/include)
+
+    if(FLUXVOICE_BUILD_GUI)
+        # Vendored SDL3 source tree + Dear ImGui sources (see third_party/README.md).
+        set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+        set(SDL_STATIC ON CACHE BOOL "" FORCE)
+        set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+        add_subdirectory(${CMAKE_SOURCE_DIR}/third_party/SDL3 EXCLUDE_FROM_ALL)
+        set(FLUXVOICE_IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+    endif()
+endif()
+
+if(FLUXVOICE_BUILD_GUI)
+    # Dear ImGui core + SDL3 platform backend + OpenGL 3 renderer backend (its own
+    # function loader: no system GL headers needed). Third-party code: SYSTEM
+    # includes, no first-party warning flags.
+    add_library(fluxvoice_imgui STATIC
+        ${FLUXVOICE_IMGUI_DIR}/imgui.cpp
+        ${FLUXVOICE_IMGUI_DIR}/imgui_draw.cpp
+        ${FLUXVOICE_IMGUI_DIR}/imgui_tables.cpp
+        ${FLUXVOICE_IMGUI_DIR}/imgui_widgets.cpp
+        ${FLUXVOICE_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
+        ${FLUXVOICE_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
+    target_include_directories(fluxvoice_imgui SYSTEM PUBLIC
+        ${FLUXVOICE_IMGUI_DIR} ${FLUXVOICE_IMGUI_DIR}/backends)
+    target_link_libraries(fluxvoice_imgui PUBLIC SDL3::SDL3-static)
+    target_compile_definitions(fluxvoice_imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 endif()
 
 # miniaudio's implementation pulls in <windows.h>, whose min/max macros break
@@ -352,3 +411,9 @@ if(FLUXVOICE_BUILD_TESTS)
         set_tests_properties(probe_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()
 endif()
+
+# ---------------------------------------------------------------------------
+# Frontend (Milestone 4): toolkit-free model layer, its headless tests, and the
+# SDL3 + Dear ImGui desktop application. See frontend/README.md.
+# ---------------------------------------------------------------------------
+add_subdirectory(frontend)

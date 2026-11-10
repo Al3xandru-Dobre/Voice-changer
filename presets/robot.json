@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "name": "Robot",
+  "description": "Monotone: the whitened pitch contour is scaled to zero.",
+  "params": {
+    "intonation": 0.0
+  }
+}

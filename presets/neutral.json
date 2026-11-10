@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "Neutral",
+  "description": "Engine defaults: the selected voice as trained, no pitch or intonation change.",
+  "params": {
+    "pitch_shift": 0.0,
+    "intonation": 1.0,
+    "timbre_blend": 0.0,
+    "gain": 0.0,
+    "gate_threshold": -55.0,
+    "limiter": 1
+  }
+}

@@ -8,7 +8,8 @@ External dependencies live here in one of two forms:
 | `readerwriterqueue/` | Auto-fetched by CMake `FetchContent` (pinned `v1.0.7`); manual vendoring optional | M1 |
 | `nlohmann_json/` | Auto-fetched by CMake `FetchContent` (release tarball `v3.12.0`, pinned by SHA256); manual vendoring optional | M2 |
 | `onnxruntime/` | **Manual** — download a prebuilt SDK from the onnxruntime releases page and pass `-DONNXRUNTIME_ROOT=<dir>` to CMake | M2 |
-| `imgui/` | **Manual** — vendor Dear ImGui (+ backend sources) when building the dashboard | M4 |
+| `imgui/` | Auto-fetched by CMake `FetchContent` (pinned `v1.92.9`, shallow); compiled into `fluxvoice_imgui` with the SDL3 + OpenGL 3 backends; manual vendoring optional | M4 |
+| `SDL3/` | Auto-fetched by CMake `FetchContent` (release tarball `3.4.18`, pinned by SHA256; static, trimmed subsystems); manual vendoring optional | M4 |
 
 Contents of these directories are git-ignored; only this and per-directory
 `README.md` files are tracked.

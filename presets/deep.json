@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "Deep",
+  "description": "Four semitones down with a slightly flatter contour.",
+  "params": {
+    "pitch_shift": -4.0,
+    "intonation": 0.9
+  }
+}
