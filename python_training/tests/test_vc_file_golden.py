@@ -98,6 +98,9 @@ def test_fv_vc_file_reproduces_stage06_golden_and_rss_budget(tmp_path):
         res = subprocess.run(
             [str(vc_file), "--model-dir", str(bundle), "--voice", voice,
              "--frames-per-step", str(fps), "--dump-units", str(out_units),
+             # Golden audio has no output stage; the shipped chain must be off
+             # for bit-exact parity.
+             "--no-output-chain",
              str(golden_dir / "input.wav"), str(out_wav)],
             check=True, capture_output=True, text=True,
         )
@@ -117,7 +120,7 @@ def test_fv_vc_file_reproduces_stage06_golden_and_rss_budget(tmp_path):
     # 10,000-step leak check (500 steps/pass * 20 repeats = 10,000 steps)
     rep_res = subprocess.run(
         [str(vc_file), "--model-dir", str(bundle), "--voice", voice,
-         "--frames-per-step", "1", "--repeat", "20",
+         "--frames-per-step", "1", "--repeat", "20", "--no-output-chain",
          str(golden_dir / "input.wav"), str(tmp_path / "repeat.wav")],
         check=True, capture_output=True, text=True,
     )

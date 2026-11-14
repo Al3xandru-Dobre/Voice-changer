@@ -1,14 +1,17 @@
 // OutputChain — the interim output stage run on the worker thread: smoothed
 // gain, mute and a soft safety limiter, plus the peak/RMS meters the UI shows.
 //
-// M2 / Stage 09 places the full chain (gain -> gate -> limiter -> brightness)
-// inside InferencePipeline. Until that stage lands, the frontend applies the
-// two controls a user needs while the engine passes audio through — mute from
-// the tray must be real, and gain must not click. The gate is deliberately
-// absent: it needs the pipeline's energy tracker.
+// M2 / Stage 09 moved the full chain (gain -> gate -> brightness -> limiter)
+// into InferencePipeline (src/voice/VoiceOutputChain.hpp). The GUI EngineHost
+// still runs this legacy pass-through shell until it hosts a model bundle
+// (M4) — mute from the tray must be real, and gain must not click. The gate
+// is deliberately absent: it needs the pipeline's energy tracker. The limiter
+// curve itself is shared with the engine chain to keep them identical.
 //
 // Allocation-free; not real-time (worker thread), so std::tanh is acceptable.
 #pragma once
+
+#include "voice/VoiceOutputChain.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -74,20 +77,12 @@ public:
         rms = n == 0 ? 0.0f : static_cast<float>(std::sqrt(sum_sq / static_cast<double>(n)));
     }
 
-    /// Unity below the knee (70 % of the ceiling); above it a tanh curve that
-    /// is C1-continuous at the knee and asymptotic to the -1 dBFS ceiling, so
-    /// nominal levels pass untouched and nothing exceeds the ceiling.
+    /// The shared -1 dBFS soft-clip curve (defined once in VoiceOutputChain).
     static float soft_limit(float x) {
-        const float a = std::fabs(x);
-        if (a <= kKnee) return x;
-        const float y = kKnee + kRange * std::tanh((a - kKnee) / kRange);
-        return x < 0.0f ? -y : y;
+        return fluxvoice::VoiceOutputChain::soft_limit(x);
     }
 
 private:
-    static constexpr float kCeiling = 0.891251f;  // -1 dBFS
-    static constexpr float kKnee    = 0.7f * kCeiling;
-    static constexpr float kRange   = kCeiling - kKnee;
 
     float target() const { return muted_ ? 0.0f : std::pow(10.0f, gain_db_ / 20.0f); }
 

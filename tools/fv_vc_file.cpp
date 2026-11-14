@@ -6,15 +6,24 @@
 // through InferencePipeline + OrtModel without any audio device.
 //
 // Interface:
-//   fv_vc_file --model-dir <bundle> --voice <name>
+//   fv_vc_file --model-dir <bundle> [--voice <name>]
 //              [--frames-per-step <1|2|4>] [--dump-units [path]]
+//              [--preset <name|path>] [--preset-dir <dir>] [--param name=value]
+//              [--voice-b <name>] [--change <seconds>:<name>=<value>]
+//              [--no-output-chain]
 //              [--repeat <N>] [--pcm16] in.wav out.wav
+//
+// The output chain (gain -> gate -> brightness -> limiter) defaults to the
+// full shipped chain; --no-output-chain leaves raw vocoder PCM for parity
+// checks against runtimes that have no output stage.
 #include "pipeline/InferencePipeline.hpp"
 #include "pipeline/ModelBundle.hpp"
 #include "pipeline/ModelContract.hpp"
 #include "pipeline/OrtModel.hpp"
 #include "pipeline/PipelineGeometry.hpp"
 #include "util/ProcessMemory.hpp"
+#include "voice/Presets.hpp"
+#include "voice/VoiceParams.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -38,9 +47,21 @@ using namespace fluxvoice;
 
 namespace {
 
+struct ScheduledChange {
+    double seconds = 0.0;
+    const ParamDesc* desc = nullptr;
+    float value = 0.0f;
+};
+
 struct Options {
     fs::path model_dir;
     std::string voice;
+    std::string voice_b;
+    std::string preset;
+    fs::path preset_dir;
+    std::vector<std::pair<const ParamDesc*, float>> assignments;
+    std::vector<ScheduledChange> changes;
+    bool no_output_chain = false;
     int frames_per_step = 0; // 0 = auto-pick first available variant (s1 -> s2 -> s4)
     bool dump_units = false;
     fs::path dump_units_path;
@@ -55,17 +76,27 @@ void print_usage(const char* argv0) {
         "fv_vc_file — offline Mode A voice-conversion runner (FluxVoice M2 Stage 07)\n"
         "\n"
         "Usage:\n"
-        "  " << argv0 << " --model-dir <bundle> --voice <name> [--frames-per-step <1|2|4>]\n"
+        "  " << argv0 << " --model-dir <bundle> [--voice <name>] [--frames-per-step <1|2|4>]\n"
+        "             [--preset <name|path>] [--param <name=value>] [--voice-b <name>]\n"
+        "             [--change <seconds>:<name>=<value>] [--no-output-chain]\n"
         "             [--dump-units [path]] [--repeat <N>] [--pcm16] <in.wav> <out.wav>\n"
         "\n"
         "Options:\n"
         "  --model-dir <dir>         Model bundle directory (encoder_s*.onnx, vocoder_s*.onnx, voices.json)\n"
-        "  --voice <name>            Target voice name from voices.json\n"
+        "  --voice <name>          Target voice name from voices.json (default: first bundle voice)\n"
+        "  --voice-b <name>        Blend endpoint voice B (default: follows --voice)\n"
+        "  --preset <name|path>    Voice preset (searched in --preset-dir, exe/presets, source presets/,\n"
+        "                          cwd/presets) or a .json path\n"
+        "  --preset-dir <dir>      Extra preset directory searched first\n"
+        "  --param <name=value>    Set a voice parameter (repeatable)\n"
+        "  --change <s>:<n>=<v>    Apply a parameter change mid-run at the first hop starting\n"
+        "                          at/after <s> seconds (repeatable; for click tests)\n"
+        "  --no-output-chain       Raw vocoder PCM: no gain/gate/brightness/limiter (parity only)\n"
         "  --frames-per-step <1|2|4> Hop variant (default: first available of 1, 2, 4)\n"
-        "  --dump-units [path]       Print discrete unit IDs (and optionally write .npy or .txt)\n"
-        "  --repeat <N>              Loop input N times after warm-up and report RSS delta (default 1)\n"
-        "  --pcm16                   Write 16-bit PCM WAV instead of 32-bit float WAV\n"
-        "  -h, --help                Show this help and exit\n";
+        "  --dump-units [path]     Print discrete unit IDs (and optionally write .npy or .txt)\n"
+        "  --repeat <N>            Loop input N times after warm-up and report RSS delta (default 1)\n"
+        "  --pcm16                 Write 16-bit PCM WAV instead of 32-bit float WAV\n"
+        "  -h, --help              Show this help and exit\n";
 }
 
 bool parse_uint(std::string_view s, std::uint32_t lo, std::uint32_t hi, std::uint32_t& out) {
@@ -307,6 +338,54 @@ bool parse_args(int argc, char** argv, Options& opts, bool& help_requested) {
             std::string_view v;
             if (!need_val(v)) return false;
             opts.voice = std::string(v);
+        } else if (a == "--voice-b") {
+            std::string_view v;
+            if (!need_val(v)) return false;
+            opts.voice_b = std::string(v);
+        } else if (a == "--preset") {
+            std::string_view v;
+            if (!need_val(v)) return false;
+            opts.preset = std::string(v);
+        } else if (a == "--preset-dir") {
+            std::string_view v;
+            if (!need_val(v)) return false;
+            opts.preset_dir = fs::path(v);
+        } else if (a == "--param") {
+            std::string_view v;
+            if (!need_val(v)) return false;
+            const ParamDesc* d = nullptr;
+            float value = 0.0f;
+            std::string warning, error;
+            if (!parse_param_assignment(v, d, value, warning, error)) {
+                std::cerr << "--param: " << error << '\n';
+                return false;
+            }
+            if (!warning.empty()) std::cerr << "--param: " << warning << '\n';
+            opts.assignments.push_back({d, value});
+        } else if (a == "--change") {
+            std::string_view v;
+            if (!need_val(v)) return false;
+            const std::size_t colon = v.find(':');
+            if (colon == std::string_view::npos) {
+                std::cerr << "Invalid --change '" << v << "' (expected seconds:name=value)\n";
+                return false;
+            }
+            double seconds = 0.0;
+            if (!parse_finite_float(v.substr(0, colon), seconds) || seconds < 0.0) {
+                std::cerr << "Invalid --change '" << v << "' (bad seconds)\n";
+                return false;
+            }
+            const ParamDesc* d = nullptr;
+            float value = 0.0f;
+            std::string warning, error;
+            if (!parse_param_assignment(v.substr(colon + 1), d, value, warning, error)) {
+                std::cerr << "--change: " << error << '\n';
+                return false;
+            }
+            if (!warning.empty()) std::cerr << "--change: " << warning << '\n';
+            opts.changes.push_back({seconds, d, value});
+        } else if (a == "--no-output-chain") {
+            opts.no_output_chain = true;
         } else if (a == "--frames-per-step") {
             std::string_view v;
             if (!need_val(v)) return false;
@@ -350,10 +429,6 @@ bool parse_args(int argc, char** argv, Options& opts, bool& help_requested) {
         std::cerr << "Missing required --model-dir <bundle>\n";
         return false;
     }
-    if (opts.voice.empty()) {
-        std::cerr << "Missing required --voice <name>\n";
-        return false;
-    }
     if (pos.size() != 2) {
         std::cerr << "Expected <in.wav> and <out.wav> positional arguments\n";
         return false;
@@ -382,18 +457,55 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Same resolution order as the CLI: descriptor defaults -> preset params
+    // and voice names -> --voice / --voice-b -> --param assignments.
+    std::error_code exe_ec;
+    const fs::path exe_dir = fs::weakly_canonical(fs::path(argv[0]), exe_ec).parent_path();
+    PresetLoadResult preset_res;
+    if (!opts.preset.empty()) {
+        preset_res = resolve_preset(opts.preset, preset_search_dirs(opts.preset_dir, exe_dir));
+        if (!preset_res.ok()) {
+            std::cerr << preset_res.error << '\n';
+            return 1;
+        }
+        for (const std::string& w : preset_res.warnings) std::cerr << "preset: " << w << '\n';
+    }
+
     ModelBundle bundle;
     std::string error;
     if (!bundle.load(opts.model_dir, opts.frames_per_step, error)) {
         std::cerr << error << '\n';
         return 1;
     }
-    const VoiceEntry* selected = find_voice(bundle.voices, opts.voice, error);
-    if (!selected) {
-        std::cerr << error << '\n';
-        return 1;
+    const auto voice_index = [&](std::string_view name, std::uint16_t& out) -> bool {
+        const VoiceEntry* v = find_voice(bundle.voices, name, error);
+        if (!v) {
+            std::cerr << error << '\n';
+            return false;
+        }
+        out = static_cast<std::uint16_t>(v - bundle.voices.data());
+        return true;
+    };
+    VoiceParams params;
+    bool voice_b_follows_a = true;
+    if (preset_res.ok()) {
+        apply_preset_params(*preset_res.preset, params);
+        if (preset_res.preset->voice_a &&
+            !voice_index(*preset_res.preset->voice_a, params.voice_a))
+            return 1;
+        if (preset_res.preset->voice_b &&
+            !voice_index(*preset_res.preset->voice_b, params.voice_b))
+            return 1;
+        if (preset_res.preset->voice_b) voice_b_follows_a = false;
     }
-    const VoiceEntry& voice = *selected;
+    if (!opts.voice.empty() && !voice_index(opts.voice, params.voice_a)) return 1;
+    if (!opts.voice_b.empty()) {
+        if (!voice_index(opts.voice_b, params.voice_b)) return 1;
+        voice_b_follows_a = false;
+    }
+    for (const auto& [d, v] : opts.assignments) params.set(d->id, v);
+    if (voice_b_follows_a) params.voice_b = params.voice_a;
+    const VoiceEntry& voice = bundle.voices[params.voice_a];
     OrtModel& enc = bundle.encoder;
     OrtModel& voc = bundle.vocoder;
     const std::string variant = "s" + std::to_string(bundle.paths.frames_per_step);
@@ -420,7 +532,15 @@ int main(int argc, char** argv) {
     }
     const std::size_t usable_samples = steps_per_pass * hop;
 
-    InferencePipeline pipeline(enc, voc, voice.stats, voice.embedding);
+    std::vector<PipelineVoice> pipeline_voices;
+    pipeline_voices.reserve(bundle.voices.size());
+    for (const VoiceEntry& v : bundle.voices)
+        pipeline_voices.push_back(
+            {v.stats, std::span<const float>(v.embedding.data(), v.embedding.size())});
+    PipelineOptions pipe_options;
+    pipe_options.params = params;
+    pipe_options.output_chain = !opts.no_output_chain;
+    InferencePipeline pipeline(enc, voc, pipeline_voices, pipe_options);
     if (!pipeline.warm_up(20)) {
         std::cerr << "Warm-up failed: " << pipeline.last_error() << '\n';
         return 1;
@@ -436,12 +556,40 @@ int main(int argc, char** argv) {
 
     const std::size_t rss_before = resident_bytes();
 
+    std::sort(opts.changes.begin(), opts.changes.end(),
+              [](const ScheduledChange& a, const ScheduledChange& b) {
+                  return a.seconds < b.seconds;
+              });
+    const VoiceParams initial_params = params;
     std::size_t step_idx = 0;
     for (std::uint32_t rep = 0; rep < opts.repeat; ++rep) {
+        // --change schedules are per pass: restore the initial params snapped
+        // (set_params then reset() pins the target without a ramp) and restart
+        // the schedule at the pass-local position.
+        params = initial_params;
+        if (!pipeline.set_params(params)) {
+            std::cerr << "Could not restore initial parameters\n";
+            return 1;
+        }
         pipeline.reset();
+        std::size_t next_change = 0;
         for (std::size_t s = 0; s < steps_per_pass; ++s) {
             const std::span<const float> in_hop(in_samples.data() + s * hop, hop);
             std::span<float> out_hop(out_samples.data() + s * hop, hop);
+
+            // --change: first hop whose start reaches the requested time.
+            const std::size_t pos = s * hop;
+            while (next_change < opts.changes.size() &&
+                   static_cast<double>(pos) >=
+                       opts.changes[next_change].seconds * wav_rate) {
+                const ScheduledChange& c = opts.changes[next_change];
+                params.set(c.desc->id, c.value);
+                if (!pipeline.set_params(params)) {
+                    std::cerr << "Rejected --change at " << c.seconds << " s\n";
+                    return 1;
+                }
+                ++next_change;
+            }
 
             const auto t0 = std::chrono::steady_clock::now();
             const PipelineStepResult res = pipeline.process(in_hop, out_hop);
@@ -498,6 +646,22 @@ int main(int argc, char** argv) {
                 opts.model_dir.string().c_str(), variant.c_str(), hop, hop_ms,
                 enc.contract().sample_rate);
     std::printf("Voice              : %s (%s)\n", voice.name.c_str(), voice.display.c_str());
+    if (initial_params.voice_b != initial_params.voice_a)
+        std::printf("Voice B            : %s\n",
+                    bundle.voices[initial_params.voice_b].name.c_str());
+    // Effective non-default controls (the shipped output chain included).
+    for (const ParamDesc& d : kParams) {
+        if (initial_params.get(d.id) == d.def) continue;
+        std::printf("Param              : %s = %s\n", std::string(d.name).c_str(),
+                    format_param_value(d, initial_params.get(d.id)).c_str());
+    }
+    for (const ScheduledChange& c : opts.changes) {
+        std::printf("Scheduled change   : %s = %s at %.3f s\n",
+                    std::string(c.desc->name).c_str(),
+                    format_param_value(*c.desc, c.value).c_str(), c.seconds);
+    }
+    std::printf("Output chain       : %s\n", opts.no_output_chain ? "off (raw vocoder PCM)"
+                                                                 : "gain->gate->brightness->limiter");
     std::printf("Algorithmic latency: %lld samples (%.1f ms)\n",
                 static_cast<long long>(alg_samples), alg_ms);
     std::printf("Steps              : %zu (%zu per pass x %u repeat)\n",

@@ -223,11 +223,11 @@ void test_voice_catalog() {
     CHECK(classify_license("") == LicenseClass::Unknown);
     CHECK(is_valid_voice_name("me-2") && !is_valid_voice_name("Me") && !is_valid_voice_name("") && !is_valid_voice_name("a b"));
 
-    // Scan the fixture root: one bundle, encoder + vocoder, no translator.
+    // Scan the fixture root: Mode A v1 `identity/` + Mode B v2 `s2ut/` bundles.
     VoiceCatalog cat;
-    CHECK(cat.scan_models_root(fixtures) == 1);
+    CHECK(cat.scan_models_root(fixtures) == 2);
     CHECK(cat.scan_models_root(g_repo / "does-not-exist") == 0);
-    CHECK(cat.bundles().size() == 1);
+    CHECK(cat.bundles().size() == 2);
     const BundleInfo* b = cat.bundle("identity");
     CHECK(b != nullptr);
     if (b) {
@@ -235,10 +235,18 @@ void test_voice_catalog() {
         CHECK(b->has_encoder && b->has_vocoder && !b->has_translator && !b->has_langs);
         CHECK(b->onnx_files.size() == 6);
     }
+    const BundleInfo* s2ut = cat.bundle("s2ut");
+    CHECK(s2ut != nullptr);
+    if (s2ut) {
+        CHECK(s2ut->valid() && s2ut->voices.size() == 2);
+        CHECK(s2ut->has_encoder && s2ut->has_vocoder && s2ut->has_translator && s2ut->has_langs);
+        CHECK(s2ut->onnx_files.size() == 8);
+        CHECK(s2ut->languages.size() == 4);
+    }
     CHECK(cat.find_voice("identity", "identity_b") != nullptr);
     CHECK(cat.find_voice("identity", "nope") == nullptr);
     CHECK(cat.voice_names("identity").size() == 2);
-    CHECK(cat.installed_voice_count() == 2);
+    CHECK(cat.installed_voice_count() == 4);
 
     // An invalid bundle is listed with its diagnostic, not skipped.
     const fs::path bad = g_tmp / "bad-bundle";
@@ -259,13 +267,13 @@ void test_voice_catalog() {
 
     VoiceCatalog::Filter f;
     auto all = cat.search(f);
-    CHECK(all.size() == 5);  // 2 installed voices + 3 catalogue entries
+    CHECK(all.size() == 7);  // 4 installed voices (identity + s2ut) + 3 catalogue entries
     bool fixture_installed = false;
     for (const auto& it : all)
         if (it.id == "fixture-identity") fixture_installed = it.installed;
     CHECK(fixture_installed);
     f.installed_only = true;
-    CHECK(cat.search(f).size() == 3);  // 2 voices + the catalogue entry whose bundle is installed
+    CHECK(cat.search(f).size() == 5);  // 4 voices + the catalogue entry whose bundle is installed
     f = {};
     f.license = LicenseClass::ResearchOnly;
     CHECK(cat.search(f).size() == 1);
@@ -274,7 +282,7 @@ void test_voice_catalog() {
     CHECK(cat.search(f).size() == 1);
     f = {};
     f.language = "de";
-    CHECK(cat.search(f).size() == 1);
+    CHECK(cat.search(f).size() == 3);  // 2 voices in s2ut (en/es/fr/de) + 1 catalogue entry
     f = {};
     f.tag = "test";
     CHECK(cat.search(f).size() == 1);

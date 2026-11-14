@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Model contract v1 tests (Milestone 2 / Stage 02), Python side.
+"""Model contract v1 & v2 tests (Milestone 2 / Stage 02 & Milestone 3 / Stage 02).
 
 Runs the shared cases in tests/data/contracts/ (the C++ twin is
-tests/test_model_contract.cpp) and checks the committed fixture manifest.
+tests/test_model_contract.cpp), checks the committed fixture manifest (Mode A
+pairs + Mode B S2UT quartets + langs.json), and verifies langs.json parity with
+frontend/assets/langs.default.json.
 
-    uv run pytest tests/test_contract.py          # from python_training/
+    uv run pytest tests/test_contract.py               # from python_training/
     python -I python_training/tests/test_contract.py   # any Python 3, no deps (CTest)
 
 Exit status (script mode): 0 = all passed, 1 = a check failed.
@@ -19,16 +21,17 @@ REPO = HERE.parents[1]
 sys.path.insert(0, str(HERE.parent))
 
 from fvml.contract import (  # noqa: E402
-    ContractError, ModelContract, TensorSpec, algorithmic_latency, check_model,
-    validate_io, validate_pair, validate_voices,
+    ContractError, FrozenMap, ModelContract, TensorSpec, algorithmic_latency,
+    check_model, s2ut_onset_latency_samples, validate_io, validate_langs,
+    validate_pair, validate_s2ut_bundle, validate_s2ut_shared_io, validate_voices,
 )
 
 CASES = REPO / "tests" / "data" / "contracts"
 FIXTURES = REPO / "tests" / "data" / "fixtures"
+DEFAULT_LANGS = REPO / "frontend" / "assets" / "langs.default.json"
 
-# Hand-computed in Documents/Milestone 2/02_model_contract_fixtures.md
-# (Verification): hop + (L_enc + L_voc) x frame_samples + overlap_samples.
 FIXTURE_LATENCY = {"identity_s1": 320, "identity_s2": 640, "identity_s4": 1280, "delay_s1": 640}
+FIXTURE_S2UT_ONSET = {1: 1280, 3: 3840, 5: 6400, 10: 12800}
 
 
 def load_cases(kind):
@@ -42,37 +45,51 @@ def specs(items):
 
 
 def run_case(case):
-    """Parse every model, cross-check graphs, validate the pair. Returns the
-    pair's algorithmic latency (None for a single model)."""
-    contracts = []
+    """Parse every model, cross-check graphs, validate Mode A pair (2 models)
+    or Mode B quartet (4 models). Returns (mode_a_latency, s2ut_onset)."""
+    contracts, graphs = [], []
     for m in case["models"]:
         raw = m["contract"]
         c = ModelContract.from_json(raw if isinstance(raw, str) else json.dumps(raw))
         if "graph" in m:
-            validate_io(c, specs(m["graph"]["inputs"]), specs(m["graph"]["outputs"]))
+            ins, outs = specs(m["graph"]["inputs"]), specs(m["graph"]["outputs"])
+            validate_io(c, ins, outs)
+            graphs.append((ins, outs))
+        else:
+            graphs.append(None)
         contracts.append(c)
     if len(contracts) == 2:
         validate_pair(*contracts)
-        return algorithmic_latency(*contracts)
-    return None
+        return algorithmic_latency(*contracts), None
+    if len(contracts) == 4:
+        validate_s2ut_bundle(*contracts)
+        if graphs[1] is not None and graphs[2] is not None:
+            validate_s2ut_shared_io(contracts[1], graphs[1][1], contracts[2], graphs[2][0])
+        wait_k = case.get("wait_k", 3)
+        return None, s2ut_onset_latency_samples(*contracts, wait_k)
+    return None, None
 
 
 def test_case_files_are_well_formed():
     for kind in ("valid", "invalid"):
         for name, case in load_cases(kind):
             assert isinstance(case.get("description"), str) and case["description"], name
-            assert 1 <= len(case["models"]) <= 2, name
+            assert len(case["models"]) in (1, 2, 4), name
             assert ("error" in case) == (kind == "invalid"), name
 
 
 def test_valid_cases_pass():
     for name, case in load_cases("valid"):
-        latency = run_case(case)
+        latency, s2ut_onset = run_case(case)
         if "algorithmic_latency_samples" in case:
             assert latency == case["algorithmic_latency_samples"], (name, latency)
+        if "s2ut_onset_latency_samples" in case:
+            assert s2ut_onset == case["s2ut_onset_latency_samples"], (name, s2ut_onset)
         for m in case["models"]:
             c = ModelContract.from_json(json.dumps(m["contract"]))
-            assert ModelContract.from_json(c.to_json()) == c, name  # canonical round trip
+            round_tripped = ModelContract.from_json(c.to_json())
+            assert round_tripped == c, name
+            assert hash(round_tripped) == hash(c), name
 
 
 def test_invalid_cases_are_rejected_with_their_message():
@@ -101,25 +118,62 @@ def test_contracts_built_in_code_are_validated():
         ({"overlap_samples": 160}, "key 'overlap_samples' is not valid for role 'encoder'"),
         ({"content_dim": 8}, "key 'content_dim' is not valid for content_kind 'discrete'"),
         ({**soft, "vocab": 100}, "key 'vocab' is not valid for content_kind 'soft'"),
+        ({"latent_dim": 64}, "key 'latent_dim' requires contract_version 2"),
+        ({"has_readiness_output": "yes"}, "key 'has_readiness_output' must be a boolean"),
+        ({"langs": ["en"]}, "key 'langs' must be an object"),
     ):
         contract = ModelContract(**{**good.__dict__, **fields})
-        for check in (contract.validate, contract.to_json):    # to_json validates first
+        for check in (contract.validate, contract.to_json):
             try:
                 check()
             except ContractError as e:
                 assert message in str(e), (fields, str(e))
             else:
                 raise AssertionError(f"accepted {fields}")
-    # Lists from code become tuples: round trip and hashing work.
     listed = ModelContract(**{**good.__dict__, "states": ["a", "b"]})
     assert listed.states == ("a", "b") and ModelContract.from_json(listed.to_json()) == listed
     assert hash(listed) == hash(ModelContract.from_json(listed.to_json()))
 
 
+def test_v2_s2ut_contracts_and_onset_latency():
+    langs = {"en": 0, "es": 1, "fr": 2, "de": 3}
+    enc = ModelContract(contract_version=2, role="encoder", sample_rate=16000, frame_samples=320,
+                        frames_per_step=4, lookahead_frames=1, content_kind="discrete",
+                        vocab=1000, latent_dim=128, license="MIT")
+    t_enc = ModelContract(contract_version=2, role="translator_enc", sample_rate=16000,
+                          frame_samples=320, chunk_frames=4, latent_dim=128, max_src_steps=128,
+                          shared_mem_states=["mem_k_0", "mem_v_0"], langs=langs,
+                          has_readiness_output=True, states=["src_pos", "mem_k_0", "mem_v_0"],
+                          license="MIT")
+    t_dec = ModelContract(contract_version=2, role="translator_dec", sample_rate=16000,
+                          frame_samples=320, chunk_frames=4, vocab=1000,
+                          special_units={"bos": 1000, "eos": 1001, "pad": 1002},
+                          max_src_steps=128, max_tgt_steps=128,
+                          shared_mem_states=["mem_k_0", "mem_v_0"], langs=langs,
+                          has_prosody_output=True, states=["tgt_pos"], license="MIT")
+    voc = ModelContract(contract_version=2, role="vocoder", sample_rate=16000, frame_samples=320,
+                        frames_per_step=4, lookahead_frames=0, content_kind="discrete",
+                        vocab=1000, cond_frame_samples=320, cond_inputs=(), spk_emb_dim=0,
+                        overlap_samples=0, license="MIT")
+    assert isinstance(t_enc.langs, FrozenMap) and t_enc.langs["es"] == 1
+    assert hash(t_enc) == hash(ModelContract.from_json(t_enc.to_json()))
+    assert hash(t_dec) == hash(ModelContract.from_json(t_dec.to_json()))
+    validate_s2ut_bundle(enc, t_enc, t_dec, voc)
+    for k, want in ((1, 1600), (3, 4160), (5, 6720), (10, 13120)):
+        assert s2ut_onset_latency_samples(enc, t_enc, t_dec, voc, k) == want
+    for bad_k in (0, 11, True, 3.0):
+        try:
+            s2ut_onset_latency_samples(enc, t_enc, t_dec, voc, bad_k)
+        except ContractError as e:
+            assert "wait_k must be between 1 and 10" in str(e)
+        else:
+            raise AssertionError(f"accepted wait_k={bad_k!r}")
+
+
 def test_malformed_input_raises_only_contract_error():
-    for fn in (lambda: ModelContract.from_json("[" * 100000),           # RecursionError inside json
+    for fn in (lambda: ModelContract.from_json("[" * 100000),
                lambda: TensorSpec.from_dict({"name": "a", "shape": [1]}),
-               lambda: TensorSpec.from_dict({"name": "a", "dtype": "f32"}),   # shape is required
+               lambda: TensorSpec.from_dict({"name": "a", "dtype": "f32"}),
                lambda: TensorSpec.from_dict({"name": 3, "dtype": "f32", "shape": [1]}),
                lambda: TensorSpec.from_dict({"name": "a", "dtype": "f32", "shape": [1.5]}),
                lambda: TensorSpec.from_dict(["audio"])):
@@ -143,13 +197,15 @@ def test_check_model_reports_missing_metadata():
 
 def test_fixture_manifest():
     manifest = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
-    by_file = {}
+    by_file, graphs = {}, {}
     for m in manifest["models"]:
         assert (FIXTURES / m["file"]).is_file(), m["file"]
+        ins, outs = specs(m["graph"]["inputs"]), specs(m["graph"]["outputs"])
+        graphs[m["file"]] = (ins, outs)
         try:
-            c = check_model(m["contract"], specs(m["graph"]["inputs"]), specs(m["graph"]["outputs"]))
+            c = check_model(m["contract"], ins, outs)
         except ContractError as e:
-            assert m["error"] and m["error"] in str(e), (m["file"], str(e))
+            assert m["error"] and m["error"] == str(e), (m["file"], str(e))
             continue
         assert m["error"] is None, (m["file"], "accepted")
         by_file[m["file"]] = c
@@ -159,12 +215,29 @@ def test_fixture_manifest():
         latency = algorithmic_latency(enc, voc)
         assert latency == p["algorithmic_latency_samples"] == FIXTURE_LATENCY[p["name"]], p
     assert sorted(p["name"] for p in manifest["pairs"]) == sorted(FIXTURE_LATENCY)
+
+    assert len(manifest.get("s2ut_quartets", [])) == 3
+    for q in manifest["s2ut_quartets"]:
+        enc = by_file[q["encoder"]]
+        t_enc = by_file[q["translator_enc"]]
+        t_dec = by_file[q["translator_dec"]]
+        voc = by_file[q["vocoder"]]
+        validate_s2ut_bundle(enc, t_enc, t_dec, voc)
+        validate_s2ut_shared_io(t_enc, graphs[q["translator_enc"]][1],
+                                t_dec, graphs[q["translator_dec"]][0])
+        for k, want in FIXTURE_S2UT_ONSET.items():
+            got = s2ut_onset_latency_samples(enc, t_enc, t_dec, voc, k)
+            assert got == want == q["onset_latency_samples"][str(k)], (q["name"], k, got)
+
     for bundle in manifest.get("bundles", []):
         voices = json.loads((FIXTURES / bundle["voices"]).read_text(encoding="utf-8"))
         validate_voices(voices, by_file[bundle["vocoder"]])
+        if "langs" in bundle:
+            langs = json.loads((FIXTURES / bundle["langs"]).read_text(encoding="utf-8"))
+            validate_langs(langs, by_file[bundle["translator"]])
 
 
-def test_voices_validation():
+def test_voices_and_langs_validation():
     voc = ModelContract(role="vocoder", sample_rate=16000, frame_samples=320, frames_per_step=1,
                         lookahead_frames=0, content_kind="discrete", vocab=100,
                         cond_frame_samples=320, cond_inputs=("logf0", "spk_emb"), spk_emb_dim=2,
@@ -173,7 +246,8 @@ def test_voices_validation():
              "logf0_std": 0.2, "energy_mean": -3.0, "energy_std": 1.1, "license": "PD",
              "source": "LJSpeech 1.1"}
     validate_voices({"schema": 1, "voices": [voice]}, voc)
-    validate_voices({"schema": 1, "voices": [{**voice, "attribution": "LJSpeech, public domain"}]}, voc)
+    validate_voices({"schema": 1, "voices": [{**voice, "attribution": "LJSpeech, public domain",
+                                              "lang": "en"}]}, voc)
     without_source = {k: v for k, v in voice.items() if k != "source"}
     one = lambda **kw: {"schema": 1, "voices": [{**voice, **kw}]}  # noqa: E731
     for data, message in (
@@ -187,6 +261,7 @@ def test_voices_validation():
         ({"schema": 1, "voices": [voice, voice]}, "duplicate voice 'lj'"),
         ({"schema": 1, "voices": [without_source]}, "voices[0]: missing key 'source'"),
         (one(colour="red"), "unknown key 'colour'"),
+        (one(lang="EN"), "invalid language code 'EN'"),
         (one(embedding=[1.0]), "embedding has 1 values"),
         (one(embedding=[1.0, "x"]), "embedding must be a list of numbers"),
         (one(name="LJ Speech"), "name must be lowercase"),
@@ -208,6 +283,29 @@ def test_voices_validation():
         else:
             raise AssertionError(f"accepted: {message}")
 
+    # langs.json validation + parity with frontend/assets/langs.default.json
+    default_langs = json.loads(DEFAULT_LANGS.read_text(encoding="utf-8"))
+    validate_langs(default_langs)
+    for bad, msg in (
+        ({"schema": True, "langs": default_langs["langs"]}, "unsupported langs.json schema"),
+        ({"schema": 1, "langs": []}, "'langs' must be a non-empty list"),
+        ({"schema": 1, "langs": default_langs["langs"], "extra": 1}, "unknown key 'extra'"),
+        ({"schema": 1, "langs": [{"code": "EN", "id": 0, "name": "English"}]},
+         "'code' must be a lowercase language tag"),
+        ({"schema": 1, "langs": [{"code": "en", "id": 0, "name": "English"},
+                                 {"code": "es", "id": 0, "name": "Spanish"}]},
+         "duplicate id for 'es'"),
+        ({**default_langs, "default_wait_k": {"en->en": 3}}, "invalid language pair 'en->en'"),
+        ({**default_langs, "default_wait_k": {"es->en": 0}},
+         "default_wait_k['es->en'] must be an integer in [1, 10]"),
+    ):
+        try:
+            validate_langs(bad)
+        except ContractError as e:
+            assert msg in str(e), (msg, str(e))
+        else:
+            raise AssertionError(f"accepted bad langs.json: {msg}")
+
 
 def main():
     failed = 0
@@ -217,7 +315,7 @@ def main():
         try:
             fn()
             print(f"PASS  {name}")
-        except Exception as e:  # report every failure, then exit non-zero
+        except Exception as e:
             failed += 1
             print(f"FAIL  {name} -> {type(e).__name__}: {e}")
     print(f"[contract_py] {'all checks passed' if not failed else f'{failed} test(s) FAILED'}")

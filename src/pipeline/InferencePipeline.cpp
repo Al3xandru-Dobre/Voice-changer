@@ -5,6 +5,8 @@
 #include "pipeline/ModelStep.hpp"
 #include "pipeline/PipelineGeometry.hpp"
 #include "pipeline/PipelineTiming.hpp"
+#include "voice/ParamSmoothing.hpp"
+#include "voice/VoiceOutputChain.hpp"
 
 #include <algorithm>
 #include <array>
@@ -23,6 +25,10 @@
 
 namespace fluxvoice {
 namespace {
+
+constexpr double kLn2 = 0.69314718055994530942;
+constexpr double kLn10 = 2.30258509299404568402;
+constexpr double kTwoPi = 6.28318530717958647692;
 
 PipelineGeometry checked_geometry(ModelStep& enc, ModelStep& voc) {
     PipelineGeometry g;
@@ -56,6 +62,18 @@ bool finite_voice(const TargetVoiceStats& v) {
            std::isfinite(v.energy_mean) && std::isfinite(v.energy_std) && v.energy_std > 0.0;
 }
 
+// 50/50-style blend of every stats field — matches Stage 05's Python
+// readiness check in gate_report.py, which blends stats with the embedding.
+TargetVoiceStats lerp_stats(const TargetVoiceStats& a, const TargetVoiceStats& b,
+                            double t) noexcept {
+    return {a.logf0_mean + t * (b.logf0_mean - a.logf0_mean),
+            a.logf0_std + t * (b.logf0_std - a.logf0_std),
+            a.energy_mean + t * (b.energy_mean - a.energy_mean),
+            a.energy_std + t * (b.energy_std - a.energy_std)};
+}
+
+const VoiceParams kNoParams{};
+
 } // namespace
 
 struct InferencePipeline::Legacy {
@@ -63,22 +81,37 @@ struct InferencePipeline::Legacy {
 };
 
 struct InferencePipeline::State {
-    State(ModelStep& encoder, ModelStep& vocoder, const TargetVoiceStats& target,
-          std::span<const float> embedding, PipelineOptions opts)
-        : enc(encoder), voc(vocoder), g(checked_geometry(enc, voc)), voice(target), options(opts),
+    State(ModelStep& encoder, ModelStep& vocoder, std::span<const PipelineVoice> voices_in,
+          PipelineOptions opts)
+        : enc(encoder), voc(vocoder), g(checked_geometry(enc, voc)), options(opts),
+          params(opts.params),
           tracker(tracker_config(g, enc.contract())), ola(g.hop, g.overlap_samples),
           governor(GovernorConfig{
               g.sample_rate, g.hop,
               opts.latency_target_samples ? opts.latency_target_samples :
                   LatencyGovernor::default_target(g.algorithmic_samples(), g.hop, g.sample_rate),
               3, opts.quiet_peak}),
-          histogram(g.hop_us()), speaker(embedding.begin(), embedding.end()),
+          histogram(g.hop_us()),
+          frame_levels(g.cond_frames, 0.0f),
           warm_input(g.hop, 0.0f), warm_output(g.hop, 0.0f) {
         if (&enc == &voc) throw std::invalid_argument("encoder and vocoder must be distinct models");
-        if (!finite_voice(voice) || options.max_consecutive_errors == 0 ||
-            !std::isfinite(options.pitch_shift_st) || !std::isfinite(options.intonation_scale) ||
-            options.intonation_scale < 0.0)
-            throw std::invalid_argument("invalid Mode A voice or pipeline options");
+        if (voices_in.empty() || options.max_consecutive_errors == 0)
+            throw std::invalid_argument("invalid Mode A voices or pipeline options");
+        const std::size_t dim = static_cast<std::size_t>(voc.contract().spk_emb_dim);
+        voice_stats.reserve(voices_in.size());
+        embedding_table.reserve(voices_in.size() * dim);
+        for (const PipelineVoice& v : voices_in) {
+            if (!finite_voice(v.stats) || v.embedding.size() != dim)
+                throw std::invalid_argument("invalid Mode A voice stats or embedding");
+            for (float x : v.embedding)
+                if (!std::isfinite(x)) throw std::invalid_argument("non-finite speaker embedding");
+            voice_stats.push_back(v.stats);
+            embedding_table.insert(embedding_table.end(), v.embedding.begin(), v.embedding.end());
+        }
+        params.clamp();
+        if (static_cast<std::size_t>(params.voice_a) >= voice_stats.size() ||
+            static_cast<std::size_t>(params.voice_b) >= voice_stats.size())
+            throw std::invalid_argument("voice index out of range");
         enc_audio = enc.input_f32("audio");
         voc_audio = voc.output_f32("audio");
         require_size(enc_audio.size(), g.hop, "encoder audio");
@@ -105,12 +138,76 @@ struct InferencePipeline::State {
             }
         }
         spk_input = voc.input_f32("spk_emb");
-        require_size(speaker.size(), static_cast<std::size_t>(voc.contract().spk_emb_dim),
-                     "speaker embedding");
-        require_size(spk_input.size(), speaker.size(), "vocoder spk_emb");
-        for (float x : speaker)
-            if (!std::isfinite(x)) throw std::invalid_argument("non-finite speaker embedding");
+        require_size(spk_input.size(), dim, "vocoder spk_emb");
+        eff_emb.assign(dim, 0.0f);
+        xfade_emb.assign(dim, 0.0f);
+        // Stage 09 initial state: controls snapped, no ramp at stream start.
+        pitch_ramp.snap(params.get(ParamId::PitchShift));
+        inton_ramp.snap(params.get(ParamId::Intonation));
+        blend_ramp.snap(params.get(ParamId::TimbreBlend));
+        vrate_ramp.snap(params.get(ParamId::VibratoRate));
+        vdepth_ramp.snap(params.get(ParamId::VibratoDepth));
+        whisper_ramp.snap(params.get(ParamId::Whisper));
+        snapshot_target();
+        xfade_ramp.snap(1.0f);
+        chain.configure(g.sample_rate);
         reset_stream();
+    }
+
+    std::size_t emb_dim() const noexcept {
+        return voice_stats.empty() ? 0 : embedding_table.size() / voice_stats.size();
+    }
+    const float* emb_of(std::size_t v) const noexcept {
+        return embedding_table.data() + v * emb_dim();
+    }
+    // (1 - alpha) * e_A + alpha * e_B and the matching stats blend.
+    void target_at(double alpha, float* emb, TargetVoiceStats& stats) const noexcept {
+        const float* ea = emb_of(params.voice_a);
+        const float* eb = emb_of(params.voice_b);
+        for (std::size_t j = 0; j < emb_dim(); ++j)
+            emb[j] = static_cast<float>((1.0 - alpha) * ea[j] + alpha * eb[j]);
+        stats = lerp_stats(voice_stats[params.voice_a], voice_stats[params.voice_b], alpha);
+    }
+    void snapshot_target() noexcept {
+        target_at(blend_ramp.value(), xfade_emb.data(), xfade_stats);
+    }
+    // Effective embedding + stats at the *current* ramp positions (used when a
+    // voice switch snapshots the outgoing side of the crossfade). `emb` may
+    // alias xfade_emb: each element is read before it is written.
+    void current_effective(float* emb, TargetVoiceStats& stats) const noexcept {
+        const double alpha = blend_ramp.value(), xf = xfade_ramp.value();
+        const float* ea = emb_of(params.voice_a);
+        const float* eb = emb_of(params.voice_b);
+        for (std::size_t j = 0; j < emb_dim(); ++j)
+            emb[j] = static_cast<float>((1.0 - xf) * xfade_emb[j] +
+                                        xf * ((1.0 - alpha) * ea[j] + alpha * eb[j]));
+        stats = lerp_stats(xfade_stats,
+                           lerp_stats(voice_stats[params.voice_a], voice_stats[params.voice_b],
+                                      alpha),
+                           xf);
+    }
+
+    bool set_params(const VoiceParams& next) noexcept {
+        VoiceParams p = next;
+        p.clamp();
+        if (static_cast<std::size_t>(p.voice_a) >= voice_stats.size() ||
+            static_cast<std::size_t>(p.voice_b) >= voice_stats.size())
+            return false;
+        if (p.voice_a != params.voice_a || p.voice_b != params.voice_b) {
+            // Voice switch: crossfade from the current effective state so even
+            // switching voice_a at timbre_blend = 0 does not jump.
+            current_effective(xfade_emb.data(), xfade_stats);
+            xfade_ramp.snap(0.0f);
+            xfade_ramp.set_target(1.0f);
+        }
+        params = p;
+        pitch_ramp.set_target(p.get(ParamId::PitchShift));
+        inton_ramp.set_target(p.get(ParamId::Intonation));
+        blend_ramp.set_target(p.get(ParamId::TimbreBlend));
+        vrate_ramp.set_target(p.get(ParamId::VibratoRate));
+        vdepth_ramp.set_target(p.get(ParamId::VibratoDepth));
+        whisper_ramp.set_target(p.get(ParamId::Whisper));
+        return true;
     }
 
     void reset_stream() noexcept {
@@ -119,6 +216,21 @@ struct InferencePipeline::State {
         tracker.reset();
         ola.reset();
         governor.reset();
+        // Finish in-progress ramps at their targets (== params) so a reset is
+        // indistinguishable from a freshly constructed pipeline, and finish any
+        // voice crossfade by making the snapshot the current target.
+        pitch_ramp.finish();
+        inton_ramp.finish();
+        blend_ramp.finish();
+        vrate_ramp.finish();
+        vdepth_ramp.finish();
+        whisper_ramp.finish();
+        snapshot_target();
+        xfade_ramp.snap(1.0f);
+        vibrato_phase = 0.0;
+        chain.set_targets(params.get(ParamId::Gain), params.get(ParamId::GateThreshold),
+                          params.enabled(ParamId::Limiter), params.get(ParamId::Brightness));
+        chain.reset();
         last_output = 0.0f;
         recovering = false;
     }
@@ -129,14 +241,24 @@ struct InferencePipeline::State {
     ModelStep& enc;
     ModelStep& voc;
     const PipelineGeometry g;
-    TargetVoiceStats voice;
     PipelineOptions options;
+    VoiceParams params;
     PitchTracker tracker;
     OverlapAddProcessor ola;
     LatencyGovernor governor;
     TimingHistogram histogram;
-    std::vector<float> speaker;
+    std::vector<TargetVoiceStats> voice_stats;
+    std::vector<float> embedding_table;
+    std::vector<float> eff_emb, xfade_emb;
+    std::vector<float> frame_levels;
     std::vector<float> warm_input, warm_output;
+    FrameRamp pitch_ramp{kParamRampFrames}, inton_ramp{kParamRampFrames},
+        blend_ramp{kParamRampFrames}, vrate_ramp{kParamRampFrames},
+        vdepth_ramp{kParamRampFrames}, whisper_ramp{kParamRampFrames};
+    FrameRamp xfade_ramp{kVoiceCrossfadeFrames};
+    TargetVoiceStats xfade_stats{};
+    double vibrato_phase = 0.0;
+    VoiceOutputChain chain;
     std::span<float> enc_audio, voc_content, spk_input;
     std::span<std::int64_t> voc_units;
     std::span<const float> enc_content, voc_audio;
@@ -181,9 +303,32 @@ PipelineStepResult InferencePipeline::State::process(std::span<const float> inpu
         // The Stage 03 tracker owns HPF, EMA priors and lookahead delay. Keeping
         // encoder audio raw also makes identity bundles genuinely transparent.
         const PitchFrame f = tracker.push(enc_audio.data() + i * g.cond_frame_samples);
+        // Input level for the gate, aligned with the content being vocoded
+        // (the tracker applies the encoder lookahead).
+        frame_levels[i] = static_cast<float>(f.log_energy * 10.0 / kLn10);
+        // Advance the Stage 09 ramps once per conditioning frame.
+        const double pitch = pitch_ramp.advance();
+        const double intonation = inton_ramp.advance();
+        const double alpha = blend_ramp.advance();
+        const double vrate = vrate_ramp.advance();
+        const double vdepth = vdepth_ramp.advance();
+        const double whisper = whisper_ramp.advance();
+        const double xf = xfade_ramp.advance();
+        const TargetVoiceStats eff =
+            lerp_stats(xfade_stats,
+                       lerp_stats(voice_stats[params.voice_a], voice_stats[params.voice_b], alpha),
+                       xf);
+        // Scale the LFO by min(1, rate / 0.5 Hz): when vibrato_rate ramps to 0
+        // the phase stops advancing and sin(phase) would otherwise freeze at a
+        // static pitch offset; at rate 0 the contribution is exactly zero.
+        const double vibrato = vdepth / 1200.0 * kLn2 * std::sin(vibrato_phase) *
+                               std::min(1.0, vrate / 0.5);
+        vibrato_phase += kTwoPi * vrate * 0.020;
+        if (vibrato_phase >= kTwoPi) vibrato_phase = std::fmod(vibrato_phase, kTwoPi);
         const std::array<double, 4> mapped{
-            map_logf0_to_target(f.z_logf0, voice, options.intonation_scale, options.pitch_shift_st),
-            f.voicing, f.aperiodicity, map_energy_to_target(f.z_energy, voice)};
+            map_logf0_to_target(f.z_logf0, eff, intonation, pitch) + vibrato,
+            f.voicing * (1.0 - whisper), f.aperiodicity,
+            map_energy_to_target(f.z_energy, eff)};
         for (std::size_t j = 0; j < cond.size(); ++j) {
             if (cond[j].empty()) continue;
             if (!std::isfinite(mapped[j]) || std::abs(mapped[j]) > std::numeric_limits<float>::max())
@@ -194,11 +339,26 @@ PipelineStepResult InferencePipeline::State::process(std::span<const float> inpu
     if (!enc.step()) return fail(enc.last_error(), output, false);
     if (!enc_content.empty()) std::copy(enc_content.begin(), enc_content.end(), voc_content.begin());
     if (!enc_units.empty()) std::copy(enc_units.begin(), enc_units.end(), voc_units.begin());
-    if (!speaker.empty()) std::copy(speaker.begin(), speaker.end(), spk_input.begin());
+    if (!spk_input.empty()) {
+        // The vocoder takes one vector per step: compute it once per hop from
+        // the ramp state after the hop's last frame (per frame for s1, which
+        // has one conditioning frame per hop anyway).
+        const double alpha = blend_ramp.value(), xf = xfade_ramp.value();
+        const float* ea = emb_of(params.voice_a);
+        const float* eb = emb_of(params.voice_b);
+        for (std::size_t j = 0; j < emb_dim(); ++j)
+            eff_emb[j] = static_cast<float>((1.0 - xf) * xfade_emb[j] +
+                                            xf * ((1.0 - alpha) * ea[j] + alpha * eb[j]));
+        std::copy(eff_emb.begin(), eff_emb.end(), spk_input.begin());
+    }
     if (!voc.step()) return fail(voc.last_error(), output, false);
     if (g.overlap_samples > 0) ola.process(voc_audio.data(), output.data());
     else std::copy(voc_audio.begin(), voc_audio.end(), output.begin());
-    if (options.output_gate) options.output_gate(output, options.output_gate_context);
+    if (options.output_chain) {
+        chain.set_targets(params.get(ParamId::Gain), params.get(ParamId::GateThreshold),
+                          params.enabled(ParamId::Limiter), params.get(ParamId::Brightness));
+        chain.process(output, frame_levels, g.cond_frame_samples);
+    }
 
     if (recovering) {
         const std::size_t fade = std::min(output.size(), std::size_t{g.sample_rate} * 2 / 1000);
@@ -220,9 +380,16 @@ PipelineStepResult InferencePipeline::State::process(std::span<const float> inpu
 InferencePipeline::InferencePipeline() : legacy_(std::make_unique<Legacy>()) {}
 
 InferencePipeline::InferencePipeline(ModelStep& encoder, ModelStep& vocoder,
+                                     std::span<const PipelineVoice> voices, PipelineOptions options)
+    : state_(std::make_unique<State>(encoder, vocoder, voices, options)) {}
+
+InferencePipeline::InferencePipeline(ModelStep& encoder, ModelStep& vocoder,
                                      const TargetVoiceStats& voice,
                                      std::span<const float> embedding, PipelineOptions options)
-    : state_(std::make_unique<State>(encoder, vocoder, voice, embedding, options)) {}
+    : InferencePipeline(encoder, vocoder,
+                        std::span<const PipelineVoice>(
+                            std::array<PipelineVoice, 1>{PipelineVoice{voice, embedding}}),
+                        options) {}
 
 InferencePipeline::~InferencePipeline() = default;
 
@@ -277,6 +444,18 @@ std::uint64_t InferencePipeline::errors() const noexcept {
 std::string_view InferencePipeline::last_error() const noexcept {
     return state_ ? std::string_view(state_->error_text.data(), state_->error_size) :
                     std::string_view("pipeline has no models");
+}
+
+bool InferencePipeline::set_params(const VoiceParams& next) noexcept {
+    return state_ && state_->set_params(next);
+}
+
+const VoiceParams& InferencePipeline::params() const noexcept {
+    return state_ ? state_->params : kNoParams;
+}
+
+std::size_t InferencePipeline::voice_count() const noexcept {
+    return state_ ? state_->voice_stats.size() : 0;
 }
 
 void InferencePipeline::process_vocoder_frame(const float* in, float* out) {

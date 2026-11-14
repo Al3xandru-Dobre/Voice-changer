@@ -1,0 +1,73 @@
+{
+  "description": "chunk_frames differs between translator_enc and translator_dec",
+  "error": "chunk_frames mismatch: translator_enc 4, translator_dec 8",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 4,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 1000,
+        "latent_dim": 128,
+        "states": [],
+        "license": "MIT"
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_enc",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "latent_dim": 128,
+        "max_src_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_readiness_output": false,
+        "states": ["src_pos", "mem_k_0"],
+        "license": "MIT"
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_dec",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 8,
+        "vocab": 1000,
+        "special_units": {"bos": 1000, "eos": 1001, "pad": 1002},
+        "max_src_steps": 128,
+        "max_tgt_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_prosody_output": false,
+        "states": ["tgt_pos"],
+        "license": "MIT"
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 4,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 1000,
+        "cond_frame_samples": 320,
+        "cond_inputs": [],
+        "spk_emb_dim": 0,
+        "overlap_samples": 0,
+        "states": [],
+        "license": "MIT"
+      }
+    }
+  ]
+}

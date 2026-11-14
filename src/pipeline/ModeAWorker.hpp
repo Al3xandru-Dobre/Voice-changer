@@ -6,6 +6,7 @@
 #include "pipeline/InferencePipeline.hpp"
 #include "pipeline/LatencyGovernor.hpp"
 #include "pipeline/PipelineGeometry.hpp"
+#include "voice/ParamChannel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -26,8 +27,10 @@ struct WorkerSnapshot {
 
 class ModeAWorker {
 public:
-    ModeAWorker(DuplexRouter& router, InferencePipeline& pipeline)
-        : router_(router), pipeline_(pipeline), chunks_(pipeline.geometry().hop, 0),
+    ModeAWorker(DuplexRouter& router, InferencePipeline& pipeline,
+                ParamChannel* params = nullptr)
+        : router_(router), pipeline_(pipeline), params_(params),
+          chunks_(pipeline.geometry().hop, 0),
           output_(pipeline.geometry().hop),
           silence_(pipeline.governor().target_samples(), 0.0f) {
         if (silence_.size() + output_.size() > DuplexRouter::kQueueCapacity)
@@ -67,6 +70,9 @@ public:
             p += used;
             remaining -= used;
             if (!chunks_.ready()) continue;
+            // Stage 09: newest control snapshot wins, applied at hop start.
+            if (params_ && params_->drain(params_buf_))
+                (void)pipeline_.set_params(params_buf_);
             const auto result = pipeline_.process(
                 std::span(chunks_.hop_samples(), chunks_.hop()), output_);
             const auto skip = pipeline_.governor().skip_output(snapshot().queued, output_);
@@ -102,6 +108,8 @@ public:
 private:
     DuplexRouter& router_;
     InferencePipeline& pipeline_;
+    ParamChannel* params_;
+    VoiceParams params_buf_{};
     ChunkAssembler chunks_;
     std::array<float, 4096> input_{};
     std::vector<float> output_, silence_;

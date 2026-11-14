@@ -1,0 +1,22 @@
+{
+  "description": "Duplicate language ID in langs map is rejected",
+  "error": "langs: duplicate language id 0 for 'es'",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_enc",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "latent_dim": 128,
+        "max_src_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 0},
+        "has_readiness_output": false,
+        "states": ["src_pos", "mem_k_0"],
+        "license": "MIT"
+      }
+    }
+  ]
+}

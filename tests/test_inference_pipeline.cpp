@@ -38,13 +38,21 @@ template<class F> void rejects(F&& f) {
     CHECK(caught);
 }
 
+// output_chain = false: raw vocoder PCM, so these tests keep asserting
+// bit-exact plumbing (the shipped chain is covered by test_voice_params).
+PipelineOptions raw_options() {
+    PipelineOptions o;
+    o.output_chain = false;
+    return o;
+}
+
 void test_identity_and_lookahead() {
     const auto input = signal(320 * 24);
     for (int fps : {1, 2, 4}) {
         for (int lookahead : {0, 1, 2}) {
             FakeModelStep enc(fake_contract(ModelRole::kEncoder, fps, lookahead));
             FakeModelStep voc(fake_contract(ModelRole::kVocoder, fps, 1));
-            InferencePipeline p(enc, voc, kVoice, kEmbedding);
+            InferencePipeline p(enc, voc, kVoice, kEmbedding, raw_options());
             const auto& g = p.geometry();
             CHECK(g.hop == static_cast<std::size_t>(320 * fps));
             CHECK(g.lookahead_frames == static_cast<std::size_t>(lookahead + 1));
@@ -67,7 +75,7 @@ void test_identity_and_lookahead() {
         }
         FakeModelStep enc(fake_contract(ModelRole::kEncoder, fps));
         FakeModelStep voc(fake_contract(ModelRole::kVocoder, fps));
-        InferencePipeline p(enc, voc, kVoice, kEmbedding);
+        InferencePipeline p(enc, voc, kVoice, kEmbedding, raw_options());
         std::vector<float> got(input.size());
         for (std::size_t i = 0; i < input.size(); i += p.geometry().hop)
             CHECK(p.process(std::span(input).subspan(i, p.geometry().hop),
@@ -86,9 +94,9 @@ void test_conditioning_and_reset() {
         for (int frame : {320, 1280}) {
             FakeModelStep enc(fake_contract(ModelRole::kEncoder, fps, 1, frame));
             FakeModelStep voc(fake_contract(ModelRole::kVocoder, fps, 0, frame));
-            PipelineOptions options;
-            options.pitch_shift_st = 3.0;
-            options.intonation_scale = 0.7;
+            PipelineOptions options = raw_options();
+            options.params.set(ParamId::PitchShift, 3.0f);
+            options.params.set(ParamId::Intonation, 0.7f);
             InferencePipeline p(enc, voc, kVoice, kEmbedding, options);
             PitchTrackerConfig cfg;
             cfg.lookahead_frames = frame / 320;
@@ -132,7 +140,7 @@ void test_discrete_and_overlap() {
     ec.content_dim = vc.content_dim = 0;
     ec.vocab = vc.vocab = 100;
     FakeModelStep enc(ec), voc(vc);
-    InferencePipeline p(enc, voc, kVoice, kEmbedding);
+    InferencePipeline p(enc, voc, kVoice, kEmbedding, raw_options());
     std::vector<float> in(1280), out(1280);
     for (std::size_t i = 0; i < in.size(); ++i) in[i] = static_cast<float>(i / 320);
     CHECK(p.process(in, out).ok);
@@ -140,7 +148,7 @@ void test_discrete_and_overlap() {
 
     FakeModelStep soft_enc(fake_contract(ModelRole::kEncoder));
     FakeModelStep soft_voc(fake_contract(ModelRole::kVocoder, 1, 0, 320, 80));
-    InferencePipeline ola_pipeline(soft_enc, soft_voc, kVoice, kEmbedding);
+    InferencePipeline ola_pipeline(soft_enc, soft_voc, kVoice, kEmbedding, raw_options());
     OverlapAddProcessor reference(320, 80);
     auto audio = signal(320);
     std::vector<float> actual(320), expected(320);
@@ -189,14 +197,8 @@ void test_failures_and_gate() {
     input[2] = std::numeric_limits<float>::quiet_NaN();
     CHECK(!p.process(input, out).ok);
     CHECK(std::all_of(out.begin(), out.end(), [](float x) { return std::isfinite(x); }));
-
-    options.output_gate = [](std::span<float> x, void*) noexcept {
-        std::fill(x.begin(), x.end(), 0.0f);
-    };
-    InferencePipeline gated(enc, voc, kVoice, kEmbedding, options);
-    std::fill(input.begin(), input.end(), 0.25f);
-    CHECK(gated.process(input, out).quiet);
-    CHECK(std::all_of(out.begin(), out.end(), [](float x) { return x == 0.0f; }));
+    // The Stage 09 gate/output chain replaced the old output_gate hook and is
+    // covered in test_voice_params.
 }
 
 void test_validation_and_no_allocations() {

@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -80,6 +81,43 @@ void apply_preset_params(const Preset& p, VoiceParams& params);
 
 /// `*.json` files directly inside `dir`, sorted by filename. Missing dir -> {}.
 std::vector<std::filesystem::path> list_preset_files(const std::filesystem::path& dir);
+
+/// Directories searched for `--preset`/`preset` names, in precedence order:
+/// `user_dir` (if non-empty), `exe_dir/"presets"`, FLUXVOICE_SOURCE_DIR
+/// "presets" (compile definition; empty string fallback when undefined) and
+/// the current directory's "presets". Existing directories only, deduplicated
+/// by weakly_canonical path. A user dir therefore shadows the built-ins.
+std::vector<std::filesystem::path> preset_search_dirs(const std::filesystem::path& user_dir,
+                                                      const std::filesystem::path& exe_dir);
+
+/// Resolve a `--preset`/`preset` argument. A value ending in ".json" or
+/// containing '/' or '\\' is treated as a file path; otherwise each dir is
+/// searched in order and the first file whose stem OR preset `name` matches
+/// case-insensitively wins. Unknown names report `unknown preset '<x>'
+/// (available: ...)`.
+PresetLoadResult resolve_preset(std::string_view name_or_path,
+                                std::span<const std::filesystem::path> dirs);
+
+/// Parse one `name=value` CLI/console assignment. On success `desc`/`value`
+/// are set (clamped to the descriptor's domain, with `warning` when clamped).
+/// Returns false with `error` on an unknown name (voice_a/voice_b get a
+/// --voice/--voice-b hint), a missing `=` or empty side, or a value that is
+/// not a finite number (toggles also accept on/off/true/false).
+bool parse_param_assignment(std::string_view text, const ParamDesc*& desc, float& value,
+                            std::string& warning, std::string& error);
+
+/// Strict float parse: the whole input must be one finite decimal (one
+/// leading sign, no whitespace, no trailing junk); rejects nan/inf and
+/// strtod's ERANGE. `+3` is accepted.
+bool parse_finite_float(std::string_view text, double& out);
+
+/// Value as shown by `get` and `set` replies: toggles print on/off, integers
+/// without a fraction, continuous values compact.
+std::string format_param_value(const ParamDesc& d, float v);
+
+/// The descriptor table as a human-readable `--list-params` listing:
+/// name, unit, range, default, smoothing, tier, help.
+std::string params_table_text();
 
 /// The descriptor table as JSON (what `fluxvoice --list-params --json` prints):
 /// {"schema":1,"params":[{"name","label","unit","min","max","default","kind",

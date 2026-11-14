@@ -2,7 +2,7 @@
 
 > **Milestone 3** · [Master plan](00_master.md) · [← Stage 01](01_multilingual_data_simuleval_harness.md) · [Stage 03 →](03_multilingual_encoder_vocoder_upgrade.md)
 
-**Status:** ☐ not started
+**Status:** ☑ done (2026-11-14)
 **Depends on:** [Milestone 2 / Stage 02](../Milestone%202/02_model_contract_fixtures.md) (`ModelContract.hpp`, `fvml/contract.py`, `tools/make_fixture_models.py`)
 **Research:** [M3 research](../Research_documents/M3_WAITK_S2UT_RESEARCH.md) §3.2 dual-output encoder · §4.2 chunk geometry · §8 two-graph ring-KV export
 
@@ -94,9 +94,10 @@ and CI-tested without waiting for GPU training.
 
 ## Tasks
 
-- [ ] **Update `python_training/fvml/contract.py` and `src/pipeline/ModelContract.hpp`:**
-  - [ ] Support `contract_version: 2` while keeping `contract_version: 1` valid.
-  - [ ] Add `validate_s2ut_bundle(enc, trans_enc, trans_dec, voc)`:
+- [x] **Update `python_training/fvml/contract.py` and `src/pipeline/ModelContract.hpp`:**
+  - [x] Support `contract_version: 2` while keeping `contract_version: 1` valid.
+  - [x] Add `validate_s2ut_bundle(enc, trans_enc, trans_dec, voc)` (plus
+        `validate_s2ut_shared_io` and `validate_langs` / `validate_langs_json`):
     - verifies `enc.latent_dim == trans_enc.latent_dim`;
     - verifies `trans_enc.chunk_frames == trans_dec.chunk_frames`;
     - verifies `trans_enc.shared_mem_states == trans_dec.shared_mem_states` and
@@ -105,29 +106,38 @@ and CI-tested without waiting for GPU training.
       voc.sample_rate`;
     - verifies `langs` maps are non-empty and identical between `translator_enc`
       and `translator_dec`.
-  - [ ] Add `s2ut_onset_latency_samples(enc, trans_enc, trans_dec, voc, wait_k)`.
-- [ ] **Shared contract test vectors** in
+  - [x] Add `s2ut_onset_latency_samples(enc, trans_enc, trans_dec, voc, wait_k)`.
+- [x] **Shared contract test vectors** in
       `tests/data/contracts/{valid,invalid}/*_v2.json`:
-  - [ ] Valid v2 encoder + translator_enc + translator_dec + vocoder quartet.
-  - [ ] Invalid cases: `latent_dim` mismatch, `shared_mem_states` mismatch,
+  - [x] Valid v2 encoder + translator_enc + translator_dec + vocoder quartets and
+        Mode A dual-encoder pair (`quartet_s2ut_s4_v2.json`,
+        `quartet_s2ut_s1_minimal_v2.json`, `pair_dual_enc_voc_v2.json`).
+  - [x] Invalid cases: `latent_dim` mismatch, `shared_mem_states` mismatch,
         `vocab` mismatch between `translator_dec` and `vocoder`, missing
         `src_pos`/`tgt_pos` state, mismatched `langs` table, `chunk_frames` not a
-        multiple of `frames_per_step`.
-- [ ] **Extend `tools/make_fixture_models.py`** (pure `onnx.helper`, deterministic
+        multiple of `frames_per_step`, `special_units` collisions, `src_pos`/`tgt_pos`
+        dtype/shape mismatches, and cross-graph `shared_mem_states` shape mismatches
+        (26 new invalid v2 cases; 14 valid + 99 invalid shared cases total).
+- [x] **Extend `tools/make_fixture_models.py`** (pure `onnx.helper`, deterministic
       bytes):
-  - [ ] Upgrade `identity_s{1,2,4}.onnx` (or add `dual_encoder_s4.onnx`) to emit
-        both `units` and `latents` under contract v2.
-  - [ ] `fixture_translator_enc.onnx`: writes incoming `latents` summary into a
-        4-slot ring memory `mem_k_0` / `mem_v_0` at `src_pos mod 4` and increments
-        `src_pos`.
-  - [ ] `fixture_translator_dec.onnx`: reads `mem_k_0` / `mem_v_0` at
-        `(src_pos - wait_k) mod 4`, emits deterministic `units` (`prev_units +
-        tgt_lang`), synthetic `prosody`, increments `tgt_pos`, and raises
-        `eos_prob = 1.0` after 3 flush steps.
-  - [ ] Broken v2 fixture variants for Stage 07's negative loader tests.
-- [ ] **Extend `tests/test_model_contract.cpp`** with v2 bundle validation and
-      Mode B onset latency assertions.
-- [ ] **Update `models/README.md`** to document the v2 bundle layout
+  - [x] Add `s2ut/encoder_s{1,2,4}.onnx` (`dual_encoder`) emitting both discrete
+        `units` and continuous `latents` under contract v2, plus
+        `s2ut/vocoder_s{1,2,4}.onnx`, `s2ut/voices.json`, and `s2ut/langs.json`
+        (keeping `identity/*` v1 Mode A fixtures intact for backward-compatibility
+        coverage).
+  - [x] `s2ut/translator_enc.onnx` (`fixture_translator_enc`): writes incoming
+        `latents` summary into a 4-slot ring memory `mem_k_0` / `mem_v_0` at
+        `src_pos mod 4` and increments `src_pos`.
+  - [x] `s2ut/translator_dec.onnx` (`fixture_translator_dec`): reads `mem_k_0` /
+        `mem_v_0` at `(src_pos - wait_k) mod 4`, emits deterministic `units`
+        (`(prev_units + tgt_lang) mod 16`), synthetic `prosody`, increments
+        `tgt_pos`, and raises `eos_prob = 1.0` after 3 flush steps.
+  - [x] Broken v2 fixture variants (`broken/v2_*.onnx`) for Stage 07's negative
+        loader tests.
+- [x] **Extend `tests/test_model_contract.cpp`** with v2 bundle validation,
+      `langs.json` parity against `frontend/assets/langs.default.json`, and Mode B
+      onset latency assertions.
+- [x] **Update `models/README.md`** to document the v2 bundle layout
       (`translator_enc.onnx`, `translator_dec.onnx`, `langs.json`).
 
 ## Implementation notes
@@ -139,11 +149,40 @@ and CI-tested without waiting for GPU training.
   `chunk_frames = 4` in the committed test fixtures so all ONNX fixture files
   combined stay under 150 KB.
 
+## Verification (2026-11-14)
+
+- **Hand-computed Mode B onset latencies** (`wait_k * chunk_frames * frame_samples + (L_enc + L_voc) * frame_samples + overlap_samples` at 16 kHz, `frame_samples = 320`, `chunk_frames = 4`), verified in both `tests/test_model_contract.cpp` and `python_training/tests/test_contract.py`:
+  - `s2ut/` fixture quartet (`L_enc = 0`, `L_voc = 0`, `overlap = 0`):
+    `k = 1 -> 1280` samples (`80.0 ms`), `k = 3 -> 3840` (`240.0 ms`),
+    `k = 5 -> 6400` (`400.0 ms`), `k = 10 -> 12800` (`800.0 ms`).
+  - Master-plan configuration (`L_enc = 1`, `L_voc = 0`, `overlap = 0`):
+    `k = 1 -> 1600` (`100.0 ms`), `k = 3 -> 4160` (`260.0 ms`),
+    `k = 5 -> 6720` (`420.0 ms`), `k = 10 -> 13120` (`820.0 ms`).
+- **Deterministic ONNX fixtures & ORT execution:**
+  - 34 generated files under `tests/data/fixtures/` totalling **77,776 bytes**
+    ($\le 150\text{ KB}$ cap); `make_fixture_models.py --check` reports
+    `34 files checked: up to date` and `python -I tools/make_fixture_models.py
+    --self-test` passes on stdlib Python 3.14.
+  - `python_training/tests/test_fixtures.py` executes the full `s2ut/` quartet in
+    ONNX Runtime 1.31.0 across 10 source chunks ($2.5\times$ wrap of the 4-slot
+    ring memory) + 3 tail-flush steps (`eos_prob == [0.0, 0.0, 1.0]`), and C++
+    `test_ort_model` rejects all 14 negative fixtures (10 v1 + 4 v2) with exact
+    manifest diagnostics.
+- **Build & CTest matrix evidence:**
+  - Windows 11 x64 (`zig c++` 0.15.2 Clang frontend, Ninja, CMake 4.5.0,
+    `-DFLUXVOICE_STRICT_WARNINGS=ON -DFLUXVOICE_WARNINGS_AS_ERRORS=ON`, including
+    `fluxvoice_header_checks`): **PASS** (`model_contract`, `model_contract_py`,
+    `fixture_models_selftest`, `frontend_model`, `ort_model` with ORT 1.31.0).
+  - Native Windows/MSVC, Linux/GCC, Linux/Clang, and macOS/AppleClang legs:
+    **NOT RUN locally** (exercised on push/PR by `.github/workflows/build.yml`).
+
 ## Files touched
 
 - `python_training/fvml/contract.py`, `src/pipeline/ModelContract.hpp`,
-  `tests/test_model_contract.cpp`, `tests/data/contracts/**`,
-  `tools/make_fixture_models.py`, `tests/data/fixtures/**`, `models/README.md`
+  `tests/test_model_contract.cpp`, `python_training/tests/test_contract.py`,
+  `python_training/tests/test_fixtures.py`, `tests/data/contracts/**`,
+  `tools/make_fixture_models.py`, `tests/data/fixtures/**`, `models/README.md`,
+  `frontend/core/VoiceCatalog.cpp`, `tests/test_frontend_model.cpp`
 
 ## Definition of done
 

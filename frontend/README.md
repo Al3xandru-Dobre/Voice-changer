@@ -540,8 +540,11 @@ hardware and are not claimed by the table above.
 ## 11. Not in this iteration
 
 - Inference wiring, conditioning application, latency governor, translator
-  state resets (M2 Stages 07–09, M3 Stages 07–09). The UI delivers
-  `VoiceParams` to the worker; applying them is engine work.
+  state resets (M3 Stages 07–09). Engine-side apply landed for the CLI and
+  `fv_vc_file` in M2 Stage 09 (`InferencePipeline` + `VoiceOutputChain`);
+  the GUI `EngineHost` still runs the pass-through shell until it hosts a
+  model bundle. The UI delivers `VoiceParams` to the worker; applying them
+  to GUI audio is engine work.
 - Global hotkeys (Windows `RegisterHotKey`; Wayland needs the
   GlobalShortcuts portal) and Windows taskbar thumbnail buttons
   (`ITaskbarList3`). Both are additive to `platform/`.

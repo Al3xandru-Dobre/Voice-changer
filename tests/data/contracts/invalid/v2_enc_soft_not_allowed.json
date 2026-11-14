@@ -1,0 +1,21 @@
+{
+  "description": "v2 dual-output encoder must have discrete content_kind for Mode A units",
+  "error": "v2 encoder content_kind must be discrete (got soft)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "soft",
+        "content_dim": 128,
+        "latent_dim": 128,
+        "states": [],
+        "license": "MIT"
+      }
+    }
+  ]
+}

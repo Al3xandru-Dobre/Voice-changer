@@ -2,7 +2,7 @@
 
 > **Milestone 2** · [Master plan](00_master.md) · [← Stage 08](08_realtime_mode_a_pipeline.md) · [Stage 10 →](10_target_voice_finetune.md)
 
-**Status:** ☐ not started
+**Status:** ◐ engine/CLI/console/presets implemented and unit-tested (date 2026-11-14); offline DoD on a real bundle and live checks pending
 **Depends on:** Stage 08 (pipeline + hooks), Stage 05 (control-ready conditioning; readiness checks)
 **Research:** §11 voice-control design · §4.2 target-domain mapping · §5 speaker-embedding FiLM
 
@@ -59,54 +59,57 @@ sliders need no new engine work.
 
 ## Tasks
 
-- [ ] **`src/voice/VoiceParams.hpp`:**
-  - [ ] `constexpr ParamDesc kParams[]` (name, unit, min, max, default,
+- [x] **`src/voice/VoiceParams.hpp`:**
+  - [x] `constexpr ParamDesc kParams[]` (name, unit, min, max, default,
         smoothing kind, tier).
-  - [ ] A `VoiceParams` value type (float array indexed by an enum + two voice
+  - [x] A `VoiceParams` value type (float array indexed by an enum + two voice
         indices); `clamp()`.
-  - [ ] Lookup by name.
-- [ ] **Control → worker.**
-  - [ ] Control thread pushes a full `VoiceParams` snapshot into a preallocated
-        `moodycamel::ReaderWriterQueue<VoiceParams>`.
-  - [ ] Worker drains to the newest at each hop start. Latest wins; no locks,
+  - [x] Lookup by name.
+- [x] **Control → worker.**
+  - [x] Control thread pushes a full `VoiceParams` snapshot into a preallocated
+        `moodycamel::ReaderWriterQueue<VoiceParams>` (`src/voice/ParamChannel.hpp`;
+        newest snapshot wins, pending slot + `flush()` when the queue is full).
+  - [x] Worker drains to the newest at each hop start. Latest wins; no locks,
         no allocation.
-- [ ] **Apply in `InferencePipeline`:**
-  - [ ] the f0 mapping uses `pitch_shift`, `intonation` (and vibrato/whisper
+- [x] **Apply in `InferencePipeline`:**
+  - [x] the f0 mapping uses `pitch_shift`, `intonation` (and vibrato/whisper
         when enabled);
-  - [ ] `spk_emb` is recomputed per frame from the smoothed `timbre_blend`;
-  - [ ] the output chain is gain → gate → limiter (→ brightness).
-  - [ ] Switching `voice_a` while `timbre_blend` = 0 crossfades through a short
+  - [x] `spk_emb` is recomputed per frame from the smoothed `timbre_blend`
+        (see notes: one vector per hop for s2/s4, per frame for s1);
+  - [x] the output chain is gain → gate → **brightness →** limiter
+        (deviation: limiter stays last, see notes).
+  - [x] Switching `voice_a` while `timbre_blend` = 0 crossfades through a short
         internal blend ramp, so it doesn't jump.
-- [ ] **Presets.**
-  - [ ] Format: `presets/*.json` with `{"schema": 1, "name", "description",
+- [x] **Presets.**
+  - [x] Format: `presets/*.json` with `{"schema": 1, "name", "description",
         "voice_a", "voice_b", "params": {...}}`.
-  - [ ] Loader: clamps out-of-range values with a warning, warns on unknown keys,
+  - [x] Loader: clamps out-of-range values with a warning, warns on unknown keys,
         rejects an unknown schema.
-  - [ ] Built-ins in `presets/`: **Neutral**, **Deep** (−4 st, intonation 0.9),
+  - [x] Built-ins in `presets/`: **Neutral**, **Deep** (−4 st, intonation 0.9),
         **Bright** (+4 st, intonation 1.1), **Robot** (intonation 0), and
         **Whisper** (stretch tier).
-  - [ ] `--preset-dir` for user presets.
-- [ ] **CLI:**
-  - [ ] `--preset <name|path>`
-  - [ ] repeatable `--param name=value`
-  - [ ] `--list-params` (human table; `--list-params --json` prints the descriptor
+  - [x] `--preset-dir` for user presets (also where console `save` writes).
+- [x] **CLI:**
+  - [x] `--preset <name|path>`
+  - [x] repeatable `--param name=value`
+  - [x] `--list-params` (human table; `--list-params --json` prints the descriptor
         table as JSON, the M4 slider spec)
-  - [ ] `--list-presets`
-- [ ] **Console.** Replace the stop thread with a line-reader thread that posts
+  - [x] `--list-presets`
+- [x] **Console.** Replace the stop thread with a line-reader thread that posts
       commands to the control loop through an SPSC queue. Commands:
   - empty line = stop (unchanged)
   - `set <param> <value>`, `get [param]`, `preset <name>`, `save <name>`,
     `voices`, `help`
 
   Not read under `--duration`, unless `--console` is given.
-- [ ] **`fv_vc_file`** gains `--preset` / `--param`, so every control is measurable
-      offline.
-- [ ] **Tests** (`tests/test_voice_params.cpp`, ORT-free):
-  - [ ] every descriptor has min < default < max (or equal bounds for toggles)
-  - [ ] preset round-trip; clamping; unknown-key warning; bad schema rejected
-  - [ ] f0-mapping arithmetic vs. closed form
-  - [ ] blend arithmetic
-  - [ ] a step change in gain/blend through the fake pipeline stays under the
+- [x] **`fv_vc_file`** gains `--preset` / `--param` / `--change` /
+      `--no-output-chain`, so every control is measurable offline.
+- [x] **Tests** (`tests/test_voice_params.cpp`, ORT-free):
+  - [x] every descriptor has min < default < max (or equal bounds for toggles)
+  - [x] preset round-trip; clamping; unknown-key warning; bad schema rejected
+  - [x] f0-mapping arithmetic vs. closed form
+  - [x] blend arithmetic
+  - [x] a step change in gain/blend through the fake pipeline stays under the
         click bound
 
 ## Implementation notes
@@ -126,6 +129,47 @@ sliders need no new engine work.
 - **Formant-preserving pitch shift comes free.** The vocoder renders the voice's
   formants from `spk_emb`, so shifting f0 doesn't produce the chipmunk effect of
   waveform pitch-shifting.
+
+## Implementation notes (2026-11-14)
+
+- **Ramps.** `FrameRamp` (`src/voice/ParamSmoothing.hpp`) linearly sweeps a
+  conditioning param over `kParamRampFrames = 5` frames (100 ms at 20 ms).
+  `set_target()` recomputes the step from the *current* value, so retargeting
+  mid-ramp is continuous; `advance()` lands exactly on the target.
+- **Voice crossfade.** `voice_a`/`voice_b` changes snapshot the current
+  effective embedding + stats, then `kVoiceCrossfadeFrames = 5` frames lerp
+  from the snapshot to the new target — a voice switch at `timbre_blend` = 0
+  does not jump.
+- **Stats blending.** All four `TargetVoiceStats` fields lerp between voice A
+  and B by the smoothed `timbre_blend` α (matches Stage 05's Python readiness
+  check, which blends stats with the embedding).
+- **Vibrato latch.** The LFO contribution is `depth·sin(phase)·min(1, rate /
+  0.5 Hz)`: when `vibrato_rate` ramps to 0 the phase stops advancing, so an
+  unscaled `sin(phase)` would freeze at a static pitch offset. The rate scale
+  fades the depth to 0 below 0.5 Hz and rate 0 gives exactly no offset.
+- **Speaker embedding.** The vocoder takes one `spk_emb` vector per step, so
+  the pipeline computes it once per hop from the ramp state after the hop's
+  last frame (per frame for s1, which has one conditioning frame per hop).
+- **Gate.** Per-conditioning-frame decisions on `PitchFrame::log_energy`
+  (aligned with the content being vocoded), per-sample envelope: open at
+  `threshold`, stay open down to `threshold − 6 dB` (hysteresis), 5-frame /
+  100 ms hold before closing, 2 ms attack, 50 ms release, floor = full mute.
+- **Output chain order is gain → gate → brightness → limiter** — a deliberate
+  deviation from "gain → gate → limiter (→ brightness)" in the task list
+  above: the limiter must stay last so the −1 dBFS ceiling still holds after
+  a +6 dB tilt. Limiter curve (ceiling 0.891251, knee 0.7·ceiling, tanh, no
+  lookahead) is defined once in `VoiceOutputChain::soft_limit`; the frontend
+  `OutputChain` delegates to it. The on/off toggle crossfades the limited
+  signal over ~20 ms so toggling under a loud signal does not click.
+- **`output_chain=false`** (`PipelineOptions`) leaves raw vocoder PCM for
+  bit-exact plumbing/parity checks only: Stage 08 identity/lookahead/OLA
+  tests, ORT fixture parity, the Stage 07 golden test (`--no-output-chain`).
+- **`save`** writes `<preset-dir>/<slug>.json`; without `--preset-dir` the
+  console replies that saving is unavailable. Translation params are excluded
+  (Mode A has none).
+- **`--voice` is optional**: the bundle's first voice is the default, and
+  `voice_b` follows `voice_a` until set explicitly (preset, `--voice-b`, or
+  console `set voice_b`).
 
 ## Files touched
 
@@ -148,3 +192,19 @@ Measured offline with `fv_vc_file` on `test_clean_200`, unless noted:
 - WER for each built-in preset ≤ Neutral's WER + 3 pts.
 - Live: `set`, `preset` and `--preset` change the sound within one hop + the
   smoothing time, with no `misses`.
+
+## Offline DoD measurement
+
+`python_training/eval_controls.py` runs this DoD on the shipped runtime: every
+conversion goes through `fv_vc_file` (pitch/intonation via `fvml.f0_ref`,
+blend/presets via `fvml.evaluate`, clicks via `--change` at 50 % of each
+utterance). Skipped checks (`--skip-ml`, no `--voice-b`) are reported SKIPPED,
+never PASS; `report.json`/`report.md` under `--out`; exit 0 only when every
+executed check passes. Status (2026-11-14): tooling implemented and tested
+with offline fakes; a real measurement run is pending a trained bundle:
+
+```powershell
+python_training/.venv/Scripts/python.exe python_training/eval_controls.py `
+    --bundle models/<bundle> --voice <voice_a> --voice-b <voice_b> `
+    --list eval_lists/test_clean_200.tsv --out eval_out/stage09_controls
+```

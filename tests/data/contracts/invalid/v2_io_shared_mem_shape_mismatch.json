@@ -1,0 +1,100 @@
+{
+  "description": "shared_mem_state shape differs between translator_enc output and translator_dec input",
+  "error": "shared_mem_state 'mem_k_0' shape mismatch: translator_enc [1,4,128,64], translator_dec [1,4,128,32]",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 4,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 1000,
+        "latent_dim": 128,
+        "states": [],
+        "license": "MIT"
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_enc",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "latent_dim": 128,
+        "max_src_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_readiness_output": false,
+        "states": ["src_pos", "mem_k_0"],
+        "license": "MIT"
+      },
+      "graph": {
+        "inputs": [
+          {"name": "latents", "dtype": "f32", "shape": [1, 4, 128]},
+          {"name": "src_lang", "dtype": "i64", "shape": [1]},
+          {"name": "state_in.src_pos", "dtype": "i64", "shape": [1]},
+          {"name": "state_in.mem_k_0", "dtype": "f32", "shape": [1, 4, 128, 64]}
+        ],
+        "outputs": [
+          {"name": "state_out.src_pos", "dtype": "i64", "shape": [1]},
+          {"name": "state_out.mem_k_0", "dtype": "f32", "shape": [1, 4, 128, 64]}
+        ]
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_dec",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "vocab": 1000,
+        "special_units": {"bos": 1000, "eos": 1001, "pad": 1002},
+        "max_src_steps": 128,
+        "max_tgt_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_prosody_output": false,
+        "states": ["tgt_pos"],
+        "license": "MIT"
+      },
+      "graph": {
+        "inputs": [
+          {"name": "prev_units", "dtype": "i64", "shape": [1, 4]},
+          {"name": "tgt_lang", "dtype": "i64", "shape": [1]},
+          {"name": "prosody_ctx", "dtype": "f32", "shape": [1, 2]},
+          {"name": "src_pos", "dtype": "i64", "shape": [1]},
+          {"name": "mem_k_0", "dtype": "f32", "shape": [1, 4, 128, 32]},
+          {"name": "state_in.tgt_pos", "dtype": "i64", "shape": [1]}
+        ],
+        "outputs": [
+          {"name": "units", "dtype": "i64", "shape": [1, 4]},
+          {"name": "eos_prob", "dtype": "f32", "shape": [1, 1]},
+          {"name": "state_out.tgt_pos", "dtype": "i64", "shape": [1]}
+        ]
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 4,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 1000,
+        "cond_frame_samples": 320,
+        "cond_inputs": [],
+        "spk_emb_dim": 0,
+        "overlap_samples": 0,
+        "states": [],
+        "license": "MIT"
+      }
+    }
+  ]
+}

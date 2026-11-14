@@ -1,0 +1,112 @@
+{
+  "description": "Valid contract v2 quartet without optional readiness/prosody heads (s1, k=5, overlap=80)",
+  "wait_k": 5,
+  "s2ut_onset_latency_samples": 6480,
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 500,
+        "latent_dim": 64,
+        "states": [],
+        "license": "CC-BY-4.0"
+      },
+      "graph": {
+        "inputs": [{"name": "audio", "dtype": "f32", "shape": [1, 320]}],
+        "outputs": [
+          {"name": "units", "dtype": "i64", "shape": [1, 1]},
+          {"name": "latents", "dtype": "f32", "shape": [1, 1, 64]}
+        ]
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_enc",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "latent_dim": 64,
+        "max_src_steps": 64,
+        "shared_mem_states": ["mem_0"],
+        "langs": {"en": 0, "de": 1},
+        "has_readiness_output": false,
+        "states": ["src_pos", "mem_0"],
+        "license": "CC-BY-4.0"
+      },
+      "graph": {
+        "inputs": [
+          {"name": "latents", "dtype": "f32", "shape": [1, 4, 64]},
+          {"name": "src_lang", "dtype": "i64", "shape": [1]},
+          {"name": "state_in.src_pos", "dtype": "i64", "shape": [1]},
+          {"name": "state_in.mem_0", "dtype": "f16", "shape": [1, 64, 64]}
+        ],
+        "outputs": [
+          {"name": "state_out.src_pos", "dtype": "i64", "shape": [1]},
+          {"name": "state_out.mem_0", "dtype": "f16", "shape": [1, 64, 64]}
+        ]
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_dec",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "vocab": 500,
+        "special_units": {"bos": 500, "eos": 501, "pad": 502},
+        "max_src_steps": 64,
+        "max_tgt_steps": 64,
+        "shared_mem_states": ["mem_0"],
+        "langs": {"en": 0, "de": 1},
+        "has_prosody_output": false,
+        "states": ["tgt_pos"],
+        "license": "CC-BY-4.0"
+      },
+      "graph": {
+        "inputs": [
+          {"name": "prev_units", "dtype": "i64", "shape": [1, 4]},
+          {"name": "tgt_lang", "dtype": "i64", "shape": [1]},
+          {"name": "prosody_ctx", "dtype": "f32", "shape": [1, 2]},
+          {"name": "src_pos", "dtype": "i64", "shape": [1]},
+          {"name": "mem_0", "dtype": "f16", "shape": [1, 64, 64]},
+          {"name": "state_in.tgt_pos", "dtype": "i64", "shape": [1]}
+        ],
+        "outputs": [
+          {"name": "units", "dtype": "i64", "shape": [1, 4]},
+          {"name": "eos_prob", "dtype": "f32", "shape": [1, 1]},
+          {"name": "state_out.tgt_pos", "dtype": "i64", "shape": [1]}
+        ]
+      }
+    },
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "vocoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 500,
+        "cond_frame_samples": 320,
+        "cond_inputs": [],
+        "spk_emb_dim": 0,
+        "overlap_samples": 80,
+        "states": [],
+        "license": "CC-BY-4.0"
+      },
+      "graph": {
+        "inputs": [{"name": "units", "dtype": "i64", "shape": [1, 1]}],
+        "outputs": [{"name": "audio", "dtype": "f32", "shape": [1, 400]}]
+      }
+    }
+  ]
+}

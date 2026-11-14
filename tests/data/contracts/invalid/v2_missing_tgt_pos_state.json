@@ -1,0 +1,24 @@
+{
+  "description": "translator_dec omits tgt_pos from its state list",
+  "error": "translator_dec states must include 'tgt_pos'",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_dec",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "vocab": 1000,
+        "special_units": {"bos": 1000, "eos": 1001, "pad": 1002},
+        "max_src_steps": 128,
+        "max_tgt_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_prosody_output": false,
+        "states": ["dec_kv_0"],
+        "license": "MIT"
+      }
+    }
+  ]
+}

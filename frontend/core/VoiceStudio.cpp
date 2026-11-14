@@ -404,7 +404,7 @@ float VoiceStudioModel::progress_to_minimum() const {
 // ---------------------------------------------------------------------------
 
 std::string shell_quote(const fs::path& p, Shell shell) {
-    const std::string s = p.string();
+    const std::string s = shell == Shell::Posix ? p.generic_string() : p.string();
     if (shell == Shell::PowerShell) {
         std::string out = "'";
         for (char c : s) { if (c == '\'') out += "''"; else out += c; }

@@ -139,7 +139,9 @@ void test_identity_bundle() {
         // Also verify OrtModel satisfies ModelStep inside InferencePipeline.
         const TargetVoiceStats voice{4.8, 0.25, -4.0, 1.5};
         const std::vector<float> spk(static_cast<std::size_t>(voc.contract().spk_emb_dim), 0.5f);
-        InferencePipeline pipe(enc, voc, voice, spk);
+        PipelineOptions pipe_options;
+        pipe_options.output_chain = false; // bit-exact ORT parity check
+        InferencePipeline pipe(enc, voc, voice, spk, pipe_options);
         CHECK(pipe.warm_up(2));
         std::vector<float> out(hop, 0.0f);
         const auto res = pipe.process(expected, out);
@@ -306,7 +308,9 @@ void test_rss_stability_10000_steps() {
     CHECK(voc.load(g_fixtures_dir / "delay_s1.onnx") == OrtStatus::kOk);
 
     const TargetVoiceStats voice{4.8, 0.25, -4.0, 1.5};
-    InferencePipeline pipe(enc, voc, voice, {});
+    PipelineOptions pipe_options;
+    pipe_options.output_chain = false; // bit-exact delay-model plumbing
+    InferencePipeline pipe(enc, voc, voice, {}, pipe_options);
     CHECK(pipe.warm_up(20));
 
     const std::size_t hop = static_cast<std::size_t>(enc.contract().hop());

@@ -27,6 +27,15 @@ and prevention rules are compiled into [`../BEST_PRACTICES.md`](../BEST_PRACTICE
 | BUG-015 | Wrong clock | [BUG-015_gate_decides_on_pytorch_clock.md](BUG-015_gate_decides_on_pytorch_clock.md) | `gate_report.py` eligibility/projected T−B (M2 S05) | ☑ fixed | 2026-10-18 |
 | BUG-016 | Silent fallback | [BUG-016_gate_export_silent_exporter_fallback.md](BUG-016_gate_export_silent_exporter_fallback.md) | `gate_report.py` export smoke test / console encoding (M2 S05) | ☑ fixed | 2026-10-18 |
 | BUG-017 | Quiet tolerance | [BUG-017_vocoder_checks_below_noise_floor.md](BUG-017_vocoder_checks_below_noise_floor.md) | `vocoder.py` init, `stream_check.py`, `gate_report.py`, `test_vocoder.py` (M2 S05) | ☑ fixed | 2026-10-18 |
+| BUG-018 | Red Windows | [BUG-018_frontend_getenv_breaks_msvc_build.md](BUG-018_frontend_getenv_breaks_msvc_build.md) | `frontend/core/Paths.cpp`, CI `windows-msvc` (M4 S01) | ☐ open | 2026-11-14 |
+| BUG-019 | Two-arg QoS | [BUG-019_macos_qos_call_wrong_arity.md](BUG-019_macos_qos_call_wrong_arity.md) | `src/util/WorkerPriority.hpp`, CI `macos-clang` (M2 S08) | ☐ open | 2026-11-14 |
+| BUG-020 | Quiet default | [BUG-020_missing_remembered_device_becomes_default.md](BUG-020_missing_remembered_device_becomes_default.md) | `frontend/core/AppModel.cpp` device policy restore (M4 S02) | ☐ open | 2026-11-14 |
+| BUG-021 | Prefix folders | [BUG-021_studio_draft_saved_per_keystroke_unvalidated_path.md](BUG-021_studio_draft_saved_per_keystroke_unvalidated_path.md) | Voice Studio draft persistence (M4 S03) | ☐ open | 2026-11-14 |
+| BUG-022 | Null ETA | [BUG-022_wrong_typed_json_field_terminates_gui.md](BUG-022_wrong_typed_json_field_terminates_gui.md) | `frontend/core/VoiceStudio.cpp` JSON readers (M4 S03) | ☐ open | 2026-11-14 |
+| BUG-023 | Oldest wins | [BUG-023_gui_param_queue_drops_newest_snapshot.md](BUG-023_gui_param_queue_drops_newest_snapshot.md) | `frontend/core/EngineHost.cpp` `push_params` (M4 S03/S05) | ☐ open | 2026-11-14 |
+| BUG-024 | Sticky residue | [BUG-024_gui_queued_latency_not_rebaselined.md](BUG-024_gui_queued_latency_not_rebaselined.md) | `frontend/core/EngineHost.cpp` `telemetry()` (M4 S06) | ☐ open | 2026-11-14 |
+| BUG-025 | Phantom script | [BUG-025_studio_commands_not_runnable.md](BUG-025_studio_commands_not_runnable.md) | Voice Studio job commands (M4 S03 / M2 S10) | ☐ open | 2026-11-14 |
+| BUG-026 | Double lookahead | [BUG-026_latency_target_counts_lookahead_twice.md](BUG-026_latency_target_counts_lookahead_twice.md) | `LatencyGovernor` default target, `PipelineGeometry` (M2 S08) | ◐ diagnosed | 2026-11-14 |
 
 ## Reviews
 
@@ -36,6 +45,8 @@ and prevention rules are compiled into [`../BEST_PRACTICES.md`](../BEST_PRACTICE
 | 2026-10-18 | Milestone 1.5 stages 05–06: controller/backend review, cmake gate, Windows WASAPI + loopback + feedback-guard verification; BUG-010/011/012 found & fixed | [REVIEW-M15-S05-S06_2026-10-18.md](REVIEW-M15-S05-S06_2026-10-18.md) |
 | 2026-10-18 | Milestone 2 stage 06: stateful ONNX export static review (no shell); DoD check, gate/conditioning/golden verification; BUG-013/014 found | [REVIEW-M2-S06_2026-10-18.md](REVIEW-M2-S06_2026-10-18.md) |
 | 2026-10-18 | Milestone 2 stage 05: causal vocoder + decision gate; fresh `/WX` build 46/46, 41-mutant test audit (28 survive), gate re-run with the stage file's numbers; BUG-015/016/017 found | [REVIEW-M2-S05_2026-10-18.md](REVIEW-M2-S05_2026-10-18.md) |
+| 2026-11-14 | Milestone 4 status + desktop frontend audit: master-plan verification, CI evidence (Windows leg red since the frontend merge), specification-vs-code tables, test gaps; no local build (no toolchain); BUG-018, BUG-020…025 found | [REVIEW-M4-FRONTEND_2026-11-14.md](REVIEW-M4-FRONTEND_2026-11-14.md) |
+| 2026-11-14 | Milestone 2 status + stages 07–09: stage claims vs. tree, real-time rule check, contract v2 spot check, test gaps; static review + CI evidence + 21 contract tests run; BUG-019, BUG-026 found | [REVIEW-M2-S07-S09_2026-11-14.md](REVIEW-M2-S07-S09_2026-11-14.md) |
 
 ## Conventions
 

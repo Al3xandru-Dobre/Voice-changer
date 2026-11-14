@@ -388,6 +388,540 @@
       "error": null
     },
     {
+      "file": "s2ut/encoder_s1.onnx",
+      "sha256": "05b750ea7a8b4154aec9a57406ff20c842dacd51d112bc835b7ef51d2e3b0a0e",
+      "contract": "{\"content_kind\":\"discrete\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":1,\"latent_dim\":8,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "latents",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1,
+              8
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut/vocoder_s1.onnx",
+      "sha256": "ea3318b45f9790193642b38565d750825aa1c6dea03c74cae09899f06f8e4339",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[\"logf0\",\"voicing\",\"aperiodicity\",\"energy\",\"spk_emb\"],\"content_kind\":\"discrete\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":4,\"states\":[],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              320
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut/encoder_s2.onnx",
+      "sha256": "9d88305a2cc91b2348b10c3cb9545cb29252d2d13bffaca7c8ed693a0653d525",
+      "contract": "{\"content_kind\":\"discrete\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":2,\"latent_dim\":8,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              640
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "latents",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2,
+              8
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut/vocoder_s2.onnx",
+      "sha256": "80b7549155b75db3b5d46426d296ad04abe9d32343c592aecb381e307e1120cb",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[\"logf0\",\"voicing\",\"aperiodicity\",\"energy\",\"spk_emb\"],\"content_kind\":\"discrete\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":2,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":4,\"states\":[],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              640
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut/encoder_s4.onnx",
+      "sha256": "361979b0684a76b3e947ace32681c43da6934cfd8b123933ff71e4fe2c943d45",
+      "contract": "{\"content_kind\":\"discrete\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":4,\"latent_dim\":8,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1280
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "latents",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut/vocoder_s4.onnx",
+      "sha256": "0db406b9034c9e44f6fd99163ed4c2a394e7f3f361954c9245af49e828a05326",
+      "contract": "{\"cond_frame_samples\":320,\"cond_inputs\":[\"logf0\",\"voicing\",\"aperiodicity\",\"energy\",\"spk_emb\"],\"content_kind\":\"discrete\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":4,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"overlap_samples\":0,\"role\":\"vocoder\",\"sample_rate\":16000,\"spk_emb_dim\":4,\"states\":[],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "logf0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "voicing",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "aperiodicity",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "energy",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "spk_emb",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1280
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut/translator_enc.onnx",
+      "sha256": "d93975c4d45f9f79b081f3e35b2a88f59c22dedd4162b8cfcaee59a0d1f4b474",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_readiness_output\":true,\"langs\":{\"de\":3,\"en\":0,\"es\":1,\"fr\":2},\"latent_dim\":8,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"role\":\"translator_enc\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_0\",\"mem_v_0\"],\"states\":[\"src_pos\",\"enc_conv\",\"mem_k_0\",\"mem_v_0\"]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "latents",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "src_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.enc_conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              8
+            ]
+          },
+          {
+            "name": "state_in.mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_in.mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "readiness_logit",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_out.enc_conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              8
+            ]
+          },
+          {
+            "name": "state_out.mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_out.mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut/translator_dec.onnx",
+      "sha256": "727a3fc4b91ced5a7f53550320e428d9593549b1d3e0d0b58c38d039147298b9",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_prosody_output\":true,\"langs\":{\"de\":3,\"en\":0,\"es\":1,\"fr\":2},\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"max_tgt_steps\":4,\"role\":\"translator_dec\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_0\",\"mem_v_0\"],\"special_units\":{\"bos\":16,\"eos\":17,\"pad\":18},\"states\":[\"tgt_pos\",\"dec_kv_0\"],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "prev_units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "tgt_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "prosody_ctx",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_in.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "prosody",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              4
+            ]
+          },
+          {
+            "name": "eos_prob",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_out.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
       "file": "broken/no_contract.onnx",
       "sha256": "7e0978cadcf57ef8e31794da3dd7867f8c5f7513c399f85547d9441903bf63d3",
       "contract": null,
@@ -447,8 +981,8 @@
     },
     {
       "file": "broken/unknown_version.onnx",
-      "sha256": "4dd0474937c8b4825ba32b11d592e95804f600412c8ff6e004e22121c4024ffe",
-      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
+      "sha256": "f660e852d25f34516a125e82062b77e93a52c7e6b68aea931f91d1a4467fa85a",
+      "contract": "{\"content_dim\":320,\"content_kind\":\"soft\",\"contract_version\":3,\"frame_samples\":320,\"frames_per_step\":1,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[]}",
       "graph": {
         "inputs": [
           {
@@ -472,7 +1006,7 @@
           }
         ]
       },
-      "error": "unsupported contract_version 2 (this build reads version 1)"
+      "error": "unsupported contract_version 3 (this build reads versions 1 and 2)"
     },
     {
       "file": "broken/missing_key.onnx",
@@ -700,6 +1234,347 @@
         ]
       },
       "error": "graph input 'state_in.buf' is not a state listed in the contract"
+    },
+    {
+      "file": "broken/v2_enc_missing_latents.onnx",
+      "sha256": "66a5a4f0c15fa0a9f5cf64f3f69b907d271748a37baf0fbea37c3137a18814ec",
+      "contract": "{\"content_kind\":\"discrete\",\"contract_version\":2,\"frame_samples\":320,\"frames_per_step\":4,\"latent_dim\":8,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"lookahead_frames\":0,\"role\":\"encoder\",\"sample_rate\":16000,\"states\":[],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "audio",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1280
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          }
+        ]
+      },
+      "error": "missing graph output 'latents'"
+    },
+    {
+      "file": "broken/v2_trans_enc_missing_src_pos.onnx",
+      "sha256": "d9a4199d7ad56965a41a519fffd65bc471402fbcc98a0aa96e41cb884ab3924f",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_readiness_output\":true,\"langs\":{\"de\":3,\"en\":0,\"es\":1,\"fr\":2},\"latent_dim\":8,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"role\":\"translator_enc\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_0\",\"mem_v_0\"],\"states\":[\"enc_conv\",\"mem_k_0\",\"mem_v_0\"]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "latents",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "src_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.enc_conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              8
+            ]
+          },
+          {
+            "name": "state_in.mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_in.mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "readiness_logit",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.enc_conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              8
+            ]
+          },
+          {
+            "name": "state_out.mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_out.mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": "translator_enc states must include 'src_pos'"
+    },
+    {
+      "file": "broken/v2_trans_dec_missing_mem.onnx",
+      "sha256": "09c9144beeab2bf1c2b17f09489762626bf2a7a5847896824027368a4dd99bf7",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_prosody_output\":true,\"langs\":{\"de\":3,\"en\":0,\"es\":1,\"fr\":2},\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"max_tgt_steps\":4,\"role\":\"translator_dec\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_0\",\"mem_v_0\"],\"special_units\":{\"bos\":16,\"eos\":17,\"pad\":18},\"states\":[\"tgt_pos\",\"dec_kv_0\"],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "prev_units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "tgt_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "prosody_ctx",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_in.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "prosody",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              4
+            ]
+          },
+          {
+            "name": "eos_prob",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_out.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": "missing graph input 'mem_v_0'"
+    },
+    {
+      "file": "broken/v2_trans_dec_bad_special_units.onnx",
+      "sha256": "b84ec7986932acfe85cec113350523695bee39c8ae247ef9dc75aaf6903b70b5",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_prosody_output\":true,\"langs\":{\"de\":3,\"en\":0,\"es\":1,\"fr\":2},\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"max_tgt_steps\":4,\"role\":\"translator_dec\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_0\",\"mem_v_0\"],\"special_units\":{\"bos\":5,\"eos\":17,\"pad\":18},\"states\":[\"tgt_pos\",\"dec_kv_0\"],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "prev_units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "tgt_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "prosody_ctx",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_in.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "prosody",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              4
+            ]
+          },
+          {
+            "name": "eos_prob",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_out.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": "special_units['bos'] (5) must be >= vocab (16)"
     }
   ],
   "pairs": [
@@ -728,11 +1603,59 @@
       "algorithmic_latency_samples": 640
     }
   ],
+  "s2ut_quartets": [
+    {
+      "name": "s2ut_s1",
+      "encoder": "s2ut/encoder_s1.onnx",
+      "translator_enc": "s2ut/translator_enc.onnx",
+      "translator_dec": "s2ut/translator_dec.onnx",
+      "vocoder": "s2ut/vocoder_s1.onnx",
+      "onset_latency_samples": {
+        "1": 1280,
+        "3": 3840,
+        "5": 6400,
+        "10": 12800
+      }
+    },
+    {
+      "name": "s2ut_s2",
+      "encoder": "s2ut/encoder_s2.onnx",
+      "translator_enc": "s2ut/translator_enc.onnx",
+      "translator_dec": "s2ut/translator_dec.onnx",
+      "vocoder": "s2ut/vocoder_s2.onnx",
+      "onset_latency_samples": {
+        "1": 1280,
+        "3": 3840,
+        "5": 6400,
+        "10": 12800
+      }
+    },
+    {
+      "name": "s2ut_s4",
+      "encoder": "s2ut/encoder_s4.onnx",
+      "translator_enc": "s2ut/translator_enc.onnx",
+      "translator_dec": "s2ut/translator_dec.onnx",
+      "vocoder": "s2ut/vocoder_s4.onnx",
+      "onset_latency_samples": {
+        "1": 1280,
+        "3": 3840,
+        "5": 6400,
+        "10": 12800
+      }
+    }
+  ],
   "bundles": [
     {
       "dir": "identity",
       "vocoder": "identity/vocoder_s1.onnx",
       "voices": "identity/voices.json"
+    },
+    {
+      "dir": "s2ut",
+      "vocoder": "s2ut/vocoder_s4.onnx",
+      "voices": "s2ut/voices.json",
+      "translator": "s2ut/translator_enc.onnx",
+      "langs": "s2ut/langs.json"
     }
   ]
 }

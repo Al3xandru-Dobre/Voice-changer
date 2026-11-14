@@ -4,7 +4,7 @@
 > [Documents index](../README.md) ·
 > Research basis: [Simultaneous S2UT research](../Research_documents/M3_WAITK_S2UT_RESEARCH.md)
 
-**Status:** ☐ not started — stage files written 2026-10-18
+**Status:** ◐ in progress — Stage 02 done, Stage 01 harness & data tooling implemented (2026-11-14)
 **Goal from README:** *Train/fine-tune causal S2UT transformer on discrete
 units. Implement `WaitKPolicy` in C++ and connect between encoder and
 vocoder.*
@@ -114,8 +114,8 @@ C++ track:  02 (contract v2) ─► 04 (WaitKPolicy & FIFO) ─► 07 (C++ S2UT 
 
 | # | Stage | Research | Output | Status |
 |---|---|---|---|---|
-| 01 | [Bidirectional datasets & SimulEval harness](01_multilingual_data_simuleval_harness.md) | §6 §7 §10 | `prepare_s2ut_data.py`; 6-pair eval lists; `eval_s2ut.py` (ASR-BLEU, AL) | ☐ |
-| 02 | [Translator contract v2 & fixture models](02_translator_contract_v2_fixtures.md) | §4 §8 | Contract v2 in `ModelContract.hpp` & `fvml/contract.py`; translator fixtures | ☐ |
+| 01 | [Bidirectional datasets & SimulEval harness](01_multilingual_data_simuleval_harness.md) | §6 §7 §10 | `prepare_s2ut_data.py`; 6-pair eval lists; `eval_s2ut.py` (ASR-BLEU, AL) | ◐ |
+| 02 | [Translator contract v2 & fixture models](02_translator_contract_v2_fixtures.md) | §4 §8 | Contract v2 in `ModelContract.hpp` & `fvml/contract.py`; translator fixtures | ☑ |
 | 03 | [Multilingual encoder & vocoder upgrade](03_multilingual_encoder_vocoder_upgrade.md) | §3 | `mhubert-vp` km1000; dual-output student (`latents` + `units`); `{en,es,fr,de}` vocoder | ☐ |
 | 04 | [`WaitKPolicy` & streaming unit/prosody FIFO](04_waitk_policy_streaming_state_machine.md) | §4 §9 | Upgraded `WaitKPolicy.hpp` + `UnitProsodyFifo.hpp`; `test_waitk_policy` | ☐ |
 | 05 | [Causal S2UT translator & policy decision gate](05_causal_s2ut_translator_policy_gate.md) | §2 §4 | Multi-task CTC Conformer-Transformer; Wait-*k* vs. Adaptive gate table | ☐ |

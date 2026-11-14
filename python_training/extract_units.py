@@ -19,6 +19,15 @@ Pitch is not extracted here: causal pitch/energy belongs to fvml/features.py
 (Stage 03). The old 12.5 Hz / Mimi-default / RMVPE-SwiftF0 stub is gone; those
 choices are superseded or non-causal (MEMORY.md §1).
 
+Speaker perturbation (Stage 10): --perturb-fraction encodes a deterministic
+subset of clips from a formant/pitch/EQ-perturbed copy (fvml/augment.py), so
+the target-voice vocoder learns to ignore residual speaker information in the
+units. The manifest row's `path` still names the clean audio, so the trainer's
+conditioning features always come from the clean clip; perturbed rows gain
+"perturbed": true and a "perturb" parameter record, and units_meta.json
+records the config ("perturbation", null when off). Rerunning into a
+directory extracted with a different perturbation config raises UnitsMismatch.
+
 Usage:
   # 1. fit the teacher's k-means (writes km100_centroids.npy + km100_meta.json)
   extract_units.py --fit-kmeans --manifest librispeech-train-clean-100.jsonl \\
@@ -82,10 +91,25 @@ def fit_kmeans(args, rows, manifests, log=print):
 
 
 def extract(args, rows, manifests, log=print):
+    from fvml import augment
     out_dir = pathlib.Path(args.out_dir)
     tok = units.make_tokenizer(args.tokenizer, centroids=args.centroids,
                                checkpoint=args.checkpoint, device=args.device)
     meta = {**tok.meta, "manifests": [str(m) for m in manifests], "created": units.now()}
+    perturb_cfg = None
+    if args.perturb_fraction > 0.0:
+        lo, hi = (float(v) for v in args.perturb_formant.split(","))
+        perturb_cfg = augment.PerturbConfig(formant_range=(lo, hi),
+                                            pitch_st=args.perturb_pitch_st,
+                                            fraction=args.perturb_fraction)
+        meta["perturbation"] = {"fraction": args.perturb_fraction,
+                                "formant_range": [lo, hi],
+                                "pitch_st": args.perturb_pitch_st,
+                                "eq_gain_db": perturb_cfg.eq_gain_db,
+                                "seed": args.perturb_seed,
+                                "conditioning": "clean"}
+    else:
+        meta["perturbation"] = None
     done = {}
     if (out_dir / units.META_FILE).is_file():
         old, old_rows = units.read_units_dir(out_dir)
@@ -93,7 +117,8 @@ def extract(args, rows, manifests, log=print):
 
         def identity(m):
             s = m.get("source", {})
-            return m.get("tokenizer"), s.get("revision"), s.get("checkpoint_sha256")
+            return (m.get("tokenizer"), s.get("revision"), s.get("checkpoint_sha256"),
+                    m.get("perturbation"))
         if identity(old) != identity(meta):
             raise units.UnitsMismatch(f"{out_dir} holds {old.get('tokenizer')} units from another "
                                       "model/checkpoint; use a new --out-dir")
@@ -110,14 +135,24 @@ def extract(args, rows, manifests, log=print):
             skipped += 1
             continue
         wav = audio.load(paths.resolve(r["path"]))
+        perturbed = augment.should_perturb(r["utt_id"], args.perturb_fraction,
+                                           args.perturb_seed) \
+            if perturb_cfg else False
+        perturb_info = None
+        if perturbed:
+            wav, perturb_info = augment.perturb_speaker(
+                wav, augment.perturb_rng(r["utt_id"], args.perturb_seed), cfg=perturb_cfg)
         ids, logits = tok.encode(wav)
         name = units.safe_name(r["utt_id"])
         np.save(out_dir / f"{name}.npy", ids)
         if args.save_logits and logits is not None:
             np.save(out_dir / f"{name}.logits.npy", logits)
         frames += len(ids)
-        out_rows.append({"utt_id": r["utt_id"], "units": f"{name}.npy", "n_frames": int(len(ids)),
-                         "path": r["path"], **{k: r[k] for k in units.COPY_FIELDS if k in r}})
+        row = {"utt_id": r["utt_id"], "units": f"{name}.npy", "n_frames": int(len(ids)),
+               "path": r["path"], **{k: r[k] for k in units.COPY_FIELDS if k in r}}
+        if perturbed:
+            row.update(perturbed=True, perturb=perturb_info)
+        out_rows.append(row)
         if (i + 1) % 200 == 0:
             el = time.monotonic() - t0
             log(f"  {i + 1}/{len(todo)} utterances, {frames} frames, {el:.0f} s")
@@ -158,6 +193,14 @@ def main(argv=None):
     g.add_argument("--max-frames", type=int, default=500_000,
                    help="reservoir size: frames the k-means sees (500k x 768 floats = 1.5 GB)")
     g.add_argument("--seed", type=int, default=0)
+    h = p.add_argument_group("speaker perturbation (Stage 10)")
+    h.add_argument("--perturb-fraction", type=float, default=0.0,
+                   help="fraction of clips encoded from a perturbed copy (0 = off)")
+    h.add_argument("--perturb-seed", type=int, default=0)
+    h.add_argument("--perturb-formant", default="0.10,0.15",
+                   help="formant ratio |1 - r| range, e.g. 0.10,0.15")
+    h.add_argument("--perturb-pitch-st", type=float, default=2.0,
+                   help="pitch shift range in semitones (uniform ±)")
     args = p.parse_args(argv)
     if args.device is None:
         import torch

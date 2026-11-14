@@ -6,16 +6,26 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
+
+#ifndef FLUXVOICE_SOURCE_DIR
+#define FLUXVOICE_SOURCE_DIR ""
+#endif
 
 namespace fluxvoice {
 
@@ -38,6 +48,18 @@ std::string fmt_float(float v) {
     std::ostringstream o;
     o << v;
     return o.str();
+}
+
+/// Does `s` end with `suffix`, ASCII case-insensitively?
+bool ends_with_ci(std::string_view s, std::string_view suffix) {
+    if (s.size() < suffix.size()) return false;
+    const std::string_view tail = s.substr(s.size() - suffix.size());
+    for (std::size_t i = 0; i < suffix.size(); ++i) {
+        const unsigned char a = static_cast<unsigned char>(tail[i]);
+        const unsigned char b = static_cast<unsigned char>(suffix[i]);
+        if (std::tolower(a) != std::tolower(b)) return false;
+    }
+    return true;
 }
 
 /// Optional non-empty string field; a wrong type is a warning, not an error.
@@ -109,6 +131,10 @@ PresetLoadResult parse_preset(std::string_view json_text) {
                 float v = 0.0f;
                 if (it->is_boolean()) {
                     v = it->get<bool>() ? 1.0f : 0.0f;
+                    if (d->kind != ParamKind::Toggle)
+                        r.warnings.push_back("params: '" + it.key() +
+                                             "' is not a toggle; JSON boolean read as " +
+                                             fmt_float(v));
                 } else if (it->is_number()) {
                     v = it->get<float>();
                 } else {
@@ -209,6 +235,145 @@ std::vector<fs::path> list_preset_files(const fs::path& dir) {
     std::sort(files.begin(), files.end(),
               [](const fs::path& a, const fs::path& b) { return a.filename() < b.filename(); });
     return files;
+}
+
+namespace {
+
+std::string lower_copy(std::string_view s) {
+    std::string out(s);
+    for (char& c : out)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return out;
+}
+
+} // namespace
+
+std::vector<fs::path> preset_search_dirs(const fs::path& user_dir, const fs::path& exe_dir) {
+    std::vector<fs::path> dirs;
+    const auto add = [&](const fs::path& dir) {
+        if (dir.empty()) return;
+        std::error_code ec;
+        if (!fs::is_directory(dir, ec)) return;
+        fs::path key = fs::weakly_canonical(dir, ec);
+        if (ec) key = dir;
+        if (std::find(dirs.begin(), dirs.end(), key) == dirs.end()) dirs.push_back(key);
+    };
+    add(user_dir);
+    add(exe_dir / "presets");
+    const std::string src = FLUXVOICE_SOURCE_DIR;
+    if (!src.empty()) add(fs::path(src) / "presets");
+    std::error_code ec;
+    const fs::path cwd = fs::current_path(ec);
+    if (!ec) add(cwd / "presets");
+    return dirs;
+}
+
+PresetLoadResult resolve_preset(std::string_view name_or_path, std::span<const fs::path> dirs) {
+    if (ends_with_ci(name_or_path, ".json") || name_or_path.find('/') != std::string_view::npos ||
+        name_or_path.find('\\') != std::string_view::npos)
+        return load_preset_file(fs::path(name_or_path));
+
+    const std::string wanted = lower_copy(name_or_path);
+    std::string available;
+    for (const fs::path& dir : dirs) {
+        for (const fs::path& file : list_preset_files(dir)) {
+            if (lower_copy(file.stem().string()) == wanted) return load_preset_file(file);
+            PresetLoadResult r = load_preset_file(file);
+            if (!available.empty()) available += ", ";
+            available += r.ok() ? r.preset->name : file.stem().string();
+            if (r.ok() && lower_copy(r.preset->name) == wanted) return r;
+        }
+    }
+    PresetLoadResult r;
+    r.error = "unknown preset '" + std::string(name_or_path) + "' (available: " + available + ")";
+    return r;
+}
+
+bool parse_param_assignment(std::string_view text, const ParamDesc*& desc, float& value,
+                            std::string& warning, std::string& error) {
+    desc = nullptr;
+    value = 0.0f;
+    warning.clear();
+    error.clear();
+    const std::size_t eq = text.find('=');
+    if (eq == std::string_view::npos || eq == 0 || eq + 1 >= text.size()) {
+        error = "expected name=value, got '" + std::string(text) + "'";
+        return false;
+    }
+    const std::string_view name = text.substr(0, eq);
+    const std::string_view rhs = text.substr(eq + 1);
+    desc = find_param(name);
+    if (!desc) {
+        error = "unknown parameter '" + std::string(name) + "'";
+        if (name == "voice_a" || name == "voice_b")
+            error += " (use --voice/--voice-b to select voices)";
+        return false;
+    }
+    float v = 0.0f;
+    if (desc->kind == ParamKind::Toggle &&
+        (rhs == "on" || rhs == "off" || rhs == "true" || rhs == "false")) {
+        v = (rhs == "on" || rhs == "true") ? 1.0f : 0.0f;
+    } else {
+        double dv = 0.0;
+        if (!parse_finite_float(rhs, dv)) {
+            error = "expected name=value ('" + std::string(rhs) + "' is not a finite number)";
+            return false;
+        }
+        v = static_cast<float>(dv);
+    }
+    const float clamped = clamp_param(*desc, v);
+    if (v < desc->min || v > desc->max)
+        warning = "'" + std::string(name) + "' = " + fmt_float(v) + " is outside [" +
+                  fmt_float(desc->min) + ", " + fmt_float(desc->max) + "]; using " +
+                  fmt_float(clamped);
+    else if (clamped != v)
+        warning = "'" + std::string(name) + "' = " + fmt_float(v) + " rounded to " +
+                  format_param_value(*desc, clamped);
+    value = clamped;
+    return true;
+}
+
+bool parse_finite_float(std::string_view text, double& out) {
+    // Floating-point std::from_chars is unavailable on Apple libc++ with our
+    // macOS 13.0 deployment target, so parse with std::strtod instead. The
+    // program never calls setlocale, so strtod always uses the C locale.
+    out = 0.0;
+    if (text.empty() || text.size() > 63) return false;
+    // strtod would silently skip leading whitespace; reject it ourselves.
+    if (std::isspace(static_cast<unsigned char>(text.front()))) return false;
+    char buf[64];
+    std::memcpy(buf, text.data(), text.size());
+    buf[text.size()] = '\0';
+    errno = 0;
+    char* end = nullptr;
+    const double v = std::strtod(buf, &end);
+    if (end == buf || end != buf + text.size() || errno == ERANGE || !std::isfinite(v))
+        return false;
+    out = v;
+    return true;
+}
+
+std::string format_param_value(const ParamDesc& d, float v) {
+    std::ostringstream o;
+    switch (d.kind) {
+        case ParamKind::Toggle:     return v >= 0.5f ? "on" : "off";
+        case ParamKind::Integer:    o << static_cast<long long>(std::lround(v)); break;
+        case ParamKind::Continuous: o << v; break;
+    }
+    return o.str();
+}
+
+std::string params_table_text() {
+    std::ostringstream o;
+    o << "name            unit   range            default  smoothing                    tier     help\n";
+    for (const ParamDesc& d : kParams) {
+        char left[128];
+        std::snprintf(left, sizeof(left), "%-15s %-6s [%5g, %5g]    %-8g %-26s %-8s ",
+                      std::string(d.name).c_str(), std::string(d.unit).c_str(), d.min, d.max,
+                      d.def, to_string(d.smoothing), to_string(d.tier));
+        o << left << d.help << '\n';
+    }
+    return o.str();
 }
 
 const char* to_string(ParamKind k) {

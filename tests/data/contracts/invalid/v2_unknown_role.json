@@ -1,0 +1,22 @@
+{
+  "description": "Unknown role under contract_version 2",
+  "error": "unknown role 'translator' (expected encoder, translator_enc, translator_dec or vocoder)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "latent_dim": 128,
+        "max_src_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0},
+        "has_readiness_output": false,
+        "states": ["src_pos", "mem_k_0"],
+        "license": "MIT"
+      }
+    }
+  ]
+}

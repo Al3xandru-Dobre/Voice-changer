@@ -9,8 +9,9 @@ speaker embedding) -> 16 kHz waveform using strictly causal convolutions
 Data:
   - Repeatable --train-manifest (JSONL audio rows) joined by utt_id with
     repeatable --train-units (teacher-km100 or student/Mimi units directories).
-  - Clips listed in --exclude-targets (default eval_lists/targets.tsv) are
-    excluded from training so target-similarity references stay held out.
+  - Clips listed in --exclude-targets (default eval_lists/targets.tsv;
+    comma-separated TSVs, e.g. public targets + <speaker>_targets.tsv so
+    held-out own-voice clips never train) are excluded from training.
   - Conditioning features [logf0_held, voicing, aperiodicity, log_energy] are
     extracted from each speaker's *own* audio with the Stage 03 causal YIN
     tracker (fvml/features.py). Per-speaker F0/energy mean & std are computed
@@ -29,6 +30,18 @@ Usage:
       --run-name voc_a
   train_unit_vocoder.py ... --run-name voc_a --resume auto
   train_unit_vocoder.py ... --finetune-from checkpoints/voc_a/final.pt --steps 50000 --run-name voc_ft
+
+Stage 10 target-voice fine-tune recipe (Documents/Milestone 2/10_*.md):
+  # prepare_target_voice.py -> <data>/private/me/{train.jsonl, me_targets.tsv,
+  #   speaker_metadata.json}; extract_units.py --perturb-fraction 0.5 on it
+  train_unit_vocoder.py \\
+      --train-manifest <public manifests> --train-manifest <data>/private/me/train.jsonl \\
+      --train-units <public units> --train-units <data>/units/<winner>/me \\
+      --exclude-targets eval_lists/targets.tsv,<data>/private/me/me_targets.tsv \\
+      --finetune-from checkpoints/<base>/final.pt \\
+      --new-speaker-init nearest --mix-speakers me --mix-ratio 0.5 \\
+      --speaker-metadata <data>/private/me/speaker_metadata.json \\
+      --early-stop-patience 3 --val-utmos --steps 50000 --run-name voc_me
 
 Exit status: 0 = trained, 1 = missing or inconsistent inputs.
 """
@@ -65,16 +78,105 @@ def validate_speaker_name(name):
     return name
 
 
+# Injectable for tests: heavy models are built lazily on first use.
+UTMOS_FN = None       # defaults to mos.Utmos(device).score
+EMBED_FN = None       # defaults to speaker.Ecapa(device).embed
+
+
+def _lazy_utmos(device):
+    holder = {}
+
+    def fn(waves):
+        if "u" not in holder:
+            from fvml import mos
+            holder["u"] = mos.Utmos(device)
+        return holder["u"].score(waves)
+
+    return fn
+
+
+def _lazy_embed(device):
+    holder = {}
+
+    def fn(waves):
+        if "e" not in holder:
+            from fvml import speaker
+            holder["e"] = speaker.Ecapa(device)
+        return holder["e"].embed(waves)
+
+    return fn
+
+
+def nearest_speaker(new_items, existing_items_by_speaker, embed_fn,
+                    max_utts=20, max_seconds=10, speaker_name="(new)",
+                    log=print):
+    """ECAPA centroid of the new speaker's items vs each existing speaker's ->
+    (nearest_name, {speaker: cosine}). Items are (audio_path, ...) tuples;
+    embed_fn([wave]) -> L2-normalised [N, D] embeddings. Existing speakers
+    with no training items are skipped (logged); an empty new speaker or no
+    candidates at all is a ValueError naming it."""
+    from fvml import speaker
+    if not new_items:
+        raise ValueError(f"new speaker '{speaker_name}' has no training items")
+    existing = {s: its for s, its in existing_items_by_speaker.items() if its}
+    for s in existing_items_by_speaker.keys() - existing.keys():
+        log(f"[train] nearest speaker init: skipping '{s}' (no training items)")
+    if not existing:
+        raise ValueError(f"nearest speaker init for '{speaker_name}': no existing "
+                         "speaker has training items")
+
+    def centroid_of(items):
+        picked = items if len(items) <= max_utts \
+            else evallist.evenly_spaced(items, max_utts)
+        waves = [audio.load(it[0])[: int(max_seconds * audio.SAMPLE_RATE)]
+                 for it in picked]
+        return speaker.centroid(embed_fn(waves))
+
+    c_new = centroid_of(new_items)
+    cosines = {s: float(c_new @ centroid_of(its)) for s, its in existing.items()}
+    return max(cosines, key=cosines.get), cosines
+
+
+class EarlyStopper:
+    """A validation counts as improved when val mel improves, or (with UTMOS
+    validation) mean val UTMOS improves by > 0.01. `stop` after `patience`
+    validations without improvement. best.pt stays chosen by mel alone."""
+
+    def __init__(self, patience):
+        self.patience = int(patience)
+        self.since = 0
+        self.best_val = float("inf")
+        self.best_utmos = float("-inf")
+
+    def update(self, val_mel, utmos=None):
+        improved = val_mel < self.best_val
+        if improved:
+            self.best_val = val_mel
+        if utmos is not None and utmos > self.best_utmos + 0.01:
+            improved = True
+            self.best_utmos = float(utmos)
+        self.since = 0 if improved else self.since + 1
+        return improved
+
+    @property
+    def stop(self):
+        return self.patience > 0 and self.since >= self.patience
+
+
 # -- data & speaker stats -----------------------------------------------------
 def load_excluded_ids(targets_path):
-    """Set of clip_ids and relative paths in targets.tsv that must stay held out."""
-    if not targets_path:
-        return set(), set()
-    p = pathlib.Path(targets_path)
-    if not p.is_file():
-        return set(), set()
-    rows = evallist.read_targets(p)
-    return {r["clip_id"] for r in rows}, {r["path"] for r in rows}
+    """Set of clip_ids and relative paths in the targets TSV(s) (comma-separated)
+    that must stay held out."""
+    ids, pths = set(), set()
+    for spec in (targets_path or "").split(","):
+        spec = spec.strip()
+        p = pathlib.Path(spec) if spec else None
+        if not p or not p.is_file():
+            continue
+        rows = evallist.read_targets(p)
+        ids.update(r["clip_id"] for r in rows)
+        pths.update(r["path"] for r in rows)
+    return ids, pths
 
 
 def read_all_units_dirs(specs):
@@ -309,6 +411,39 @@ class WeightedStream(torch.utils.data.Sampler):
             yield from torch.multinomial(self.w, self.chunk, replacement=True, generator=g).tolist()
 
 
+class MixedBatchSampler(torch.utils.data.Sampler):
+    """Endless batches for the Stage 10 fine-tune mix: each batch is drawn
+    entirely from the mix group (`in_group_mask`) with probability `ratio`,
+    else entirely from the rest. Within a group, items are drawn
+    proportionally to `weights` like WeightedStream (length-weighted)."""
+
+    def __init__(self, weights, in_group_mask, batch_size, ratio, seed):
+        w = torch.as_tensor(weights, dtype=torch.double)
+        m = torch.as_tensor(in_group_mask, dtype=torch.bool)
+        if w.numel() != m.numel():
+            raise ValueError("weights and in_group_mask must have the same length")
+        if not bool(m.any()):
+            raise ValueError("--mix-speakers selects no training items")
+        if bool(m.all()):
+            raise ValueError("--mix-speakers selects every training item")
+        if not 0.0 < ratio < 1.0:
+            raise ValueError(f"--mix-ratio must be in (0, 1), got {ratio}")
+        zero = torch.zeros_like(w)
+        self.w_in = torch.where(m, w, zero)
+        self.w_out = torch.where(m, zero, w)
+        self.batch_size = int(batch_size)
+        self.ratio = float(ratio)
+        self.seed = int(seed)
+
+    def __iter__(self):
+        g = torch.Generator().manual_seed(self.seed)
+        while True:
+            pick_in = bool(torch.rand((), generator=g) < self.ratio)
+            w = self.w_in if pick_in else self.w_out
+            yield torch.multinomial(w, self.batch_size, replacement=True,
+                                    generator=g).tolist()
+
+
 def worker_init(_):
     torch.set_num_threads(1)
 
@@ -352,10 +487,11 @@ def select_val_items(items, limit):
 
 @torch.no_grad()
 def validate(gen, mel_loss_fn, items, unit_repeat, device, limit,
-             lookahead_frames=0, per_speaker_out=None):
+             lookahead_frames=0, per_speaker_out=None, collect_preds=False):
     gen.eval()
     subset = select_val_items(items, limit)
     losses = []
+    preds = []
     by_spk = {}
     for apath, upath, n_u, spk_idx, spk in subset:
         take_u = min(n_u, max(1, 250 // unit_repeat))    # cap at ~5 s per val utterance
@@ -375,12 +511,15 @@ def validate(gen, mel_loss_fn, items, unit_repeat, device, limit,
         val = float(mel_l1)
         losses.append(val)
         by_spk.setdefault(spk, []).append(val)
+        if collect_preds:
+            preds.append(pred.squeeze(0).float().cpu().numpy())
     if isinstance(per_speaker_out, dict):
         per_speaker_out.clear()
         for s, vals in by_spk.items():
             per_speaker_out[s] = float(np.mean(vals))
     gen.train()
-    return float(np.mean(losses)) if losses else 0.0
+    val_mel = float(np.mean(losses)) if losses else 0.0
+    return (val_mel, preds) if collect_preds else val_mel
 
 
 def rng_state():
@@ -403,9 +542,10 @@ def set_rng_state(s):
 
 
 def save_checkpoint(path, gen, disc, opt_g, opt_d, sched_g, sched_d, step, args,
-                    labels_meta, speakers, speaker_stats, extra):
+                    labels_meta, speakers, speaker_stats, extra,
+                    extra_metadata=None):
     path.parent.mkdir(parents=True, exist_ok=True)
-    voices_dict = gen.voices_json(speakers, speaker_stats)
+    voices_dict = gen.voices_json(speakers, speaker_stats, extra_metadata)
     contract_json = gen.contract(1).to_json()
     tmp = path.with_name(path.name + ".tmp")
     torch.save({
@@ -485,7 +625,25 @@ def train(args, log=print):
     mel_loss_fn = vocoder.MultiResolutionMelLoss(audio.SAMPLE_RATE).to(device)
 
     step, best_val, elapsed0 = 0, float("inf"), 0.0
+    best_utmos = None
+    stopped_early = False
     speaker_stats = {}
+    # Resuming keeps the prior checkpoint's speaker_init records; a fresh
+    # fine-tune replaces/extends them below when rows are added.
+    speaker_init = dict(prior_ck.get("speaker_init") or {}) if prior_ck is not None else {}
+    early_stop_since = 0
+    # Stage 10: private voice display/licence. CLI metadata wins over whatever
+    # the prior checkpoint stored; both end up in the new checkpoint and in
+    # voices.json via gen.voices_json's extra_metadata.
+    speaker_metadata = {}
+    if prior_ck is not None and prior_ck.get("speaker_metadata"):
+        pm = prior_ck["speaker_metadata"]
+        speaker_metadata.update(json.loads(pm) if isinstance(pm, str) else pm)
+    if args.speaker_metadata:
+        mp = pathlib.Path(args.speaker_metadata)
+        if not mp.is_file():
+            raise FileNotFoundError(f"--speaker-metadata {mp} not found")
+        speaker_metadata.update(json.loads(mp.read_text(encoding="utf-8")))
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -499,8 +657,38 @@ def train(args, log=print):
         old_cfg = vocoder.VocoderConfig.from_dict(json.loads(prior_ck["config"]))
         old_gen = vocoder.UnitVocoder(old_cfg)
         old_gen.load_state_dict(prior_ck["model"])
-        if len(speakers) > old_cfg.n_speakers:
-            old_gen.expand_speakers(len(speakers), init_from_row=0)
+        new_speakers = speakers[old_cfg.n_speakers:] if len(speakers) > old_cfg.n_speakers else []
+        if new_speakers:
+            # Stage 10: each new row is initialised per --new-speaker-init:
+            # "first" copies row 0 (the pre-Stage-10 behaviour), "nearest"
+            # picks the ECAPA-closest existing row, or a named existing row.
+            mode = str(args.new_speaker_init).strip()
+            if mode == "first":
+                old_gen.expand_speakers(len(speakers), init_from_row=0)
+                speaker_init.update({s: {"from": speakers[0], "cosines": {}}
+                                     for s in new_speakers})
+            else:
+                old_gen.expand_speakers(len(speakers), init_from_row=None)
+                existing = speakers[: old_cfg.n_speakers]
+                if mode != "nearest" and mode not in existing:
+                    raise ValueError(
+                        f"--new-speaker-init {mode!r}: expected 'first', 'nearest' "
+                        f"or one of the existing speakers {existing}")
+                by_spk = {s: [it for it in train_items if it[4] == s] for s in existing}
+                embed_fn = EMBED_FN or _lazy_embed(device)
+                for i, s in enumerate(new_speakers):
+                    if mode == "nearest":
+                        src, cosines = nearest_speaker(
+                            [it for it in train_items if it[4] == s], by_spk,
+                            embed_fn, speaker_name=s)
+                    else:
+                        src, cosines = mode, {}
+                    with torch.no_grad():
+                        old_gen.speaker_table.weight[old_cfg.n_speakers + i].copy_(
+                            old_gen.speaker_table.weight[speakers.index(src)])
+                    speaker_init[s] = {"from": src, "cosines": cosines}
+            log(f"[train] new speaker row(s): "
+                + ", ".join(f"{s} <- {speaker_init[s]['from']}" for s in new_speakers))
         if old_gen.cfg != cfg:
             raise ValueError("checkpoint vocoder config does not match this run's")
         gen.load_state_dict(old_gen.state_dict())
@@ -517,7 +705,7 @@ def train(args, log=print):
         )
 
     # Validate voices.json schema upfront before any training step runs (F-4).
-    gen.voices_json(speakers, speaker_stats)
+    gen.voices_json(speakers, speaker_stats, speaker_metadata)
 
     opt_g = torch.optim.AdamW(gen.parameters(), lr=args.lr, betas=(0.8, 0.99),
                               weight_decay=args.weight_decay)
@@ -536,6 +724,8 @@ def train(args, log=print):
         set_rng_state(prior_ck["rng"])
         step = int(prior_ck["step"])
         best_val = float(prior_ck.get("best_val", float("inf")))
+        best_utmos = prior_ck.get("best_utmos")
+        early_stop_since = int(prior_ck.get("early_stop_since", 0))
         elapsed0 = float(prior_ck.get("elapsed", 0.0))
         log(f"[train] resumed {resume} at step {step}")
     elif args.finetune_from:
@@ -552,13 +742,31 @@ def train(args, log=print):
     crop_u = max(1, round(args.segment_samples / cfg.frame_samples))
     ds = VocoderCropDataset(train_items, crop_u, unit_repeat=cfg.unit_repeat,
                             lookahead_frames=cond_lookahead)
-    sampler = WeightedStream([max(n, crop_u) for _, _, n, _, _ in train_items],
-                             seed=args.seed * 1_000_003 + step)
-    loader = torch.utils.data.DataLoader(
-        ds, batch_size=args.batch_size, sampler=sampler, num_workers=args.workers,
-        pin_memory=device.type == "cuda", drop_last=True, worker_init_fn=worker_init,
-        persistent_workers=args.workers > 0, prefetch_factor=4 if args.workers > 0 else None
-    )
+    weights = [max(n, crop_u) for _, _, n, _, _ in train_items]
+    mix_names = {s.strip() for s in (args.mix_speakers or "").split(",") if s.strip()}
+    if mix_names:
+        unknown = mix_names - set(speakers)
+        if unknown:
+            raise ValueError(f"--mix-speakers: unknown speaker(s) {sorted(unknown)}")
+        in_group = [it[4] in mix_names for it in train_items]
+        batch_sampler = MixedBatchSampler(weights, in_group, args.batch_size,
+                                          args.mix_ratio,
+                                          seed=args.seed * 1_000_003 + step)
+        log(f"[train] mix: {sum(in_group)} of {len(train_items)} utterances in the "
+            f"mix group {sorted(mix_names)}, batch-level ratio {args.mix_ratio}")
+        loader = torch.utils.data.DataLoader(
+            ds, batch_sampler=batch_sampler, num_workers=args.workers,
+            pin_memory=device.type == "cuda", worker_init_fn=worker_init,
+            persistent_workers=args.workers > 0,
+            prefetch_factor=4 if args.workers > 0 else None
+        )
+    else:
+        sampler = WeightedStream(weights, seed=args.seed * 1_000_003 + step)
+        loader = torch.utils.data.DataLoader(
+            ds, batch_size=args.batch_size, sampler=sampler, num_workers=args.workers,
+            pin_memory=device.type == "cuda", drop_last=True, worker_init_fn=worker_init,
+            persistent_workers=args.workers > 0, prefetch_factor=4 if args.workers > 0 else None
+        )
 
     from torch.utils.tensorboard import SummaryWriter
     writer = SummaryWriter(str(pathlib.Path(args.runs_dir) / run), purge_step=step if resume else None)
@@ -578,9 +786,20 @@ def train(args, log=print):
         save_checkpoint(
             ckpt_dir / name, gen, disc, opt_g, opt_d, sched_g, sched_d, step, args,
             labels_meta_clean, speakers, speaker_stats,
-            {"best_val": best_val, "run_name": run,
-             "elapsed": elapsed0 + time.monotonic() - t_start}
+            {"best_val": best_val, "best_utmos": best_utmos,
+             "stopped_early": stopped_early, "speaker_init": speaker_init,
+             "early_stop_since": stopper.since,
+             "speaker_metadata": speaker_metadata, "run_name": run,
+             "elapsed": elapsed0 + time.monotonic() - t_start},
+            extra_metadata=speaker_metadata
         )
+
+    stopper = EarlyStopper(args.early_stop_patience)
+    stopper.since = early_stop_since            # restored on --resume
+    stopper.best_val = best_val
+    if best_utmos is not None:
+        stopper.best_utmos = float(best_utmos)
+    utmos_fn = UTMOS_FN or _lazy_utmos(device)
 
     gen.train()
     disc.train()
@@ -676,18 +895,37 @@ def train(args, log=print):
 
         if val_items and (step % args.val_every == 0 or step == args.steps):
             per_spk_val = {}
-            val_mel = validate(gen, mel_loss_fn, val_items, cfg.unit_repeat, device,
-                               args.val_limit, lookahead_frames=cond_lookahead,
-                               per_speaker_out=per_spk_val)
+            val_utmos = None
+            if args.val_utmos:
+                val_mel, preds = validate(
+                    gen, mel_loss_fn, val_items, cfg.unit_repeat, device,
+                    args.val_limit, lookahead_frames=cond_lookahead,
+                    per_speaker_out=per_spk_val, collect_preds=True)
+                val_utmos = float(np.mean(utmos_fn(preds))) if preds else None
+                if val_utmos is not None:
+                    writer.add_scalar("val/utmos", val_utmos, step)
+            else:
+                val_mel = validate(gen, mel_loss_fn, val_items, cfg.unit_repeat, device,
+                                   args.val_limit, lookahead_frames=cond_lookahead,
+                                   per_speaker_out=per_spk_val)
             writer.add_scalar("val/loss_mel", val_mel, step)
             for spk_name, spk_mel in per_spk_val.items():
                 writer.add_scalar(f"val/loss_mel_{spk_name}", spk_mel, step)
             spk_str = (" (" + ", ".join(f"{k}={v:.3f}" for k, v in per_spk_val.items()) + ")"
                        if len(per_spk_val) > 1 else "")
-            log(f"[val] step {step}: mel_l1 {val_mel:.4f}{spk_str}")
+            utmos_str = f"  utmos {val_utmos:.3f}" if val_utmos is not None else ""
+            log(f"[val] step {step}: mel_l1 {val_mel:.4f}{spk_str}{utmos_str}")
             if val_mel < best_val:
                 best_val = val_mel
                 checkpoint("best.pt")
+            if val_utmos is not None and (best_utmos is None or val_utmos > best_utmos):
+                best_utmos = val_utmos
+            stopper.update(val_mel, val_utmos)
+            if stopper.stop:
+                stopped_early = True
+                log(f"[train] early stop at step {step}: no validation improvement "
+                    f"for {stopper.patience} validation(s)")
+                break
 
         due = (time.monotonic() - t_ckpt >= args.ckpt_minutes * 60
                or (args.ckpt_steps and step % args.ckpt_steps == 0))
@@ -722,7 +960,8 @@ def parse_args(argv=None):
     p.add_argument("--val-limit", type=int, default=50)
     p.add_argument("--val-every", type=int, default=2000)
     p.add_argument("--exclude-targets", default=str(paths.EVAL_LISTS / "targets.tsv"),
-                   help="held-out target reference TSV to exclude from training ('' = none)")
+                   help="held-out target reference TSV(s), comma-separated, to exclude "
+                        "from training ('' = none)")
     p.add_argument("--upsample-initial-channel", type=int, default=128,
                    help="generator initial width (128 = V2-class ~1M params; 256/512 = V1-class)")
     p.add_argument("--segment-samples", type=int, default=12800,
@@ -754,6 +993,21 @@ def parse_args(argv=None):
     p.add_argument("--log-every", type=int, default=100)
     p.add_argument("--resume", help="'auto' (<ckpt-dir>/<run>/last.pt if present) or a checkpoint path")
     p.add_argument("--finetune-from", help="initialize generator/discriminator from a trained checkpoint")
+    p.add_argument("--new-speaker-init", default="first", metavar="{first,nearest,NAME}",
+                   help="init for speaker rows added by --finetune-from: 'first' = copy "
+                        "row 0 (default), 'nearest' = ECAPA-closest existing row, or an "
+                        "existing speaker name")
+    p.add_argument("--mix-speakers", default=None,
+                   help="comma-separated speakers forming the fine-tune mix group (e.g. 'me')")
+    p.add_argument("--mix-ratio", type=float, default=0.5,
+                   help="probability a batch is drawn entirely from the mix group")
+    p.add_argument("--early-stop-patience", type=int, default=0,
+                   help="stop after N validations without improvement (0 = off)")
+    p.add_argument("--val-utmos", action="store_true",
+                   help="score validation resynthesis with UTMOS (early stopping, tensorboard)")
+    p.add_argument("--speaker-metadata", default=None,
+                   help="JSON {speaker: {display, license, source}} merged into the "
+                        "checkpoint's speaker_metadata and voices.json")
     return p.parse_args(argv)
 
 

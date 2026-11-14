@@ -1,0 +1,22 @@
+{
+  "description": "chunk_samples exceeding 1 second at sample_rate is rejected",
+  "error": "chunk_samples (19200 samples) is longer than one second at sample_rate 16000",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_enc",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 60,
+        "latent_dim": 128,
+        "max_src_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_readiness_output": false,
+        "states": ["src_pos", "mem_k_0"],
+        "license": "MIT"
+      }
+    }
+  ]
+}

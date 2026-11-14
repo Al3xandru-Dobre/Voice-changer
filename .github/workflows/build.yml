@@ -87,10 +87,8 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure -C Release
 
-  # Milestone 2 stage 02 tests that need onnx / onnxruntime (BUG-009): fixture
-  # byte-identical regeneration and ORT bit-exactness. A full `uv sync --frozen`
-  # would pull the CUDA torch wheels, so install only this subset, at the
-  # versions uv.lock pins (with their unconditional dependencies).
+  # Milestone 2 & 3 contract, ONNX fixture, S2UT data-prep & SimulEval tests
+  # (BUG-009): runs with the CPU/wheel subset of uv.lock (no CUDA torch wheels).
   python-m2:
     name: python-m2-contract
     runs-on: ubuntu-latest
@@ -104,13 +102,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install the pinned ONNX subset of uv.lock
+      - name: Install the pinned ONNX & S2UT harness subset of uv.lock
         run: |
           python - > ci-requirements.txt <<'EOF'
           import tomllib
           with open("python_training/uv.lock", "rb") as f:
               pkgs = {p["name"]: p for p in tomllib.load(f)["package"]}
-          todo, pins = ["numpy", "onnx", "onnxruntime", "pytest"], {}
+          todo = ["numpy", "onnx", "onnxruntime", "pytest", "sacrebleu",
+                  "sentencepiece", "jiwer", "soundfile", "soxr"]
+          pins = {}
           while todo:
               name = todo.pop()
               if name in pins:
@@ -124,4 +124,7 @@ jobs:
 
       - name: Test
         working-directory: python_training
-        run: python -m pytest -q -p no:cacheprovider tests/test_contract.py tests/test_fixtures.py
+        run: >
+          python -m pytest -q -p no:cacheprovider
+          tests/test_contract.py tests/test_fixtures.py
+          tests/test_prepare_s2ut_data.py tests/test_eval_s2ut.py

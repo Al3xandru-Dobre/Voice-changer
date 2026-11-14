@@ -55,7 +55,7 @@ bool is_number(const json& j) {
 
 constexpr const char* kVoiceKeys[] = {"name", "display", "embedding", "logf0_mean", "logf0_std",
                                       "energy_mean", "energy_std", "license", "source"};
-constexpr const char* kVoiceOptionalKeys[] = {"attribution"};
+constexpr const char* kVoiceOptionalKeys[] = {"attribution", "lang"};
 
 bool known_voice_key(const std::string& k) {
     for (const char* n : kVoiceKeys)

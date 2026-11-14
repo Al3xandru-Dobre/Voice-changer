@@ -156,9 +156,12 @@ add_executable(fluxvoice
     src/pipeline/ModelBundle.cpp
     src/pipeline/OrtModel.cpp
     src/ui/AppWindow.cpp
+    src/voice/Presets.cpp
 )
 
 target_include_directories(fluxvoice PRIVATE src)
+# Preset search falls back to the source tree's presets/ in development builds.
+target_compile_definitions(fluxvoice PRIVATE FLUXVOICE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 find_package(Threads REQUIRED)
 
@@ -203,8 +206,10 @@ add_executable(fv_vc_file
     src/pipeline/InferencePipeline.cpp
     src/pipeline/ModelBundle.cpp
     src/pipeline/OrtModel.cpp
+    src/voice/Presets.cpp
 )
 target_include_directories(fv_vc_file PRIVATE src)
+target_compile_definitions(fv_vc_file PRIVATE FLUXVOICE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 target_link_libraries(fv_vc_file PRIVATE nlohmann_json_headers Threads::Threads)
 if(FLUXVOICE_HAS_ORT)
     fluxvoice_link_ort(fv_vc_file)
@@ -290,6 +295,24 @@ if(FLUXVOICE_BUILD_TESTS)
         src/pipeline/InferencePipeline.cpp tests/AllocationCounter.cpp)
     target_link_libraries(test_mode_a_worker PRIVATE nlohmann_json_headers)
     set_target_properties(test_mode_a_worker PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+
+    # M2 stage 09: descriptor table, presets, param channel, pipeline controls
+    # and the output chain — all ORT-free over the fake models. Links
+    # InferencePipeline + the allocation counter like the other hop-path tests.
+    add_executable(test_voice_params
+        tests/test_voice_params.cpp
+        src/voice/Presets.cpp
+        src/pipeline/InferencePipeline.cpp
+        tests/AllocationCounter.cpp)
+    target_include_directories(test_voice_params PRIVATE src tests)
+    target_link_libraries(test_voice_params PRIVATE
+        nlohmann_json_headers rwqueue_headers Threads::Threads)
+    target_compile_definitions(test_voice_params PRIVATE
+        FLUXVOICE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    set_target_properties(test_voice_params PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    fluxvoice_set_warnings(test_voice_params)
+    add_test(NAME voice_params COMMAND test_voice_params ${CMAKE_SOURCE_DIR}/presets)
+
     target_link_libraries(test_voice_catalog PRIVATE nlohmann_json_headers)
     add_test(NAME voice_catalog_fixture COMMAND test_voice_catalog
              ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity/voices.json)
@@ -333,13 +356,24 @@ if(FLUXVOICE_BUILD_TESTS)
                      -DFIXTURES=${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity
                      -DHAS_ORT=${FLUXVOICE_HAS_ORT}
                      -P ${CMAKE_SOURCE_DIR}/tests/check_vc_cli.cmake)
+
+    # M2 stage 09 CLI: --list-params/--list-presets and the --preset/--param
+    # rejections (all before ORT/audio).
+    add_test(NAME voice_cli
+             COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice>
+                     -DPRESETS=${CMAKE_SOURCE_DIR}/presets
+                     -DFIXTURES=${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity
+                     -DHAS_ORT=${FLUXVOICE_HAS_ORT}
+                     -P ${CMAKE_SOURCE_DIR}/tests/check_voice_cli.cmake)
     set_tests_properties(vc_file_help PROPERTIES PASS_REGULAR_EXPRESSION "Usage:")
     set(_vc_file_bad_no_args        --voice identity)
     set(_vc_file_bad_no_voice       --model-dir ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity in.wav out.wav)
     set(_vc_file_bad_fps            --model-dir ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity --voice identity --frames-per-step 3 in.wav out.wav)
     set(_vc_file_bad_missing_wavs   --model-dir ${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity --voice identity)
     set(_vc_file_bad_unknown_opt    --bogus)
-    foreach(_case no_args no_voice fps missing_wavs unknown_opt)
+    set(_vc_file_bad_param          --param bogus=1)
+    set(_vc_file_bad_change         --change abc)
+    foreach(_case no_args no_voice fps missing_wavs unknown_opt param change)
         add_test(NAME vc_file_rejects_${_case} COMMAND fv_vc_file ${_vc_file_bad_${_case}})
         set_tests_properties(vc_file_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()
@@ -432,6 +466,14 @@ if(FLUXVOICE_BUILD_TESTS)
         # The dynamo exporter prints emoji; keep a cp1252 console pipe from crashing it.
         set_tests_properties(python_training_stage06 PROPERTIES TIMEOUT 600
                              ENVIRONMENT "PYTHONIOENCODING=utf-8")
+        # M2 stages 09+10: offline eval drivers + target-voice prep/fine-tune
+        # tooling (CPU fakes only — no fv_vc_file or heavy models needed).
+        add_test(NAME python_training_stage09_10
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                         tests/test_target_voice.py tests/test_eval_controls.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        set_tests_properties(python_training_stage09_10 PROPERTIES TIMEOUT 600
+                             ENVIRONMENT "PYTHONIOENCODING=utf-8")
         if(FLUXVOICE_HAS_ORT)
             add_test(NAME python_training_stage07_golden
                      COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
@@ -439,7 +481,20 @@ if(FLUXVOICE_BUILD_TESTS)
                      WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
             set_tests_properties(python_training_stage07_golden PROPERTIES TIMEOUT 300
                                  ENVIRONMENT "PYTHONIOENCODING=utf-8;FLUXVOICE_VC_FILE=$<TARGET_FILE:fv_vc_file>")
+            # M2 stage 09: fv_vc_file voice controls on the identity fixture.
+            add_test(NAME python_training_stage09_controls
+                     COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                             tests/test_vc_file_controls.py
+                     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+            set_tests_properties(python_training_stage09_controls PROPERTIES TIMEOUT 300
+                                 ENVIRONMENT "PYTHONIOENCODING=utf-8;FLUXVOICE_VC_FILE=$<TARGET_FILE:fv_vc_file>")
         endif()
+        add_test(NAME python_training_m3_stage01
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                         tests/test_prepare_s2ut_data.py tests/test_eval_s2ut.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        set_tests_properties(python_training_m3_stage01 PROPERTIES TIMEOUT 300
+                             ENVIRONMENT "PYTHONIOENCODING=utf-8")
     endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)

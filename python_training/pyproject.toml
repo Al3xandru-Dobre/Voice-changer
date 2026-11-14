@@ -20,7 +20,7 @@
 [project]
 name = "fluxvoice-training"
 version = "0.1.0"
-description = "FluxVoice Mode A training, export and evaluation tooling"
+description = "FluxVoice Mode A & Mode B training, export and evaluation tooling"
 requires-python = "==3.12.*"
 dependencies = [
     "torch==2.11.0",
@@ -37,6 +37,9 @@ dependencies = [
     "speechbrain==1.1.2",
     "speechmos",
     "jiwer==4.0.0",
+    "sacrebleu==2.6.0",            # M3 Stage 01: ASR-BLEU (13a) & ASR-chrF++
+    "sentencepiece==0.2.3",        # M3 Stage 01/05: 6k-subword CTC vocabularies
+    "piper-tts==1.8.0",            # M3 Stage 01: canonical En->{Es,Fr,De} VITS TTS
     "praat-parselmouth>=0.4.5",
     "scikit-learn>=1.7",
     "pyloudnorm>=0.1.1",

@@ -1,0 +1,39 @@
+{
+  "description": "translator_dec graph omits a declared shared_mem_state input",
+  "error": "missing graph input 'mem_v_0'",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_dec",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "vocab": 1000,
+        "special_units": {"bos": 1000, "eos": 1001, "pad": 1002},
+        "max_src_steps": 128,
+        "max_tgt_steps": 128,
+        "shared_mem_states": ["mem_k_0", "mem_v_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_prosody_output": false,
+        "states": ["tgt_pos"],
+        "license": "MIT"
+      },
+      "graph": {
+        "inputs": [
+          {"name": "prev_units", "dtype": "i64", "shape": [1, 4]},
+          {"name": "tgt_lang", "dtype": "i64", "shape": [1]},
+          {"name": "prosody_ctx", "dtype": "f32", "shape": [1, 2]},
+          {"name": "src_pos", "dtype": "i64", "shape": [1]},
+          {"name": "mem_k_0", "dtype": "f32", "shape": [1, 4, 128, 64]},
+          {"name": "state_in.tgt_pos", "dtype": "i64", "shape": [1]}
+        ],
+        "outputs": [
+          {"name": "units", "dtype": "i64", "shape": [1, 4]},
+          {"name": "eos_prob", "dtype": "f32", "shape": [1, 1]},
+          {"name": "state_out.tgt_pos", "dtype": "i64", "shape": [1]}
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "description": "Contract version 0 is rejected",
+  "error": "unsupported contract_version 0 (this build reads versions 1 and 2)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 0,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "states": [],
+        "license": "MIT"
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "description": "v2-only key latent_dim on a v1 encoder",
+  "error": "key 'latent_dim' requires contract_version 2",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 1,
+        "role": "encoder",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "frames_per_step": 1,
+        "lookahead_frames": 0,
+        "content_kind": "discrete",
+        "vocab": 100,
+        "latent_dim": 128,
+        "states": [],
+        "license": "MIT"
+      }
+    }
+  ]
+}

@@ -58,14 +58,8 @@ if(FLUXVOICE_BUILD_GUI)
 endif()
 
 if(FLUXVOICE_BUILD_TESTS)
-    add_executable(test_voice_params
-        ${CMAKE_SOURCE_DIR}/tests/test_voice_params.cpp
-        ${CMAKE_SOURCE_DIR}/src/voice/Presets.cpp)
-    target_include_directories(test_voice_params PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-    target_link_libraries(test_voice_params PRIVATE nlohmann_json_headers)
-    fluxvoice_set_warnings(test_voice_params)
-    add_test(NAME voice_params COMMAND test_voice_params ${CMAKE_SOURCE_DIR}/presets)
-
+    # test_voice_params moved to the root CMakeLists (it now links
+    # InferencePipeline for the pipeline-level control tests).
     add_executable(test_frontend_model ${CMAKE_SOURCE_DIR}/tests/test_frontend_model.cpp)
     target_include_directories(test_frontend_model PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     target_link_libraries(test_frontend_model PRIVATE fluxvoice_frontend_core)

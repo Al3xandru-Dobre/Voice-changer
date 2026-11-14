@@ -1,10 +1,10 @@
 {
   "description": "A version this build does not know",
-  "error": "unsupported contract_version 2 (this build reads version 1)",
+  "error": "unsupported contract_version 3 (this build reads versions 1 and 2)",
   "models": [
     {
       "contract": {
-        "contract_version": 2,
+        "contract_version": 3,
         "role": "encoder",
         "sample_rate": 16000,
         "frame_samples": 320,

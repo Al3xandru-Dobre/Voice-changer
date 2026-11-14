@@ -95,8 +95,8 @@ C++ track: 02 (contract) ─► 07 (ORT C++) ──┴─► 08 (RT) ─► 09 �
 | 06 | [Stateful ONNX export & parity](06_stateful_onnx_export.md) | §8 | Model bundle (s1/s2/s4) + `voices.json`; parity report | ◐ exporter, parity, cost & golden I/O done; real trained bundle pending |
 | 07 | [ONNX Runtime C++ runtime](07_ort_cpp_runtime.md) | §9 | `OrtModel`, CMake import + DLL copy, `fv_vc_file` | ☑ |
 | 08 | [Real-time Mode A pipeline](08_realtime_mode_a_pipeline.md) | §3 §10 | `fluxvoice --vc` live; governor; telemetry | in progress: implementation and offline tests; live acceptance pending |
-| 09 | [Voice controls & presets](09_voice_controls_presets.md) | §11 | `VoiceParams` descriptor table; presets; console | ☐ |
-| 10 | [Target-voice recording & fine-tune](10_target_voice_finetune.md) | §6 | "Me" voice in the bundle | ☐ |
+| 09 | [Voice controls & presets](09_voice_controls_presets.md) | §11 | `VoiceParams` descriptor table; presets; console | ◐ engine/CLI unit-tested; offline DoD + live pending |
+| 10 | [Target-voice recording & fine-tune](10_target_voice_finetune.md) | §6 | "Me" voice in the bundle | ◐ |
 | 11 | [Verification & exit report](11_verification_exit.md) | §3 §7 | Measured latency/quality/soak; README pointers | ☐ |
 
 ## Latency budget
@@ -165,7 +165,7 @@ at 16 kHz with 10 ms device periods. The values are **estimates** until Stage
 | 2 | Content kind | Discrete km100 ids; soft units only if discrete fails the WER floor | Stage 04 |
 | 3 | Teacher | HuBERT-Base (English, MIT); mHuBERT-147 deferred to M3 (NC licence) | Stage 04 |
 | 4 | Hop / lookahead | Chosen by the gate (expected: L=1 at 20 ms hops) | Stage 05 |
-| 5 | Role of "own voice" | A target row ("Me") in the multi-speaker vocoder | Stage 10 |
+| 5 | Role of "own voice" | A target row ("Me") in the multi-speaker vocoder — **adopted** (Stage 10 tooling: `expand_speakers` + `--new-speaker-init`/`--mix-speakers` implemented; recording session pending) | Stage 10 |
 | 6 | `python_training/requirements.txt` | Generated from `uv.lock` (`uv export`) for non-uv users — **adopted** (Stage 01) | Stage 01 |
 | 7 | Encoder decision (filled by the gate) | — | Stage 05 |
 

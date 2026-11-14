@@ -1,0 +1,24 @@
+{
+  "description": "special_units bos/eos/pad values must be distinct",
+  "error": "special_units values must be distinct (got bos=1000, eos=1000, pad=1002)",
+  "models": [
+    {
+      "contract": {
+        "contract_version": 2,
+        "role": "translator_dec",
+        "sample_rate": 16000,
+        "frame_samples": 320,
+        "chunk_frames": 4,
+        "vocab": 1000,
+        "special_units": {"bos": 1000, "eos": 1000, "pad": 1002},
+        "max_src_steps": 128,
+        "max_tgt_steps": 128,
+        "shared_mem_states": ["mem_k_0"],
+        "langs": {"en": 0, "es": 1},
+        "has_prosody_output": false,
+        "states": ["tgt_pos"],
+        "license": "MIT"
+      }
+    }
+  ]
+}

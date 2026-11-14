@@ -50,6 +50,11 @@
 #include "pipeline/PipelineTiming.hpp"
 #include "util/ProcessMemory.hpp"
 #include "util/WorkerPriority.hpp"
+#include "voice/ParamChannel.hpp"
+#include "voice/Presets.hpp"
+#include "voice/VoiceParams.hpp"
+
+#include <readerwriterqueue.h>
 
 namespace {
 
@@ -80,7 +85,19 @@ void print_usage(const char* argv0) {
         "                                80 ms model frames first (adds one hop of latency)\n"
         "  --vc                          Voice-conversion mode (Mode A; requires ONNX Runtime)\n"
         "  --model-dir <bundle>          Encoder/vocoder bundle and voices.json (requires --vc)\n"
-        "  --voice <name>                Target voice (requires --vc)\n"
+        "  --voice <name>                Target voice (requires --vc; default: first bundle voice)\n"
+        "  --voice-b <name>              Blend endpoint voice B (requires --vc; follows --voice)\n"
+        "  --preset <name|path>          Voice preset: name searched in --preset-dir, exe/presets,\n"
+        "                                source presets/ and cwd/presets, or a .json path (requires --vc)\n"
+        "  --param <name=value>          Set a voice parameter, repeatable (requires --vc;\n"
+        "                                names in --list-params)\n"
+        "  --preset-dir <dir>            User preset directory; also where console 'save' writes\n"
+        "  --list-params [--json]        Print the voice-parameter table and exit\n"
+        "  --list-presets                List the presets found in the search dirs and exit\n"
+        "  --console                     Read console commands (set/get/preset/save/voices/help)\n"
+        "                                from stdin even under --duration; with --duration,\n"
+        "                                stdin EOF stops reading commands but does not end\n"
+        "                                the run (without it, EOF still stops)\n"
         "  --frames-per-step <1|2|4>      Hop variant (default: smallest available)\n"
         "  --latency-target-ms <ms>       Queued-audio target (default: model budget)\n"
         "  --list-voices                 Validate/list bundle voices and exit (no audio/ORT needed)\n"
@@ -267,8 +284,10 @@ const char* mode_name(Mode m) {
 int main(int argc, char** argv) {
     bool opt_list = false;
     bool list_voices = false, vc_options = false, explicit_rate = false, selected_mode = false;
+    bool list_params = false, list_presets = false, opt_json = false, opt_console = false;
     Mode mode = Mode::Queue;
-    std::string model_dir, voice_name;
+    std::string model_dir, voice_name, voice_b_name, preset_arg, preset_dir;
+    std::vector<std::string> param_args;
     std::uint32_t frames_per_step = 0, latency_target_ms = 0;
     int opt_input = -1, opt_output = -1, opt_loopback = -1;
     bool has_input_arg = false, has_loopback_arg = false;
@@ -339,6 +358,24 @@ int main(int argc, char** argv) {
         else if (a == "--vc")               { if (!select_mode(Mode::VC)) return 1; }
         else if (a == "--model-dir")        { if (!text(model_dir)) return 1; }
         else if (a == "--voice")            { if (!text(voice_name)) return 1; }
+        else if (a == "--voice-b")          { if (!text(voice_b_name)) return 1; }
+        else if (a == "--preset")           { if (!text(preset_arg)) return 1; }
+        else if (a == "--param") {
+            std::string v;
+            if (!text(v)) return 1;
+            param_args.push_back(std::move(v));
+        }
+        else if (a == "--preset-dir") {
+            if (i + 1 >= argc || argv[i + 1][0] == '\0' || argv[i + 1][0] == '-') {
+                std::cerr << "Missing value for " << a << '\n';
+                return 1;
+            }
+            preset_dir = argv[++i];
+        }
+        else if (a == "--list-params")      { list_params = true; }
+        else if (a == "--list-presets")     { list_presets = true; }
+        else if (a == "--json")             { opt_json = true; }
+        else if (a == "--console")          { opt_console = true; }
         else if (a == "--frames-per-step") {
             vc_options = true;
             if (!value(1, 4, frames_per_step)) return 1;
@@ -367,6 +404,37 @@ int main(int argc, char** argv) {
         std::cerr << "--input and --loopback-input are mutually exclusive\n";
         return 1;
     }
+    if (opt_json && !list_params) {
+        std::cerr << "--json requires --list-params\n";
+        return 1;
+    }
+
+    // Standalone information commands: no --vc, no ORT, no audio device.
+    std::error_code exe_ec;
+    const std::filesystem::path exe_dir =
+        std::filesystem::weakly_canonical(std::filesystem::path(argv[0]), exe_ec).parent_path();
+    const auto preset_dirs = fluxvoice::preset_search_dirs(preset_dir, exe_dir);
+    if (list_params) {
+        std::cout << (opt_json ? fluxvoice::descriptor_table_json()
+                               : fluxvoice::params_table_text());
+        return 0;
+    }
+    if (list_presets) {
+        for (const auto& dir : preset_dirs) {
+            for (const auto& file : fluxvoice::list_preset_files(dir)) {
+                auto r = fluxvoice::load_preset_file(file);
+                for (const std::string& w : r.warnings)
+                    std::cerr << file.filename().string() << ": " << w << '\n';
+                if (!r.ok()) {
+                    std::cerr << file.filename().string() << ": " << r.error << '\n';
+                    continue;
+                }
+                std::cout << r.preset->name << "  (" << file.string() << ")\n";
+            }
+        }
+        return 0;
+    }
+
     if (vc_options && mode != Mode::VC) {
         std::cerr << "Voice-conversion options require --vc\n";
         return 1;
@@ -375,16 +443,46 @@ int main(int argc, char** argv) {
         std::cerr << "--vc requires ordinary duplex capture, not --loopback-input/--list-devices\n";
         return 1;
     }
+    // Validate --preset and every --param BEFORE the ORT-availability check so
+    // ORT-less builds exercise the same rejections.
+    fluxvoice::PresetLoadResult preset_res;
+    std::vector<std::pair<const fluxvoice::ParamDesc*, float>> cli_assignments;
+    if (mode == Mode::VC) {
+        if (!preset_arg.empty()) {
+            preset_res = fluxvoice::resolve_preset(preset_arg, preset_dirs);
+            if (!preset_res.ok()) {
+                std::cerr << preset_res.error << '\n';
+                return 1;
+            }
+            for (const std::string& w : preset_res.warnings) std::cerr << "preset: " << w << '\n';
+        }
+        for (const std::string& assignment : param_args) {
+            const fluxvoice::ParamDesc* d = nullptr;
+            float v = 0.0f;
+            std::string warning, error;
+            if (!fluxvoice::parse_param_assignment(assignment, d, v, warning, error)) {
+                std::cerr << "--param: " << error << '\n';
+                return 1;
+            }
+            if (!warning.empty()) std::cerr << "--param: " << warning << '\n';
+            cli_assignments.push_back({d, v});
+        }
+    }
     if (mode == Mode::VC && !list_voices && !fluxvoice::ort_available()) {
         std::cerr << "--vc: " << fluxvoice::kBuiltWithoutOrtMessage << '\n';
         return 1;
     }
-    if (mode == Mode::VC && (model_dir.empty() || (!list_voices && voice_name.empty()))) {
-        std::cerr << "--vc requires --model-dir <bundle> and --voice <name> (or --list-voices)\n";
+    if (mode == Mode::VC && model_dir.empty()) {
+        std::cerr << "--vc requires --model-dir <bundle>\n";
         return 1;
     }
     std::unique_ptr<fluxvoice::ModelBundle> bundle;
     std::unique_ptr<fluxvoice::InferencePipeline> vc_pipeline;
+    // Control-side snapshot mirrored by the console (Stage 09). `voice_b`
+    // follows `voice_a` until chosen explicitly by preset or --voice-b.
+    fluxvoice::VoiceParams console_params;
+    const std::vector<fluxvoice::VoiceEntry>* console_voices = nullptr;
+    bool voice_b_follows_a = true;
     if (mode == Mode::VC) {
         try {
             std::string error;
@@ -404,18 +502,54 @@ int main(int argc, char** argv) {
                 std::cerr << error << '\n';
                 return 1;
             }
-            const auto* voice = fluxvoice::find_voice(bundle->voices, voice_name, error);
-            if (!voice) { std::cerr << error << '\n'; return 1; }
+            const auto voice_index = [&](std::string_view name, std::uint16_t& out) -> bool {
+                std::string err;
+                const fluxvoice::VoiceEntry* v = fluxvoice::find_voice(bundle->voices, name, err);
+                if (!v) {
+                    std::cerr << err << '\n';
+                    return false;
+                }
+                out = static_cast<std::uint16_t>(v - bundle->voices.data());
+                return true;
+            };
+            // Order: descriptor defaults -> preset params + voice names ->
+            // --voice / --voice-b -> --param assignments in command-line order.
+            fluxvoice::VoiceParams params;
+            if (preset_res.ok()) {
+                fluxvoice::apply_preset_params(*preset_res.preset, params);
+                if (preset_res.preset->voice_a &&
+                    !voice_index(*preset_res.preset->voice_a, params.voice_a))
+                    return 1;
+                if (preset_res.preset->voice_b &&
+                    !voice_index(*preset_res.preset->voice_b, params.voice_b))
+                    return 1;
+                if (preset_res.preset->voice_b) voice_b_follows_a = false;
+            }
+            if (!voice_name.empty() && !voice_index(voice_name, params.voice_a)) return 1;
+            if (!voice_b_name.empty()) {
+                if (!voice_index(voice_b_name, params.voice_b)) return 1;
+                voice_b_follows_a = false;
+            }
+            for (const auto& [d, v] : cli_assignments) params.set(d->id, v);
+            if (voice_b_follows_a) params.voice_b = params.voice_a;
+            console_params = params;
+            console_voices = &bundle->voices;
             const auto contract_rate = static_cast<std::uint32_t>(bundle->encoder.contract().sample_rate);
             if (explicit_rate && sample_rate != contract_rate) {
                 std::cerr << "--sample-rate must equal the model contract rate (" << contract_rate << ")\n";
                 return 1;
             }
             sample_rate = contract_rate;
+            std::vector<fluxvoice::PipelineVoice> pipeline_voices;
+            pipeline_voices.reserve(bundle->voices.size());
+            for (const fluxvoice::VoiceEntry& v : bundle->voices)
+                pipeline_voices.push_back(
+                    {v.stats, std::span<const float>(v.embedding.data(), v.embedding.size())});
             fluxvoice::PipelineOptions options;
             options.latency_target_samples = std::size_t{sample_rate} * latency_target_ms / 1000;
+            options.params = params;
             vc_pipeline = std::make_unique<fluxvoice::InferencePipeline>(
-                bundle->encoder, bundle->vocoder, voice->stats, voice->embedding, options);
+                bundle->encoder, bundle->vocoder, pipeline_voices, options);
             if (!vc_pipeline->warm_up(20)) {
                 std::cerr << "Warm-up failed: " << vc_pipeline->last_error() << '\n';
                 return 1;
@@ -448,10 +582,12 @@ int main(int argc, char** argv) {
     std::array<float, 4096> buf{};
     std::thread worker;
     std::unique_ptr<fluxvoice::ModeAWorker> vc_worker;
+    fluxvoice::ParamChannel param_channel;
 
     fluxvoice::AudioController controller(backend, ctrl_cfg);
     if (vc_pipeline) {
-        vc_worker = std::make_unique<fluxvoice::ModeAWorker>(controller.router(), *vc_pipeline);
+        vc_worker = std::make_unique<fluxvoice::ModeAWorker>(controller.router(), *vc_pipeline,
+                                                           &param_channel);
         controller.set_prepare_hook([&] {
             return controller.stream_info().client_sample_rate == sample_rate && vc_worker->prepare();
         });
@@ -580,15 +716,221 @@ int main(int argc, char** argv) {
                   << ", hop=" << vc_pipeline->geometry().hop
                   << " samples, algorithmic=" << vc_pipeline->geometry().algorithmic_samples()
                   << " samples, target=" << vc_pipeline->governor().target_samples()
-                  << " samples, voice=" << voice_name << '\n';
+                  << " samples, voice="
+                  << console_voices->at(console_params.voice_a).name
+                  << (console_params.voice_b != console_params.voice_a
+                          ? ", voice_b=" + console_voices->at(console_params.voice_b).name
+                          : "")
+                  << '\n';
     std::cout << "FluxVoice running (" << mode_name(mode) << "). ";
     if (duration_s > 0) std::cout << "Stopping after " << duration_s << " s; Ctrl+C to stop early.\n";
     else                std::cout << "Press Enter or Ctrl+C to stop.\n";
     std::cout.flush();
 
-    if (duration_s == 0) {
-        std::thread([] { std::cin.get(); g_stop.store(true); }).detach();
+    // Console input (M2 / Stage 09): a detached line-reader posts stdin lines
+    // to an intentionally leaked SPSC queue — the reader may outlive main's
+    // locals, and this is not a real-time thread so std::string allocation is
+    // fine. Only this control loop drains it and prints.
+    auto* console_lines = new moodycamel::ReaderWriterQueue<std::string>(64);
+    if (duration_s == 0 || opt_console) {
+        const bool eof_stops = duration_s == 0;
+        std::thread([console_lines, eof_stops] {
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                console_lines->enqueue(std::move(line));
+            }
+            // stdin EOF: with --duration + --console just stop reading;
+            // otherwise EOF ends the run like Enter did before.
+            if (eof_stops) g_stop.store(true);
+        }).detach();
     }
+
+    const auto slugify = [](std::string_view name) {
+        std::string slug;
+        slug.reserve(name.size());
+        for (char c : name)
+            slug.push_back((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ? c
+                           : (c >= 'A' && c <= 'Z')                        ? static_cast<char>(c - 'A' + 'a')
+                                                                          : '-');
+        while (!slug.empty() && slug.front() == '-') slug.erase(slug.begin());
+        while (!slug.empty() && slug.back() == '-') slug.pop_back();
+        return slug;
+    };
+    const auto voice_name_of = [&](std::uint16_t index) -> std::string_view {
+        return console_voices && index < console_voices->size()
+                   ? std::string_view(console_voices->at(index).name)
+                   : std::string_view("?");
+    };
+    const auto print_param = [&](const fluxvoice::ParamDesc& d) {
+        std::cout << d.name << " = " << fluxvoice::format_param_value(d, console_params.get(d.id))
+                  << (d.unit.empty() ? "" : " ") << d.unit << '\n';
+    };
+    const auto handle_line = [&](const std::string& line) {
+        if (line.empty()) {
+            g_stop.store(true);
+            return;
+        }
+        std::istringstream ss(line);
+        std::string cmd;
+        ss >> cmd;
+        const bool vc = console_voices != nullptr;
+        if (cmd == "help") {
+            std::cout << "Commands: set <param> <value> | set voice_a|voice_b <name>\n"
+                         "          get [param] | preset <name> | save <name> | voices | help\n"
+                         "          (empty line stops)\n";
+            return;
+        }
+        if (cmd != "set" && cmd != "get" && cmd != "preset" && cmd != "save" && cmd != "voices") {
+            std::cout << "unknown command '" << cmd << "' (try 'help')\n";
+            return;
+        }
+        if (!vc) {
+            std::cout << cmd << ": voice controls need --vc\n";
+            return;
+        }
+        if (cmd == "set") {
+            std::string key, value;
+            ss >> key >> value;
+            if (key.empty() || value.empty()) {
+                std::cout << "usage: set <param> <value>\n";
+                return;
+            }
+            if (key == "voice_a" || key == "voice_b") {
+                std::string err;
+                const fluxvoice::VoiceEntry* v = fluxvoice::find_voice(*console_voices, value, err);
+                if (!v) {
+                    std::cout << err << '\n';
+                    return;
+                }
+                const auto idx = static_cast<std::uint16_t>(v - console_voices->data());
+                if (key == "voice_a") {
+                    console_params.voice_a = idx;
+                    if (voice_b_follows_a) console_params.voice_b = idx;
+                } else {
+                    console_params.voice_b = idx;
+                    voice_b_follows_a = false;
+                }
+                param_channel.push(console_params);
+                std::cout << key << " = " << v->name << '\n';
+                return;
+            }
+            const fluxvoice::ParamDesc* d = nullptr;
+            float v = 0.0f;
+            std::string warning, error;
+            if (!fluxvoice::parse_param_assignment(key + "=" + value, d, v, warning, error)) {
+                std::cout << "set: " << error << '\n';
+                return;
+            }
+            if (!warning.empty()) std::cout << "set: " << warning << '\n';
+            console_params.set(d->id, v);
+            param_channel.push(console_params);
+            print_param(*d);
+            return;
+        }
+        if (cmd == "get") {
+            std::string arg;
+            ss >> arg;
+            if (arg.empty()) {
+                // Mode A has no translation controls; don't list them.
+                for (const fluxvoice::ParamDesc& d : fluxvoice::kParams)
+                    if (d.group != fluxvoice::ParamGroup::Translation) print_param(d);
+                std::cout << "voice_a = " << voice_name_of(console_params.voice_a) << '\n'
+                          << "voice_b = " << voice_name_of(console_params.voice_b) << '\n';
+                return;
+            }
+            if (arg == "voice_a" || arg == "voice_b") {
+                std::cout << arg << " = "
+                          << voice_name_of(arg == "voice_a" ? console_params.voice_a
+                                                            : console_params.voice_b)
+                          << '\n';
+                return;
+            }
+            const fluxvoice::ParamDesc* d = fluxvoice::find_param(arg);
+            if (!d) {
+                std::cout << "unknown parameter '" << arg << "'\n";
+                return;
+            }
+            print_param(*d);
+            return;
+        }
+        if (cmd == "preset") {
+            std::string name;
+            ss >> name;
+            if (name.empty()) {
+                std::cout << "usage: preset <name>\n";
+                return;
+            }
+            auto r = fluxvoice::resolve_preset(name, preset_dirs);
+            if (!r.ok()) {
+                std::cout << r.error << '\n';
+                return;
+            }
+            for (const std::string& w : r.warnings) std::cout << "preset: " << w << '\n';
+            // Resolve the voice names first: an unknown name must not leave the
+            // params half-applied.
+            std::uint16_t va = console_params.voice_a, vb = console_params.voice_b;
+            bool vb_follows = voice_b_follows_a;
+            const auto resolve = [&](const std::optional<std::string>& name_opt,
+                                     std::uint16_t& out) -> bool {
+                if (!name_opt) return true;
+                std::string err;
+                const fluxvoice::VoiceEntry* v = fluxvoice::find_voice(*console_voices, *name_opt, err);
+                if (!v) {
+                    std::cout << err << '\n';
+                    return false;
+                }
+                out = static_cast<std::uint16_t>(v - console_voices->data());
+                return true;
+            };
+            if (!resolve(r.preset->voice_a, va) || !resolve(r.preset->voice_b, vb)) return;
+            if (r.preset->voice_b) vb_follows = false;
+            fluxvoice::apply_preset_params(*r.preset, console_params);
+            console_params.voice_a = va;
+            console_params.voice_b = vb_follows && r.preset->voice_a ? va : vb;
+            voice_b_follows_a = vb_follows;
+            param_channel.push(console_params);
+            std::cout << "preset '" << r.preset->name << "' applied\n";
+            return;
+        }
+        if (cmd == "save") {
+            std::string name;
+            ss >> name;
+            if (preset_dir.empty()) {
+                std::cout << "save: pass --preset-dir <dir> to enable saving\n";
+                return;
+            }
+            const std::string slug = slugify(name);
+            if (name.empty() || slug.empty()) {
+                std::cout << "save: '" << name << "' has no usable filename characters\n";
+                return;
+            }
+            // Mode A has no translation controls; don't serialize them.
+            fluxvoice::Preset p = fluxvoice::preset_from_params(
+                name, console_params, voice_name_of(console_params.voice_a),
+                voice_name_of(console_params.voice_b));
+            for (const fluxvoice::ParamDesc& d : fluxvoice::kParams)
+                if (d.group == fluxvoice::ParamGroup::Translation)
+                    p.params[fluxvoice::param_index(d.id)].reset();
+            const std::filesystem::path file = std::filesystem::path(preset_dir) / (slug + ".json");
+            std::string error;
+            if (fluxvoice::save_preset_file(file, p, error))
+                std::cout << "saved " << file.string() << '\n';
+            else
+                std::cout << error << '\n';
+            return;
+        }
+        if (cmd == "voices") {
+            for (std::size_t i = 0; i < console_voices->size(); ++i) {
+                const auto& v = console_voices->at(i);
+                std::cout << "  [" << i << "] " << v.name << "  " << v.display;
+                if (i == console_params.voice_a) std::cout << "  [A]";
+                if (i == console_params.voice_b && i != console_params.voice_a) std::cout << "  [B]";
+                std::cout << '\n';
+            }
+            return;
+        }
+    };
 
     const auto t0 = std::chrono::steady_clock::now();
     const auto deadline = t0 + std::chrono::seconds(duration_s);
@@ -615,6 +957,9 @@ int main(int argc, char** argv) {
             break;
         }
         if (duration_s > 0 && now >= deadline) break;
+        param_channel.flush();
+        std::string line;
+        while (console_lines->try_dequeue(line)) handle_line(line);
         if (stats_s > 0 && now >= next_stats) {
             const double t = std::chrono::duration<double>(now - t0).count();
             std::cout << stats_line(t, take_snapshot()) << std::endl;

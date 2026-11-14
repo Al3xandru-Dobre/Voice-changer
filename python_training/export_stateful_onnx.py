@@ -484,10 +484,19 @@ def gate_variant(gate):
     return None
 
 
+def voices_private(report):
+    """True when any voice in the bundle carries a private licence (Stage 10:
+    a personal voice makes the whole bundle personal data)."""
+    return any("private" in str(v.get("license", "")).lower()
+               for v in report.get("voices") or [])
+
+
 def model_card(bundle, report, gate):
     roles, lines = report["roles"], []
     add = lines.append
     add(f"# Model card — `{bundle.name}`\n")
+    if report.get("private") or voices_private(report):
+        add("> **PRIVATE — contains a personal voice; not for distribution**\n")
     add(f"Generated {report['generated']} by `python_training/export_stateful_onnx.py` "
         "(Milestone 2 / Stage 06). Regenerated on every export run; edit the "
         "checkpoints or the exporter, not this file.\n")
@@ -672,6 +681,7 @@ def run(args):
         (bundle / VOICES).write_text(json.dumps(voices, indent=2) + "\n", encoding="utf-8")
         report["voices"] = [{k: v for k, v in x.items() if k != "embedding"}
                             for x in voices["voices"]]
+        report["private"] = voices_private(report)
         log(f"{VOICES}: {len(voices['voices'])} voice(s), validated against the contract")
     report["roles"][args.role] = role
     report["pairs"] = check_pairs(bundle, fc.FRAMES_PER_STEP)

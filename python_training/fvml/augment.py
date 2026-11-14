@@ -104,6 +104,74 @@ def random_eq(x, rng, max_gain_db):
     return lfilter(b, a, x).astype(np.float32)
 
 
+# -- speaker perturbation before unit extraction (Stage 10) --------------------
+#
+# Units still carry some speaker information, so the target-voice vocoder
+# learns to ignore it by seeing units extracted from perturbed copies: a
+# Praat-style "change gender" resynthesis (formant ratio + pitch median) plus
+# one random EQ biquad. Only the *encoded* signal is perturbed — the manifest
+# path and the conditioning features stay the clean clip.
+
+
+@dataclasses.dataclass
+class PerturbConfig:
+    formant_range: tuple = (0.10, 0.15)   # |formant_ratio - 1| ~ U(lo, hi)
+    pitch_st: float = 2.0                 # pitch shift ~ U(-st, +st) semitones
+    eq_gain_db: float = 6.0
+    fraction: float = 0.5                 # share of clips to perturb
+
+
+def _perturb_hash(utt_id, seed):
+    import hashlib
+    return hashlib.sha256(f"{seed}:{utt_id}".encode("utf-8")).digest()
+
+
+def should_perturb(utt_id, fraction, seed=0):
+    """Deterministic per-utterance decision: a sha256 uniform < fraction."""
+    if fraction <= 0.0:
+        return False
+    if fraction >= 1.0:
+        return True
+    u = int.from_bytes(_perturb_hash(utt_id, seed)[:8], "big") / float(1 << 64)
+    return u < fraction
+
+
+def perturb_rng(utt_id, seed=0):
+    """The per-utterance RNG, seeded from the same sha256 (different bytes)."""
+    return np.random.default_rng(int.from_bytes(_perturb_hash(utt_id, seed)[8:16], "big"))
+
+
+def perturb_speaker(x, rng, sr=SR, cfg=None):
+    """(y, params): formant/pitch perturbed + EQ'd copy of x, exactly len(x)
+    float32 clipped to [-1, 1]. An unvoiced clip keeps its pitch (new median
+    0 = unchanged) but still gets the formant shift and EQ."""
+    cfg = cfg or PerturbConfig()
+    x = np.asarray(x, np.float32)
+    formant_ratio = 1.0 + rng.uniform(*cfg.formant_range) * (1.0 if rng.random() < 0.5 else -1.0)
+    pitch_st = float(rng.uniform(-cfg.pitch_st, cfg.pitch_st))
+    from . import f0_ref
+    med_f0, _ = f0_ref.stats(f0_ref.track(x, sr))
+    new_median = med_f0 * (2.0 ** (pitch_st / 12.0)) if med_f0 == med_f0 else 0.0
+    import parselmouth
+    from parselmouth.praat import call as praat_call, run as praat_run
+    # Praat's resynthesis draws from its own RNG; seed it deterministically
+    # (per-utterance) so reruns are bit-identical.
+    praat_run(f"random_initializeWithSeedUnsafelyButPredictably("
+              f"{int(rng.integers(0, 2**31 - 1))})")
+    snd = parselmouth.Sound(x.astype(np.float64), sampling_frequency=sr)
+    out = praat_call(snd, "Change gender", 75, 600, formant_ratio,
+                     new_median, 1.0, 1.0)
+    y = np.asarray(out.values[0], np.float32)
+    y = y[:len(x)] if len(y) >= len(x) else np.pad(y, (0, len(x) - len(y)))
+    y = random_eq(y, rng, cfg.eq_gain_db)
+    y = np.clip(y, -1.0, 1.0).astype(np.float32)
+    return y, {"formant_ratio": round(float(formant_ratio), 4),
+               "pitch_st": round(pitch_st, 3),
+               "source_median_hz": round(float(med_f0), 2) if med_f0 == med_f0 else None,
+               "new_median_hz": round(float(new_median), 2),
+               "eq_gain_db": cfg.eq_gain_db}
+
+
 class Augmenter:
     def __init__(self, cfg=None, noise_paths=(), rir_paths=()):
         self.cfg = cfg or AugmentConfig()

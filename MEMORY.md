@@ -60,6 +60,7 @@
 11. **ALWAYS** make decision gates and parity checks measure the shipped runtime (ORT stateful timings, not PyTorch eager), use a relative tolerance on a non-silent output, report any exporter fallback, and keep the exit code independent of the console codepage ([`BUG-015`](Documents/Bug%20Report/BUG-015_gate_decides_on_pytorch_clock.md), [`BUG-016`](Documents/Bug%20Report/BUG-016_gate_export_silent_exporter_fallback.md), [`BUG-017`](Documents/Bug%20Report/BUG-017_vocoder_checks_below_noise_floor.md)).
 12. **ALWAYS** keep first-party headers self-contained and portable: own the standard include for every name (`<cstddef>`/`<cstdint>`/`<string>`/`<string_view>`/`<algorithm>`/`<utility>`/`<system_error>`), write size/fixed-width types as `std::size_t`/`std::[u]intN_t`, guard OS headers behind `_WIN32`/`__APPLE__`/`__linux__`, pick MSVC-style vs GNU-style warning flags by compiler *frontend* (`CMAKE_CXX_COMPILER_FRONTEND_VARIANT` — clang-cl defines both `__clang__` and `_MSC_VER`), link platform libraries per-OS in CMake (never `#pragma comment(lib)`), and let the ALL-built `fluxvoice_header_checks` target (one TU per header, no PCH/unity) guard independent header inclusion.
 13. **ALWAYS** develop cross-platform first: follow [BEST_PRACTICES section 5.6](Documents/BEST_PRACTICES.md#56-default-development-workflow), fix compiler warnings upstream without weakening the gate, give aggregate metadata semantically correct explicit defaults and regression tests, and remove dead internal helpers. The final C++ gate is an all-target warnings-as-errors build plus hardware-free CTest; record native MSVC, Linux GCC, Linux Clang and macOS AppleClang separately as PASS/FAIL/NOT RUN (frontend parsing is not a native pass).
+14. **ALWAYS** seed Praat's RNG before parselmouth resynthesis (`Change gender` & friends draw from Praat's own unseeded RNG — otherwise identical calls diverge): call `parselmouth.praat.run("random_initializeWithSeedUnsafelyButPredictably(<int>)")` with a per-utterance seed (see `fvml/augment.py::perturb_speaker`).
 
 ---
 
@@ -78,6 +79,11 @@ powershell -ExecutionPolicy Bypass -File tools\setup_test_rig.ps1
 python tools\vm_route.py --check
 python tools\vm_route.py
 python tools\vm_route.py --self-test
+
+# Voice controls (Stage 09): parameter table, presets, live console
+.\build\Release\fluxvoice.exe --list-params --json        # descriptor table (schema 1) — the M4 slider spec
+.\build\Release\fluxvoice.exe --vc --model-dir <bundle> --preset deep --param gain=-3 --console
+.\build\Release\fv_vc_file.exe --model-dir <bundle> --preset robot --param pitch_shift=-3 --change 0.5:gain=-6 in.wav out.wav
 
 # Inspect devices, run loopback & measure route latency (prefer name selection in scripts)
 .\build\Release\fluxvoice.exe --list-devices

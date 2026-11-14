@@ -13,13 +13,22 @@
 namespace {
 using namespace fluxvoice;
 
+// output_chain = false keeps these plumbing/accounting tests on raw vocoder
+// PCM (the shipped chain has its own coverage in test_voice_params).
+PipelineOptions raw_options() {
+    PipelineOptions o;
+    o.output_chain = false;
+    return o;
+}
+
 void test_stream_and_accounting(int fps) {
     DuplexRouter router;
     test::FakeModelStep enc(test::fake_contract(ModelRole::kEncoder, fps));
     test::FakeModelStep voc(test::fake_contract(ModelRole::kVocoder, fps));
     const std::array<float, 4> embedding{};
-    InferencePipeline pipeline(enc, voc, {4.8, 0.25, -4.0, 1.5}, embedding);
-    ModeAWorker worker(router, pipeline);
+    InferencePipeline pipeline(enc, voc, {4.8, 0.25, -4.0, 1.5}, embedding, raw_options());
+    ParamChannel params;
+    ModeAWorker worker(router, pipeline, &params);
     CHECK(pipeline.warm_up(3));
     CHECK(worker.prepare());
     const auto target = pipeline.governor().target_samples();
@@ -57,7 +66,7 @@ void test_stall_recovery_and_failures() {
     test::FakeModelStep enc(test::fake_contract(ModelRole::kEncoder));
     test::FakeModelStep voc(test::fake_contract(ModelRole::kVocoder));
     const std::array<float, 4> embedding{};
-    PipelineOptions options;
+    PipelineOptions options = raw_options();
     options.max_consecutive_errors = 2;
     InferencePipeline pipeline(enc, voc, {4.8, 0.25, -4.0, 1.5}, embedding, options);
     ModeAWorker worker(router, pipeline);
@@ -95,10 +104,36 @@ void test_stall_recovery_and_failures() {
     router.process(out.data(), in.data(), in.size());
     CHECK(worker.pump());
 }
+
+void test_param_channel_delivery() {
+    DuplexRouter router;
+    test::FakeModelStep enc(test::fake_contract(ModelRole::kEncoder));
+    test::FakeModelStep voc(test::fake_contract(ModelRole::kVocoder));
+    const std::array<float, 4> embedding{};
+    InferencePipeline pipeline(enc, voc, {4.8, 0.25, -4.0, 1.5}, embedding, raw_options());
+    ParamChannel channel;
+    ModeAWorker worker(router, pipeline, &channel);
+    CHECK(worker.prepare());
+    CHECK(pipeline.params().get(ParamId::PitchShift) == 0.0f);
+
+    std::array<float, 320> in{}, out{};
+    VoiceParams p;
+    p.set(ParamId::PitchShift, 4.0f);
+    p.set(ParamId::TimbreBlend, 0.5f);
+    const std::uint64_t gen = channel.push(p);
+    CHECK(channel.pushed_generation() == gen);
+    // The worker drains the mailbox at the next hop before process().
+    router.process(out.data(), in.data(), in.size());
+    CHECK(worker.pump());
+    CHECK(pipeline.params().get(ParamId::PitchShift) == 4.0f);
+    CHECK(pipeline.params().get(ParamId::TimbreBlend) == 0.5f);
+    CHECK(channel.applied_generation() == gen);
+}
 } // namespace
 
 int main() {
     for (int fps : {1, 2, 4}) test_stream_and_accounting(fps);
     test_stall_recovery_and_failures();
+    test_param_channel_delivery();
     return test::finish("mode_a_worker");
 }

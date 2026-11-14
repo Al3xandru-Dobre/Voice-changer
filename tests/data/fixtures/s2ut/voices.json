@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "voices": [
+    {
+      "name": "identity",
+      "display": "Identity A (passthrough)",
+      "embedding": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "logf0_mean": 4.8,
+      "logf0_std": 0.25,
+      "energy_mean": -4.0,
+      "energy_std": 1.5,
+      "license": "CC0-1.0 (generated fixture, no trained weights)",
+      "source": "tools/make_fixture_models.py"
+    },
+    {
+      "name": "identity_b",
+      "display": "Identity B (passthrough)",
+      "embedding": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "logf0_mean": 4.8,
+      "logf0_std": 0.25,
+      "energy_mean": -4.0,
+      "energy_std": 1.5,
+      "license": "CC0-1.0 (generated fixture, no trained weights)",
+      "source": "tools/make_fixture_models.py"
+    }
+  ]
+}
