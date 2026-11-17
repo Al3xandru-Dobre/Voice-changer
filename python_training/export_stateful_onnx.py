@@ -32,6 +32,12 @@ Usage:
       --head student-L1 --license "..." --bundle models/<name>/
   export_stateful_onnx.py --role vocoder --checkpoint checkpoints/<voc>/best.pt \\
       --bundle models/<name>/
+  # Milestone 3: the contract-v2 dual-output encoder (units + latents) and a
+  # v2-stamped vocoder for a Mode B bundle. The default stays contract v1.
+  export_stateful_onnx.py --role encoder --contract-version 2 --checkpoint ... \\
+      --head student-L1 --license "..." --bundle models/<name>/
+  export_stateful_onnx.py --role vocoder --contract-version 2 --checkpoint ... \\
+      --bundle models/<name>/
 
 Exit status: 0 = every file exported and every gate passed; 1 = a gate failed
 (the files and the report are still written, so they can be inspected);
@@ -73,6 +79,13 @@ def parse_args(argv=None):
                    default=list(fc.FRAMES_PER_STEP), help="variants to export (default 1 2 4)")
     p.add_argument("--bundle", required=True, help="bundle directory, e.g. models/<name>/")
     p.add_argument("--head", help="encoder: delay head, index (0/1/2) or name (student-L1)")
+    p.add_argument("--contract-version", type=int, choices=fc.SUPPORTED_CONTRACT_VERSIONS,
+                   default=fc.CONTRACT_VERSION,
+                   help="1 = Mode A (default). 2 = Milestone 3: the encoder also outputs "
+                   "`latents` (dual-output), the vocoder is stamped v2")
+    p.add_argument("--include-noncommercial", action="store_true",
+                   help="export a model trained on non-commercial (mHuBERT-147) units; "
+                   "research only, the contract licence says so")
     p.add_argument("--license", help="licence text for the contract (encoder checkpoints "
                    "do not store one; overrides the vocoder checkpoint's)")
     p.add_argument("--exporter", choices=fx.EXPORTERS, default="auto",
@@ -111,7 +124,23 @@ def log(msg):
 
 
 # -- models ------------------------------------------------------------------------
-def load_encoder(path, head, license):
+NC_NOTE = " [trained on non-commercial units: research only, not for distribution]"
+
+
+def noncommercial_license(meta, license, include_noncommercial):
+    """Licence text for a model whose training units are non-commercial
+    (mHuBERT-147): refused without --include-noncommercial, tagged with it."""
+    if not (isinstance(meta, dict) and meta.get("noncommercial")):
+        return license
+    if not include_noncommercial:
+        raise fx.ExportError(
+            f"the checkpoint was trained on non-commercial units ({meta.get('license')}): it "
+            "must not ship in a default bundle; pass --include-noncommercial for a research export")
+    return (license or str(meta.get("license") or "non-commercial")) + NC_NOTE
+
+
+def load_encoder(path, head, license, contract_version=fc.CONTRACT_VERSION,
+                 include_noncommercial=False):
     from fvml.content_encoder import ContentEncoder
     try:
         model, ckpt = ContentEncoder.from_checkpoint(path)
@@ -123,15 +152,16 @@ def load_encoder(path, head, license):
         raise fx.ExportError(f"{path}: invalid encoder checkpoint: {fx._one_line(e)}") from e
     model.eval()
     head = fx.head_index(model, head)
-    license = license or ckpt.get("license")
+    license = noncommercial_license(meta, license or ckpt.get("license"), include_noncommercial)
     if not license:
         raise fx.ExportError("the encoder checkpoint stores no licence: pass --license")
     return model, {"head": head, "license": license,
-                   "labels_meta": meta,
+                   "labels_meta": meta, "contract_version": contract_version,
                    "step": ckpt.get("step"), "run_name": ckpt.get("run_name")}
 
 
-def load_vocoder(path, license):
+def load_vocoder(path, license, contract_version=fc.CONTRACT_VERSION,
+                 include_noncommercial=False):
     from fvml.vocoder import UnitVocoder
     try:
         model, ckpt = UnitVocoder.from_checkpoint(path)
@@ -142,21 +172,25 @@ def load_vocoder(path, license):
     except Exception as e:  # noqa: BLE001
         raise fx.ExportError(f"{path}: invalid vocoder checkpoint: {fx._one_line(e)}") from e
     model.eval()
-    if license:
-        ckpt = {**ckpt, "license": license}
-    return model, ckpt, {"labels_meta": meta,
+    tagged = noncommercial_license(meta, license or ckpt.get("license") or model.cfg.license,
+                                   include_noncommercial)
+    if license or (isinstance(meta, dict) and meta.get("noncommercial")):
+        ckpt = {**ckpt, "license": tagged}
+    return model, ckpt, {"labels_meta": meta, "contract_version": contract_version,
                          "step": ckpt.get("step"), "license": ckpt.get("license")}
 
 
-def contract_for(role, model, info_or_ckpt, fps):
+def contract_for(role, model, info, ckpt, fps):
     if role == "encoder":
-        return fx.encoder_contract(model, info_or_ckpt["head"], fps, info_or_ckpt["license"])
-    return fx.vocoder_contract(model, info_or_ckpt, fps)
+        return fx.encoder_contract(model, info["head"], fps, info["license"],
+                                   info["contract_version"])
+    return fx.vocoder_contract(model, ckpt, fps, info["contract_version"])
 
 
 def graph_for(role, model, info, contract):
     if role == "encoder":
-        return fx.encoder_graph(model, info["head"], contract.frames_per_step)
+        return fx.encoder_graph(model, info["head"], contract.frames_per_step,
+                                contract.contract_version)
     return fx.vocoder_graph(model, contract)
 
 
@@ -164,7 +198,7 @@ def graph_for(role, model, info, contract):
 def export_role(args, bundle, model, info, ckpt):
     files = {}
     for fps in args.frames_per_step:
-        c = contract_for(args.role, model, info if args.role == "encoder" else ckpt, fps)
+        c = contract_for(args.role, model, info, ckpt, fps)
         graph = graph_for(args.role, model, info, c)
         if graph.states != list(c.states):
             raise fx.ExportError("graph states differ from the contract's")
@@ -248,8 +282,10 @@ def encoder_checks(args, bundle, model, info, wav):
         path = bundle / f"encoder_s{fps}.onnx"
         r = fx.encoder_parity(model, info["head"], path, wav)
         parity[f"s{fps}"] = r
+        dual = (f", max |dlatents| {r['max_abs_latents']:.2e} (rms {r['latents_rms']:.2f})"
+                if "max_abs_latents" in r else "")
         log(f"{path.name}: parity over {r['seconds']:.1f} s: unit agreement "
-            f"{r['unit_agreement']:.5f}, max |dlogit| {r['max_abs_logit']:.2e} -> "
+            f"{r['unit_agreement']:.5f}, max |dlogit| {r['max_abs_logit']:.2e}{dual} -> "
             f"{'PASS' if r['pass'] else 'FAIL'}")
         stream = fx.OrtStream(path)
         feeds = fx.encoder_feeds(stream.contract, wav)
@@ -566,8 +602,11 @@ def model_card(bundle, report, gate):
     add("| Model | Variant | Seconds | Result | Gate |")
     add("|---|---|---|---|---|")
     for v, p in sorted((roles.get("encoder", {}).get("parity") or {}).items()):
+        dual = (f", max abs Δlatents {p['max_abs_latents']:.2e} (RMS {p['latents_rms']:.2f})"
+                if "max_abs_latents" in p else "")
         add(f"| encoder | {v} | {p['seconds']:.1f} | unit agreement {p['unit_agreement']:.5f}, "
-            f"max abs Δlogit {p['max_abs_logit']:.2e} | {'pass' if p['pass'] else '**FAIL**'} |")
+            f"max abs Δlogit {p['max_abs_logit']:.2e}{dual} | "
+            f"{'pass' if p['pass'] else '**FAIL**'} |")
     for v, p in sorted((roles.get("vocoder", {}).get("parity") or {}).items()):
         add(f"| vocoder | {v} | {p['seconds']:.1f} | SNR {fmt_db(p['snr_db'])}, max abs Δ "
             f"{p['max_abs']:.2e} ({p['units']}) | {'pass' if p['pass'] else '**FAIL**'} |")
@@ -646,20 +685,25 @@ def run(args):
     report = load_report(bundle)
     ckpt_path = pathlib.Path(args.checkpoint).resolve()
     if args.role == "encoder":
-        model, info = load_encoder(ckpt_path, args.head, args.license)
+        model, info = load_encoder(ckpt_path, args.head, args.license, args.contract_version,
+                                   args.include_noncommercial)
         ckpt = None
     else:
-        model, ckpt, info = load_vocoder(ckpt_path, args.license)
+        model, ckpt, info = load_vocoder(ckpt_path, args.license, args.contract_version,
+                                         args.include_noncommercial)
 
     files = export_role(args, bundle, model, info, ckpt)
     role = {"checkpoint": str(ckpt_path), "checkpoint_name": ckpt_path.name,
             "checkpoint_sha256": fx.sha256(ckpt_path), "files": files,
             "license": next(iter(files.values()))["contract"]["license"],
             "step": info.get("step"), "labels_meta": info.get("labels_meta")}
+    if args.contract_version != fc.CONTRACT_VERSION:   # v1 reports keep their old shape
+        role["contract_version"] = args.contract_version
     if args.role == "encoder":
         role.update(head=info["head"], lookahead_frames=model.cfg.lookahead[info["head"]])
     old = report["roles"].get(args.role) or {}
-    same_source = all(old.get(k) == role.get(k) for k in ("checkpoint_sha256", "head", "license"))
+    same_source = all(old.get(k) == role.get(k)
+                      for k in ("checkpoint_sha256", "head", "license", "contract_version"))
     if same_source:                 # same model: variants exported earlier stay valid
         role["files"] = {**(old.get("files") or {}), **files}
         if args.skip_parity and old.get("parity_input"):
@@ -736,11 +780,16 @@ def run(args):
 def other_models(args, report, model, info):
     """(encoder model, encoder info, vocoder model) for the chain: this run's
     model plus the other role reloaded from the checkpoint the report names."""
+    # The chain only needs weights: the other role's licence check ran when it was exported.
     if args.role == "encoder":
-        voc_model, _, _ = load_vocoder(report["roles"]["vocoder"]["checkpoint"], None)
+        voc_model, _, _ = load_vocoder(report["roles"]["vocoder"]["checkpoint"], None,
+                                       include_noncommercial=True)
         return model, info, voc_model
     enc = report["roles"]["encoder"]
-    enc_model, enc_info = load_encoder(enc["checkpoint"], enc["head"], enc["license"])
+    enc_model, enc_info = load_encoder(enc["checkpoint"], enc["head"], enc["license"],
+                                       enc.get("contract_version", fc.CONTRACT_VERSION),
+                                       include_noncommercial=True)
+    enc_info["license"] = enc["license"]
     return enc_model, enc_info, model
 
 

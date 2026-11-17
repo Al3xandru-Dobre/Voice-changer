@@ -1,6 +1,7 @@
 // VoiceStudio — WAV analysis, wizard rules, job manifest, draft persistence.
 #include "core/VoiceStudio.hpp"
 
+#include "core/JsonRead.hpp"
 #include "core/VoiceCatalog.hpp"
 
 #include <nlohmann/json.hpp>
@@ -286,6 +287,7 @@ bool VoiceStudioModel::can_advance(std::string* why) const {
     switch (step_) {
         case StudioStep::NameConsent:
             if (!is_valid_voice_name(draft_.voice_name)) return fail("Voice name must be lowercase letters, digits, '-' or '_'.");
+            if (!is_safe_project_name(draft_.voice_name)) return fail("That voice name is reserved by Windows; choose another.");
             if (draft_.display_name.empty()) return fail("Give the voice a display name.");
             if (!draft_.consent) return fail("Confirm you have the right to use this voice.");
             if (!draft_.is_own_voice && draft_.consent_note.empty())
@@ -329,6 +331,8 @@ void VoiceStudioModel::prev() {
 std::optional<std::string> VoiceStudioModel::name_problem(const VoiceCatalog* installed) const {
     if (!is_valid_voice_name(draft_.voice_name))
         return std::string("use lowercase letters, digits, '-' or '_' (voices.json rule)");
+    if (!is_safe_project_name(draft_.voice_name))
+        return std::string("'" + draft_.voice_name + "' is a reserved device name on Windows; choose another");
     if (installed) {
         for (const BundleInfo& b : installed->bundles())
             for (const VoiceEntry& v : b.voices)
@@ -415,8 +419,18 @@ std::string shell_quote(const fs::path& p, Shell shell) {
     return out + "'";
 }
 
+bool is_safe_project_name(std::string_view name) {
+    if (!is_valid_voice_name(name)) return false;
+    static constexpr std::string_view kReserved[] = {"con", "prn", "aux", "nul"};
+    for (std::string_view r : kReserved)
+        if (name == r) return false;
+    if (name.size() == 4 && (name.starts_with("com") || name.starts_with("lpt")) && name[3] >= '0' && name[3] <= '9')
+        return false;
+    return true;
+}
+
 fs::path VoiceStudioModel::project_dir(const fs::path& studio_root) const {
-    return studio_root / (draft_.voice_name.empty() ? std::string("untitled") : draft_.voice_name);
+    return studio_root / (is_safe_project_name(draft_.voice_name) ? draft_.voice_name : std::string("untitled"));
 }
 
 StudioCommands VoiceStudioModel::commands(const fs::path& repo_root, const fs::path& studio_root,
@@ -484,12 +498,12 @@ Take take_from_json(const json& j) {
     auto num = [&](const char* k, double def) { auto it = j.find(k); return it != j.end() && it->is_number() ? it->get<double>() : def; };
     t.path    = fs::path(str("path"));
     t.session = str("session");
-    t.stats.ok          = j.value("ok", false);
+    t.stats.ok          = read_bool(j, "ok", false);
     t.stats.error       = str("error");
     t.stats.sample_rate = static_cast<std::uint32_t>(num("sample_rate", 0));
     t.stats.channels    = static_cast<std::uint16_t>(num("channels", 0));
     t.stats.bits        = static_cast<std::uint16_t>(num("bits", 0));
-    t.stats.is_float    = j.value("is_float", false);
+    t.stats.is_float    = read_bool(j, "is_float", false);
     t.stats.seconds     = num("seconds", 0.0);
     t.stats.peak_dbfs   = static_cast<float>(num("peak_dbfs", -120.0));
     t.stats.rms_dbfs    = static_cast<float>(num("rms_dbfs", -120.0));
@@ -548,6 +562,10 @@ std::string VoiceStudioModel::job_json(const fs::path& repo_root, const fs::path
 
 bool VoiceStudioModel::write_job(const fs::path& repo_root, const fs::path& studio_root, const fs::path& models_root,
                                  std::string& error) const {
+    if (!is_safe_project_name(draft_.voice_name)) {
+        error = "voice name '" + draft_.voice_name + "' is not a valid project name";
+        return false;
+    }
     const fs::path dir = project_dir(studio_root);
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -606,18 +624,18 @@ std::string VoiceStudioModel::draft_json() const {
 
 bool VoiceStudioModel::load_draft_json(std::string_view text, std::string* error) {
     const json j = json::parse(text, nullptr, false);
-    if (j.is_discarded() || !j.is_object() || j.value("schema", 0) != 1) {
+    if (j.is_discarded() || !j.is_object() || read_int(j, "schema", 0) != 1) {
         if (error) *error = "draft.json is not a schema-1 object";
         return false;
     }
     StudioDraft d;
-    d.voice_name    = j.value("voice_name", std::string());
-    d.display_name  = j.value("display_name", std::string());
-    d.is_own_voice  = j.value("is_own_voice", true);
-    d.consent       = j.value("consent", false);
-    d.consent_note  = j.value("consent_note", std::string());
-    d.base_bundle   = j.value("base_bundle", std::string());
-    d.target_bundle = j.value("target_bundle", std::string());
+    d.voice_name    = read_string(j, "voice_name", std::string());
+    d.display_name  = read_string(j, "display_name", std::string());
+    d.is_own_voice  = read_bool(j, "is_own_voice", true);
+    d.consent       = read_bool(j, "consent", false);
+    d.consent_note  = read_string(j, "consent_note", std::string());
+    d.base_bundle   = read_string(j, "base_bundle", std::string());
+    d.target_bundle = read_string(j, "target_bundle", std::string());
     if (auto it = j.find("setup"); it != j.end() && it->is_array())
         for (std::size_t i = 0; i < d.setup.size() && i < it->size(); ++i) d.setup[i] = (*it)[i].is_boolean() && (*it)[i].get<bool>();
     if (auto it = j.find("material"); it != j.end() && it->is_array())
@@ -630,13 +648,17 @@ bool VoiceStudioModel::load_draft_json(std::string_view text, std::string* error
     load_takes("takes", d.takes);
     load_takes("room_tone", d.room_tone);
     load_takes("live_mic", d.live_mic);
-    const int step = j.value("step", 0);
+    const int step = static_cast<int>(read_int(j, "step", 0));
     step_  = static_cast<StudioStep>(step < 0 || step >= static_cast<int>(StudioStep::Count) ? 0 : step);
     draft_ = std::move(d);
     return true;
 }
 
 bool VoiceStudioModel::save_draft(const fs::path& studio_root, std::string& error) const {
+    if (!is_safe_project_name(draft_.voice_name)) {
+        error = "voice name '" + draft_.voice_name + "' is not a valid project name";
+        return false;
+    }
     const fs::path dir = project_dir(studio_root);
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -645,6 +667,7 @@ bool VoiceStudioModel::save_draft(const fs::path& studio_root, std::string& erro
 }
 
 bool VoiceStudioModel::load_draft(const fs::path& studio_root) {
+    if (!is_safe_project_name(draft_.voice_name)) return false;
     std::ifstream f(project_dir(studio_root) / "draft.json", std::ios::binary);
     if (!f) return false;
     std::stringstream ss;
@@ -660,10 +683,10 @@ std::optional<StudioStatus> VoiceStudioModel::poll_status(const fs::path& studio
     const json j = json::parse(ss.str(), nullptr, false);
     if (j.is_discarded() || !j.is_object()) return std::nullopt;
     StudioStatus s;
-    s.stage    = j.value("stage", std::string("unknown"));
-    s.progress = j.value("progress", 0.0f);
-    s.message  = j.value("message", std::string());
-    s.eta_s    = j.value("eta_s", -1.0);
+    s.stage    = read_string(j, "stage", std::string("unknown"));
+    s.progress = static_cast<float>(read_number(j, "progress", 0.0));
+    s.message  = read_string(j, "message", std::string());
+    s.eta_s    = read_number(j, "eta_s", -1.0);
     if (s.progress < 0.0f) s.progress = 0.0f;
     if (s.progress > 1.0f) s.progress = 1.0f;
     return s;

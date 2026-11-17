@@ -1,5 +1,5 @@
 """StreamVC-style causal content encoder with three delay heads (Milestone 2 /
-Stage 04).
+Stage 04), dual-output from Milestone 3 / Stage 03.
 
 16 kHz mono in, 50 Hz out (stride 2*4*5*8 = 320 samples, one frame per 20 ms).
 A causal SoundStream trunk (every conv a StreamingConv1d) feeds a per-frame
@@ -12,6 +12,13 @@ Frame i of the student closes on sample 320*i + 319, so its centre (320*i + 160)
 is the centre of teacher frame i (fvml.teacher pads HuBERT by 40 samples each
 side). Output index t of head L is the prediction for frame t - L: in a stream
 the head's ids are L frames late, and that delay is its lookahead cost.
+
+Dual output (Milestone 3 / Stage 03, contract v2). One forward pass yields both
+ports: `units` (a head's argmax, Mode A) and `latents` (the LayerNorm output the
+heads read, Mode B's translator input). The M2 English model is D = 64 over
+K = 100; MULTILINGUAL is the same network with D = 128 over the K = 1000
+multilingual codebook. `latents` at index t describe frame t with no delay: the
+trunk is strictly causal and the lookahead lives in the heads only.
 """
 import dataclasses
 import json
@@ -73,6 +80,13 @@ class EncoderConfig:
     @classmethod
     def from_dict(cls, d):
         return cls(**{k: tuple(v) if isinstance(v, list) else v for k, v in d.items()})
+
+
+# Milestone 3 / Stage 03: the widened bottleneck and the multilingual codebook.
+MULTILINGUAL_LATENT_DIM = 128
+MULTILINGUAL_VOCAB = 1000
+MULTILINGUAL = EncoderConfig(latent_dim=MULTILINGUAL_LATENT_DIM, vocab=MULTILINGUAL_VOCAB)
+MAX_PARAMS_MULTILINGUAL = 6_000_000
 
 
 class ResidualUnit(nn.Module):
@@ -249,12 +263,34 @@ def head_accuracy(logits, labels, lookahead=LOOKAHEAD):
     return out
 
 
+@torch.no_grad()
+def head_topk_accuracy(logits, labels, lookahead=LOOKAHEAD, k=5):
+    """[(correct, counted)] per head, a frame counting as correct when its label
+    is among the head's k highest logits (k = 1 is head_accuracy)."""
+    out = []
+    for lg, tg in head_pairs(logits, labels, lookahead):
+        keep = tg != IGNORE
+        top = lg[keep].topk(min(k, lg.shape[-1]), dim=-1).indices
+        out.append((int((top == tg[keep].unsqueeze(-1)).any(-1).sum()), int(keep.sum())))
+    return out
+
+
 def aligned_ids(model, wav, head):
     """Frame-aligned ids of one head for a whole utterance (offline): pads L
     frames of zeros at the end so index t is the head's id for frame t. Returns
     (ids (B, n) int64, logits (B, n, vocab))."""
+    ids, lg, _ = encode_utterance(model, wav, head)
+    return ids, lg
+
+
+def encode_utterance(model, wav, head):
+    """Both ports of one head for a whole utterance (offline), frame-aligned:
+    (ids (B, n) int64, logits (B, n, vocab), latents (B, n, D)). The head's
+    outputs are shifted back by its lookahead L (L zero frames flush it);
+    `latents` are the first n trunk frames, which the flush cannot touch."""
     L = model.cfg.lookahead[head]
     wav = pad_to_frames(wav if wav.dim() == 2 else wav.squeeze(1))
     n = wav.shape[-1] // FRAME_SAMPLES
-    lg = model(F.pad(wav, (0, L * FRAME_SAMPLES)))["logits"][head][:, L:L + n]
-    return lg.argmax(-1), lg
+    out = model(F.pad(wav, (0, L * FRAME_SAMPLES)))
+    lg = out["logits"][head][:, L:L + n]
+    return lg.argmax(-1), lg, out["latents"][:, :n]

@@ -127,8 +127,10 @@ void draw_devices(ViewContext& ctx) {
         const std::vector<std::string> play_labels = labels(play_rows);
         const auto cap_idx  = row_for_selection(cap_rows, app.capture_selection());
         const auto play_idx = row_for_selection(play_rows, app.playback_selection());
-        int ci = cap_idx ? static_cast<int>(*cap_idx) : -1;
-        int pi = play_idx ? static_cast<int>(*play_idx) : -1;
+        // An unresolved remembered device shows the placeholder, not the
+        // "Follow system default" row its placeholder selection maps to.
+        int ci = cap_idx && !app.unresolved_capture() ? static_cast<int>(*cap_idx) : -1;
+        int pi = play_idx && !app.unresolved_playback() ? static_cast<int>(*play_idx) : -1;
 
         ImGui::SetNextItemWidth(-160.0f * ctx.scale);
         if (widgets::combo_strings(app.capture_mode() == CaptureMode::SystemPlaybackLoopback ? "Capture (playback endpoint)" : "Capture",
@@ -152,10 +154,17 @@ void draw_devices(ViewContext& ctx) {
         ImGui::Spacing();
         const std::optional<std::string> fb = app.feedback_warning();
         if (fb) widgets::notice(fb->c_str(), t.danger);
-        if (!cap_idx || !play_idx)
+        if (app.device_unresolved()) {
+            std::string missing = "A remembered device is no longer listed or is ambiguous:";
+            if (app.unresolved_capture()) missing += " capture '" + *app.unresolved_capture() + "'";
+            if (app.unresolved_playback()) missing += " playback '" + *app.unresolved_playback() + "'";
+            missing += ". Pick a device (or Follow system default) explicitly; FluxVoice never substitutes another device.";
+            widgets::notice(missing.c_str(), t.warning);
+        } else if (!cap_idx || !play_idx) {
             widgets::notice("A remembered device is no longer listed. Pick it again; FluxVoice never substitutes another device.", t.warning);
+        }
 
-        ImGui::BeginDisabled(fb.has_value() || !app.backend_usable());
+        ImGui::BeginDisabled(fb.has_value() || !app.backend_usable() || app.device_unresolved());
         if (ImGui::Button(app.engine_on() ? "Apply and restart stream" : "Apply and start", ImVec2(220.0f * ctx.scale, 0.0f)))
             static_cast<void>(app.apply_devices());
         ImGui::EndDisabled();

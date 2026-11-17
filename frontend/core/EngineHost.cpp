@@ -21,8 +21,7 @@ namespace fluxvoice::frontend {
 EngineHost::EngineHost(AudioBackend& backend, ControllerConfig cfg)
     : backend_(backend),
       controller_(backend, cfg),
-      chunks_(PipelineTiming::kChunkSamples, PipelineTiming::kContextSamples),
-      params_q_(64) {
+      chunks_(PipelineTiming::kChunkSamples, PipelineTiming::kContextSamples) {
     (void)backend_;
     chain_.configure(cfg.sample_rate);
     controller_.set_worker_hooks([this] { stop_worker(); }, [this] { reset_dsp(); }, [this] { start_worker(); });
@@ -44,24 +43,27 @@ Result<StreamStatus> EngineHost::start(const DeviceSelection& capture, const Dev
 void EngineHost::stop() { controller_.stop(); }
 
 std::uint64_t EngineHost::push_params(const VoiceParams& p) {
-    ParamMessage m;
-    m.params     = p;
-    m.generation = ++next_generation_;
-    // Full queue: the worker is far behind (or not running); the newest
-    // snapshot wins at the next push, so dropping is harmless.
-    if (params_q_.try_enqueue(m)) params_pushed_.store(m.generation, std::memory_order_relaxed);
-    return m.generation;
+    // ParamChannel::push parks the newest snapshot when the queue is full and
+    // retries it on flush(); the newest snapshot always wins (BUG-023).
+    return params_.push(p);
 }
 
 TelemetrySnapshot EngineHost::telemetry() const {
     TelemetrySnapshot t;
     const DuplexRouter& r = controller_.router();
+    // Per-stream counters (MEMORY.md §2): reset_dsp() rebaselines after every
+    // queue discard, so residue of earlier streams stays out of the figure.
     t.frames           = r.frames_processed();
-    t.input_overruns   = r.input_overruns();
-    t.output_underruns = r.output_underruns();
+    t.input_overruns   = r.input_overruns() - overrun_base_;
+    t.output_underruns = r.output_underruns() - underrun_base_;
     t.output_drops     = output_drops_.load(std::memory_order_relaxed);
     t.queued_samples   = static_cast<std::int64_t>(t.output_underruns) - static_cast<std::int64_t>(t.input_overruns) -
                          static_cast<std::int64_t>(t.output_drops);
+    // Independently clocked loopback callbacks do not obey the identity.
+    t.queued_valid              = controller_.status().capture_mode != CaptureMode::SystemPlaybackLoopback;
+    t.lifetime_input_overruns   = r.input_overruns();
+    t.lifetime_output_underruns = r.output_underruns();
+    t.lifetime_output_drops     = lifetime_drops_.load(std::memory_order_relaxed);
     t.sample_rate      = controller_.stream_info().client_sample_rate != 0 ? controller_.stream_info().client_sample_rate
                                                                            : controller_.config().sample_rate;
     t.rss_bytes        = fluxvoice::resident_bytes();
@@ -69,8 +71,8 @@ TelemetrySnapshot EngineHost::telemetry() const {
     t.input_rms_dbfs   = OutputChain::to_dbfs(in_rms_.load(std::memory_order_relaxed));
     t.output_peak_dbfs = OutputChain::to_dbfs(out_peak_.load(std::memory_order_relaxed));
     t.output_rms_dbfs  = OutputChain::to_dbfs(out_rms_.load(std::memory_order_relaxed));
-    t.params_pushed    = params_pushed_.load(std::memory_order_relaxed);
-    t.params_applied   = params_applied_.load(std::memory_order_relaxed);
+    t.params_pushed    = params_.pushed_generation();
+    t.params_applied   = params_.applied_generation();
     return t;
 }
 
@@ -89,6 +91,12 @@ void EngineHost::reset_dsp() {
     chain_.configure(controller_.stream_info().client_sample_rate != 0 ? controller_.stream_info().client_sample_rate
                                                                        : controller_.config().sample_rate);
     chain_.reset();
+    // The controller discarded both queues just before this hook: begin a new
+    // per-stream accounting epoch so the queued readout starts at zero
+    // (BUG-024, MEMORY.md §2 "rebaseline after queue discards").
+    underrun_base_ = controller_.router().output_underruns();
+    overrun_base_  = controller_.router().input_overruns();
+    output_drops_.store(0, std::memory_order_relaxed);
 }
 
 void EngineHost::start_worker() {
@@ -100,19 +108,18 @@ void EngineHost::start_worker() {
 void EngineHost::worker_loop() {
     std::vector<float> buf(4096);
     std::vector<float> hop(chunks_.hop());
-    ParamMessage msg;
+    VoiceParams msg{};
     auto emit = [&](const float* p, std::size_t n) {
         const std::size_t written = controller_.write_output(p, n);
-        output_drops_.fetch_add(n - written, std::memory_order_relaxed);
+        const std::size_t dropped = n - written;
+        output_drops_.fetch_add(dropped, std::memory_order_relaxed);
+        lifetime_drops_.fetch_add(dropped, std::memory_order_relaxed);
     };
     while (worker_run_.load(std::memory_order_relaxed)) {
         // Newest parameter snapshot wins (M2 / Stage 09: latest wins, no locks).
-        bool got_params = false;
-        while (params_q_.try_dequeue(msg)) got_params = true;
-        if (got_params) {
-            chain_.set_gain_db(msg.params.get(ParamId::Gain));
-            chain_.set_limiter(msg.params.enabled(ParamId::Limiter));
-            params_applied_.store(msg.generation, std::memory_order_relaxed);
+        if (params_.drain(msg)) {
+            chain_.set_gain_db(msg.get(ParamId::Gain));
+            chain_.set_limiter(msg.enabled(ParamId::Limiter));
         }
         chain_.set_muted(muted_.load(std::memory_order_relaxed));
 

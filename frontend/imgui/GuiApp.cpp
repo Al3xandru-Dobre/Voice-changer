@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -215,7 +216,16 @@ int GuiApp::run() {
         return 1;
     }
     auto last = Clock::now();
-    while (running_) {
+    // Last line of defence (BUG-022): the typed JSON readers make malformed
+    // external files non-fatal, but anything else unexpected must not
+    // terminate the process with the stream still open — report it, then
+    // leave through the orderly shutdown path below.
+    auto fatal = [this](std::string what) {
+        std::fprintf(stderr, "FluxVoice: %s\n", what.c_str());
+        app_.notify(Notice::Level::Error, std::move(what));
+        running_ = false;
+    };
+    while (running_) try {
         SDL_Event e;
         if (hidden_ || minimized_) {
             while (SDL_WaitEventTimeout(&e, 20)) handle_event(e);
@@ -242,6 +252,10 @@ int GuiApp::run() {
             running_ = false;
         }
         last = now;
+    } catch (const std::exception& e) {
+        fatal(std::string("Unexpected error, shutting down: ") + e.what());
+    } catch (...) {
+        fatal("Unexpected error, shutting down.");
     }
     (void)last;
     app_.stop_engine();

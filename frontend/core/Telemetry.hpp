@@ -11,7 +11,10 @@
 namespace fluxvoice::frontend {
 
 struct TelemetrySnapshot {
-    std::uint64_t frames           = 0;
+    std::uint64_t frames           = 0;  // lifetime across streams
+    /// Per-stream counters since the last queue discard (stop / reconfigure /
+    /// recovery): the queued figure must not carry earlier streams' residue
+    /// (BUG-024, MEMORY.md §2 "rebaseline after queue discards").
     std::uint64_t input_overruns   = 0;
     std::uint64_t output_underruns = 0;
     std::uint64_t output_drops     = 0;
@@ -19,6 +22,14 @@ struct TelemetrySnapshot {
     /// underruns - overruns - drops (MEMORY.md §2). Exact, never estimated
     /// from queue occupancy.
     std::int64_t  queued_samples   = 0;
+    /// False in system-playback loopback mode: the capture and playback
+    /// callbacks are independently clocked, so the identity does not hold
+    /// there and the figure must be shown as unavailable.
+    bool          queued_valid     = true;
+    /// Lifetime totals across streams, for the Telemetry panel.
+    std::uint64_t lifetime_input_overruns   = 0;
+    std::uint64_t lifetime_output_underruns = 0;
+    std::uint64_t lifetime_output_drops     = 0;
     std::uint32_t sample_rate      = 0;
     std::size_t   rss_bytes        = 0;
 
@@ -36,6 +47,9 @@ struct TelemetrySnapshot {
     double queued_ms() const {
         return sample_rate == 0 ? 0.0 : 1000.0 * static_cast<double>(queued_samples) / sample_rate;
     }
+
+    /// "42 ms", or "n/a (independent clocks)" when the identity does not hold.
+    std::string queued_ms_text() const;
 
     /// Same format as src/main.cpp's `[stats]` line, parsed by tools/analyze_soak.py.
     std::string stats_line(double t_seconds) const;

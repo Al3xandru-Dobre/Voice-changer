@@ -118,17 +118,20 @@ void AppModel::initialise(TimePoint now) {
             if (p.name == settings_.last_preset) current_preset_ = p.name;
     }
 
-    // Studio draft (per voice name is unknown until typed; load the most
-    // recent draft directory if there is exactly one).
+    // Studio draft: reopen the most recently modified project (BUG-021).
     std::error_code ec;
-    if (fs::is_directory(paths_.studio_dir, ec)) {
-        std::vector<fs::path> drafts;
-        for (const auto& e : fs::directory_iterator(paths_.studio_dir, ec))
-            if (e.is_directory(ec) && fs::is_regular_file(e.path() / "draft.json", ec)) drafts.push_back(e.path());
-        if (drafts.size() == 1) {
-            studio_.draft().voice_name = drafts.front().filename().string();
-            studio_.load_draft(paths_.studio_dir);
+    if (!paths_.studio_dir.empty() && fs::is_directory(paths_.studio_dir, ec)) {
+        std::string newest;
+        fs::file_time_type newest_t{};
+        for (const auto& e : fs::directory_iterator(paths_.studio_dir, ec)) {
+            const std::string name = e.path().filename().string();
+            if (!e.is_directory(ec) || !is_safe_project_name(name)) continue;
+            const auto t = fs::last_write_time(e.path() / "draft.json", ec);
+            if (ec) { ec.clear(); continue; }
+            if (newest.empty() || t > newest_t || (t == newest_t && name < newest)) { newest = name; newest_t = t; }
         }
+        if (!newest.empty() && !studio_open_project(newest))
+            notify(Notice::Level::Warning, "Voice Studio draft '" + newest + "' could not be read.");
     }
 
     // Devices: enumerate, restore the policy, maybe start.
@@ -141,10 +144,14 @@ void AppModel::initialise(TimePoint now) {
                                                                        : CaptureMode::OrdinaryMicrophone;
     bool cap_ok = true, play_ok = true;
     restore_device_policy(cap_ok, play_ok);
+    seen_generation_ = snapshot().generation;
     if (!cap_ok || !play_ok) {
+        std::string names;
+        if (unresolved_capture_) names += " capture '" + *unresolved_capture_ + "'";
+        if (unresolved_playback_) names += std::string(names.empty() ? "" : " and") + " playback '" + *unresolved_playback_ + "'";
         notify(Notice::Level::Warning,
-               "A remembered device is no longer listed. Choose it again in Devices; FluxVoice never "
-               "substitutes another device.");
+               "A remembered device is no longer listed (" + names.substr(1) + "). Choose it again in Devices; "
+               "FluxVoice never substitutes another device.");
         section_ = Section::Devices;
     } else if (settings_.start_engine_on_launch && backend_usable()) {
         static_cast<void>(start_engine());
@@ -164,6 +171,10 @@ void AppModel::tick(TimePoint now) {
     uptime_s_ += dt;
 
     engine_.tick(now);
+    if (snapshot().generation != seen_generation_) {  // hot-plug: a missing remembered device may be back
+        seen_generation_ = snapshot().generation;
+        retry_unresolved_devices();
+    }
 
     // State transitions worth a notice (the stream stopped without the user asking).
     const StreamState st = engine_.status().state;
@@ -177,13 +188,16 @@ void AppModel::tick(TimePoint now) {
         last_state_ = st;
     }
 
+    engine_.flush_params();  // deliver a snapshot parked by a full queue (BUG-023)
+
     history_acc_s_ += dt;
     if (history_acc_s_ >= 1.0) {
         history_acc_s_ = 0.0;
         const TelemetrySnapshot t = engine_.telemetry();
+        if (t.output_underruns < last_underruns_) last_underruns_ = t.output_underruns;  // per-stream rebaseline (BUG-024)
         underruns_.push(static_cast<float>(t.output_underruns - last_underruns_));
         last_underruns_ = t.output_underruns;
-        queued_ms_.push(static_cast<float>(t.queued_ms()));
+        queued_ms_.push(t.queued_valid ? static_cast<float>(t.queued_ms()) : 0.0f);
     }
 
     studio_poll_s_ += dt;
@@ -206,6 +220,15 @@ bool AppModel::start_engine() {
         engine_message_ = backend_status().state == BackendState::NullOnly
                               ? "No audio hardware is reachable (null backend, offline mode)."
                               : "No audio backend could be initialised.";
+        notify(Notice::Level::Error, engine_message_);
+        return false;
+    }
+    // BUG-020: a remembered explicit device that is not resolvable is never
+    // replaced by the system default. Live, tray, Mini panel and hotkeys all
+    // come through here.
+    if (device_unresolved()) {
+        engine_message_   = explain_error(unresolved_device_error());
+        engine_requested_ = false;
         notify(Notice::Level::Error, engine_message_);
         return false;
     }
@@ -251,8 +274,16 @@ DeviceRows AppModel::playback_rows() const {
     return build_rows(snapshot(), EndpointDirection::Playback, snapshot_stale());
 }
 
-void AppModel::select_capture_row(std::size_t row) { capture_sel_ = selection_for_row(capture_rows(), row); }
-void AppModel::select_playback_row(std::size_t row) { playback_sel_ = selection_for_row(playback_rows(), row); }
+// Any explicit choice, including the "Follow system default" row, replaces
+// the remembered-but-missing device.
+void AppModel::select_capture_row(std::size_t row) {
+    capture_sel_ = selection_for_row(capture_rows(), row);
+    unresolved_capture_.reset();
+}
+void AppModel::select_playback_row(std::size_t row) {
+    playback_sel_ = selection_for_row(playback_rows(), row);
+    unresolved_playback_.reset();
+}
 
 void AppModel::set_capture_mode(CaptureMode m) {
     if (m == CaptureMode::SystemPlaybackLoopback && !loopback_supported()) {
@@ -268,9 +299,13 @@ std::optional<std::string> AppModel::feedback_warning() const {
 }
 
 bool AppModel::apply_devices() {
-    settings_.capture_policy   = policy_text(capture_sel_, EndpointDirection::Capture);
-    settings_.playback_policy  = policy_text(playback_sel_, EndpointDirection::Playback);
-    settings_.capture_loopback = capture_mode_ == CaptureMode::SystemPlaybackLoopback;
+    // An unresolved side keeps its remembered policy: writing "default" here
+    // would turn the substitution into a saved choice the user never made.
+    if (!unresolved_capture_) {
+        settings_.capture_policy   = policy_text(capture_sel_, EndpointDirection::Capture);
+        settings_.capture_loopback = capture_mode_ == CaptureMode::SystemPlaybackLoopback;
+    }
+    if (!unresolved_playback_) settings_.playback_policy = policy_text(playback_sel_, EndpointDirection::Playback);
     const bool ok = start_engine();
     static_cast<void>(save_settings());
     return ok;
@@ -278,7 +313,39 @@ bool AppModel::apply_devices() {
 
 void AppModel::refresh_devices() {
     const auto res = engine_.controller().refresh();
-    if (!is_ok(res)) notify(Notice::Level::Warning, "Device list refresh failed: " + explain_error(std::get<AudioError>(res)));
+    if (!is_ok(res)) {
+        notify(Notice::Level::Warning, "Device list refresh failed: " + explain_error(std::get<AudioError>(res)));
+        return;
+    }
+    seen_generation_ = snapshot().generation;
+    retry_unresolved_devices();
+}
+
+void AppModel::retry_unresolved_devices() {
+    auto retry = [&](std::optional<std::string>& pending, DeviceSelection& sel, EndpointDirection dir, const char* what) {
+        if (!pending) return;
+        bool ok = false;
+        const DeviceSelection s = selection_from_policy("name:" + *pending, dir, ok);
+        if (!ok) return;
+        sel = s;
+        notify(Notice::Level::Info, std::string("Remembered ") + what + " device '" + *pending + "' is listed again and selected.");
+        pending.reset();
+    };
+    retry(unresolved_capture_, capture_sel_, EndpointDirection::Capture, "capture");
+    retry(unresolved_playback_, playback_sel_, EndpointDirection::Playback, "playback");
+}
+
+AudioError AppModel::unresolved_device_error() const {
+    std::string msg;
+    auto add = [&](const std::optional<std::string>& pending, EndpointDirection dir, const char* what) {
+        if (!pending) return;
+        if (!msg.empty()) msg += "; ";
+        msg += std::string("the remembered ") + what + " device '" + *pending + "' " +
+               (count_named(*pending, dir) > 1 ? "matches more than one listed device" : "is not in the current device list");
+    };
+    add(unresolved_capture_, EndpointDirection::Capture, "capture");
+    add(unresolved_playback_, EndpointDirection::Playback, "playback");
+    return AudioError{AudioErrorCategory::DeviceNotFound, "start the stream", 0, snapshot().backend, msg + "."};
 }
 
 Result<EndpointInfo> AppModel::probe(const DeviceSelection& sel, EndpointDirection dir) const {
@@ -301,12 +368,14 @@ Result<EndpointInfo> AppModel::probe(const DeviceSelection& sel, EndpointDirecti
 std::string AppModel::capture_name() const {
     if (engine_.status().state == StreamState::Running && !engine_.stream_info().capture_name.empty())
         return engine_.stream_info().capture_name;
+    if (unresolved_capture_) return *unresolved_capture_ + " (not listed)";
     return describe_selection(capture_sel_, snapshot(), EndpointDirection::Capture, capture_mode_);
 }
 
 std::string AppModel::playback_name() const {
     if (engine_.status().state == StreamState::Running && !engine_.stream_info().playback_name.empty())
         return engine_.stream_info().playback_name;
+    if (unresolved_playback_) return *unresolved_playback_ + " (not listed)";
     return describe_selection(playback_sel_, snapshot(), EndpointDirection::Playback);
 }
 
@@ -317,27 +386,45 @@ std::string AppModel::policy_text(const DeviceSelection& sel, EndpointDirection 
     return "name:" + name;
 }
 
-DeviceSelection AppModel::selection_from_policy(std::string_view policy, EndpointDirection dir, bool& ok) const {
-    ok = true;
-    constexpr std::string_view kName = "name:";
-    if (policy.empty() || policy == "default" || !policy.starts_with(kName)) return FollowSystemDefault{};
-    const std::string_view name = policy.substr(kName.size());
+namespace {
+constexpr std::string_view kPolicyName = "name:";
+}
+
+int AppModel::count_named(std::string_view name, EndpointDirection dir) const {
     const auto& list = (dir == EndpointDirection::Capture && capture_mode_ == CaptureMode::SystemPlaybackLoopback)
                            ? snapshot().playback : snapshot().endpoints(dir);
-    const EndpointDescriptor* found = nullptr;
     int matches = 0;
     for (const EndpointDescriptor& d : list)
-        if (d.name == name) { found = &d; ++matches; }
-    if (matches != 1) {  // missing or ambiguous (two identical USB mics): ask again
+        if (d.name == name) ++matches;
+    return matches;
+}
+
+// `ok == false` means "explicit, but not resolvable now". The returned
+// FollowSystemDefault is only a placeholder: the caller records the name in
+// unresolved_* so start_engine() refuses (BUG-020).
+DeviceSelection AppModel::selection_from_policy(std::string_view policy, EndpointDirection dir, bool& ok) const {
+    ok = true;
+    if (policy.empty() || policy == "default" || !policy.starts_with(kPolicyName)) return FollowSystemDefault{};
+    const std::string_view name = policy.substr(kPolicyName.size());
+    if (count_named(name, dir) != 1) {  // missing or ambiguous (two identical USB mics): ask again
         ok = false;
         return FollowSystemDefault{};
     }
-    return ExplicitEndpoint{found->key, snapshot().generation};
+    const auto& list = (dir == EndpointDirection::Capture && capture_mode_ == CaptureMode::SystemPlaybackLoopback)
+                           ? snapshot().playback : snapshot().endpoints(dir);
+    for (const EndpointDescriptor& d : list)
+        if (d.name == name) return ExplicitEndpoint{d.key, snapshot().generation};
+    ok = false;  // unreachable: count_named saw exactly one
+    return FollowSystemDefault{};
 }
 
 void AppModel::restore_device_policy(bool& capture_ok, bool& playback_ok) {
     capture_sel_  = selection_from_policy(settings_.capture_policy, EndpointDirection::Capture, capture_ok);
     playback_sel_ = selection_from_policy(settings_.playback_policy, EndpointDirection::Playback, playback_ok);
+    unresolved_capture_.reset();
+    unresolved_playback_.reset();
+    if (!capture_ok) unresolved_capture_ = settings_.capture_policy.substr(kPolicyName.size());
+    if (!playback_ok) unresolved_playback_ = settings_.playback_policy.substr(kPolicyName.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -623,13 +710,54 @@ void AppModel::rescan_models() {
 bool AppModel::studio_write_job(std::string& error) {
     if (paths_.studio_dir.empty()) { error = "no studio directory configured"; return false; }
     if (studio_.draft().base_bundle.empty()) studio_.draft().base_bundle = active_bundle_;
+    // Job files go into the project the draft owns, never into another one.
+    if (const auto conflict = studio_name_conflict()) { error = *conflict; return false; }
+    if (!studio_save_draft()) {
+        error = "the draft cannot be saved under voice name '" + studio_.draft().voice_name + "'";
+        return false;
+    }
     return studio_.write_job(paths_.repo_root, paths_.studio_dir, paths_.models_dir, error);
 }
 
+std::optional<std::string> AppModel::studio_name_conflict() const {
+    const std::string& name = studio_.draft().voice_name;
+    if (paths_.studio_dir.empty() || !is_safe_project_name(name) || name == studio_project_) return std::nullopt;
+    std::error_code ec;
+    if (!fs::exists(paths_.studio_dir / name, ec)) return std::nullopt;
+    return "A Voice Studio project named '" + name + "' already exists. Open it, or choose another name.";
+}
+
+bool AppModel::studio_open_project(std::string_view name) {
+    if (paths_.studio_dir.empty() || !is_safe_project_name(name)) return false;
+    VoiceStudioModel loaded;
+    loaded.requirements() = studio_.requirements();
+    loaded.draft().voice_name = std::string(name);
+    if (!loaded.load_draft(paths_.studio_dir)) return false;
+    loaded.draft().voice_name = std::string(name);  // the directory is the identity, not the file's copy
+    studio_         = std::move(loaded);
+    studio_project_ = std::string(name);
+    studio_status_.reset();
+    return true;
+}
+
 bool AppModel::studio_save_draft() {
-    if (paths_.studio_dir.empty() || studio_.draft().voice_name.empty()) return false;
+    const std::string name = studio_.draft().voice_name;
+    if (paths_.studio_dir.empty() || studio_.name_problem(nullptr)) return false;  // half-typed or unsafe name
+    if (studio_name_conflict()) return false;  // never overwrite another project; the UI offers to open it
     std::string err;
     if (!studio_.save_draft(paths_.studio_dir, err)) { notify(Notice::Level::Warning, err); return false; }
+    if (!studio_project_.empty() && studio_project_ != name) {
+        // Rename: the draft now lives under the new name. An old directory
+        // holding only its draft.json (e.g. the prefix "ale" while typing
+        // "alex") is removed; one with job files or status is left intact.
+        const fs::path old_dir = paths_.studio_dir / studio_project_;
+        std::error_code ec;
+        bool only_draft = fs::is_regular_file(old_dir / "draft.json", ec);
+        for (const auto& e : fs::directory_iterator(old_dir, ec))
+            if (e.path().filename() != "draft.json") { only_draft = false; break; }
+        if (only_draft && !ec && fs::remove(old_dir / "draft.json", ec)) fs::remove(old_dir, ec);
+    }
+    studio_project_ = name;
     return true;
 }
 
@@ -653,8 +781,14 @@ TraySpec AppModel::tray_spec() const {
     in.language_pair = language_pair_label();
     in.language_pairs = language_pair_options();
     in.queued_ms     = engine_.telemetry().queued_ms();
+    in.queued_valid  = engine_.telemetry().queued_valid;
     in.retry_attempt = st.retry_attempt;
     if (st.last_error) in.error_text = std::string(to_string(st.last_error->category)) + ": " + st.last_error->message;
+    in.device_unresolved = device_unresolved();
+    if (in.device_unresolved) {
+        const AudioError e = unresolved_device_error();
+        in.error_text = std::string(to_string(e.category)) + ": " + e.message;
+    }
     return build_tray_spec(in);
 }
 
@@ -721,12 +855,15 @@ StatusSummary AppModel::status_summary() const {
     const std::string backend = snapshot().backend.empty() ? backend_status().backend : snapshot().backend;
     if (!backend.empty()) d << backend << "  |  ";
     if (st.state == StreamState::Running || st.state == StreamState::Recovering) {
-        d << capture_name() << " -> " << playback_name() << "  |  " << t.sample_rate << " Hz  |  queued ";
-        char buf[32];
-        std::snprintf(buf, sizeof buf, "%.0f ms", t.queued_ms());
-        d << buf << "  |  " << t.output_underruns << " underruns, " << t.input_overruns << " overruns";
+        d << capture_name() << " -> " << playback_name() << "  |  " << t.sample_rate << " Hz  |  queued "
+          << t.queued_ms_text() << "  |  " << t.output_underruns << " underruns, " << t.input_overruns << " overruns";
+
+
+
     } else if (st.last_error && (st.state == StreamState::AwaitingUser || st.state == StreamState::Error)) {
         d << explain_error(*st.last_error);
+    } else if (device_unresolved()) {
+        d << explain_error(unresolved_device_error());
     } else {
         d << "engine stopped";
         if (backend_status().state == BackendState::NullOnly) d << "  |  offline: null backend";

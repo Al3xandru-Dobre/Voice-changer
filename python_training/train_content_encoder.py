@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
-"""Distil the HuBERT km100 teacher into the causal 50 Hz content encoder.
+"""Distil a unit teacher into the causal 50 Hz content encoder.
 
 Milestone 2 / Stage 04. One trunk, three delay heads (L = 0/1/2 frames), trained
 with cross-entropy summed over heads (fvml/content_encoder.py). Labels come from
 a teacher units directory written by extract_units.py --tokenizer teacher-km100,
 always from the clean audio; only the student's input is augmented
 (fvml/augment.py: MUSAN noise, RIR reverb, EQ, gain; each optional).
+
+Milestone 3 / Stage 03 (the dual-output multilingual student): the same network
+with --latent-dim 128 over K = 1000 mhubert-vp labels (the vocabulary always
+comes from the labels), trained on balanced {en, es, fr, de} speech:
+  --train-units       repeatable / comma-separated: one units directory per corpus
+  --side src          read the source audio of paired S2UT manifests
+  --default-lang en   tag for rows without a `lang` field (LibriSpeech)
+  --lang-ratios balanced   every language is drawn equally often, whatever its hours
+  --train-subsets / --val-subsets   keep only these manifest subsets
+Validation then reports top-1 and top-5 unit accuracy per head and per language
+(Stage 03's definition of done: >= 65% / >= 90% in every language).
+Labels from the non-commercial mHuBERT-147 teacher are refused without
+--include-noncommercial, and the checkpoint stays marked non-commercial.
 
 Data: --train-manifest (JSONL audio rows) joined by utt_id with --train-units.
 Each example is a random 2 s crop on a 320-sample frame boundary (labels cropped
@@ -25,6 +38,13 @@ reseeded from the step, so the data order after a resume is new but reproducible
       --val-manifest librispeech-dev-clean.jsonl --val-units data/units/teacher-km100/dev \\
       --musan-manifest musan.jsonl --rir-manifest rirs.jsonl --run-name ce_v1
   train_content_encoder.py ... --run-name ce_v1 --resume auto
+  # Milestone 3: multilingual dual-output student (D = 128, K = 1000)
+  train_content_encoder.py --latent-dim 128 --lang-ratios balanced --default-lang en \\
+      --side src --train-subsets train \\
+      --train-manifest librispeech-train-clean-360.jsonl,s2ut/cvss-c-es_en.jsonl,... \\
+      --train-units data/units/mhubert/ls360,data/units/mhubert/cvss-c-es_en.src,... \\
+      --val-manifest ... --val-units ... --musan-manifest musan.jsonl \\
+      --rir-manifest rirs.jsonl --run-name ce_m3
 
 Exit status: 0 = trained, 1 = missing or inconsistent inputs.
 """
@@ -45,36 +65,42 @@ import numpy as np       # noqa: E402
 import soundfile as sf   # noqa: E402
 import torch             # noqa: E402
 
-from fvml import audio, paths, units                   # noqa: E402
+from fvml import audio, paths, sampling, units         # noqa: E402
 from fvml import content_encoder as ce                 # noqa: E402
 from fvml.augment import AugmentConfig, Augmenter      # noqa: E402
 
 FS = ce.FRAME_SAMPLES
+DOD_TOP1, DOD_TOP5 = 0.65, 0.90      # M3 Stage 03: held-out accuracy in every language
 
 
 # -- data ---------------------------------------------------------------------
-def join_items(manifest_spec, units_dir, log=print):
-    """Manifest rows x teacher units -> [(audio path, units path, n_frames)], labels meta."""
+def join_items(manifest_spec, units_dir, log=print, side=None, default_lang=None, subsets=None):
+    """Manifest rows x teacher units -> [(audio path, units path, n_frames, lang)],
+    labels meta. `units_dir` is one directory or several that share a label
+    space; `side` picks the audio of paired S2UT rows; `lang` is None for rows
+    that carry no language (and no `default_lang` was given)."""
     rows, _ = units.read_manifests(manifest_spec)
-    meta, urows = units.read_units_dir(units_dir)
-    by_id = {r["utt_id"]: r for r in urows}
+    rows = units.filter_subsets(units.audio_rows(rows, side, default_lang), subsets)
+    meta, by_id = units.read_units_dirs(units_dir)
     items, missing, bad = [], 0, 0
     for r in rows:
-        u = by_id.get(r["utt_id"])
-        if u is None:
+        found = by_id.get(r["utt_id"])
+        if found is None:
             missing += 1
             continue
+        udir, u = found
         expect = math.ceil(round(r["duration"] * audio.SAMPLE_RATE) / FS)
         if abs(expect - u["n_frames"]) > 1:      # duration is rounded to 1 ms in manifests
             bad += 1
             continue
-        items.append((str(paths.resolve(r["path"])), str(pathlib.Path(units_dir) / u["units"]),
-                      int(u["n_frames"])))
+        items.append((str(paths.resolve(r["path"])), str(udir / u["units"]),
+                      int(u["n_frames"]), r.get("lang")))
+    where = ", ".join(units.split_specs(units_dir))
     if missing or bad:
-        log(f"[data] {units_dir}: {len(items)} utterances; {missing} without units, "
+        log(f"[data] {where}: {len(items)} utterances; {missing} without units, "
             f"{bad} with a frame-count mismatch (skipped)")
     if not items:
-        raise ValueError(f"no manifest row has units in {units_dir}")
+        raise ValueError(f"no manifest row has units in {where}")
     return items, meta
 
 
@@ -101,7 +127,7 @@ class CropDataset(torch.utils.data.Dataset):
     def __getitem__(self, i):
         if self.rng is None:                      # per worker; worker seeds follow torch's RNG
             self.rng = np.random.default_rng(torch.initial_seed() % (1 << 63))
-        apath, upath, n = self.items[i]
+        apath, upath, n = self.items[i][:3]
         start = int(self.rng.integers(0, n - self.crop + 1)) if n > self.crop else 0
         labels = np.full(self.crop, ce.IGNORE, np.int64)
         lab = np.load(upath, mmap_mode="r")[start:start + self.crop]
@@ -149,25 +175,61 @@ def lr_lambda(warmup, total, floor):
     return f
 
 
+def select_val(items, limit):
+    """The first `limit` utterances; with several languages, `limit` split
+    evenly between them (in manifest order), so no language goes unscored."""
+    langs = list(dict.fromkeys(it[3] for it in items))
+    if len(langs) < 2 or not limit:
+        return items[:limit] if limit else list(items)
+    per = max(1, limit // len(langs))
+    return [it for lang in langs for it in [x for x in items if x[3] == lang][:per]]
+
+
 @torch.no_grad()
 def validate(model, items, device, limit):
+    """Loss, top-1 (`acc`) and top-5 accuracy per head over the validation
+    utterances, plus the same per language (`by_lang`) and, per head, whether
+    every language meets Stage 03's 65% / 90% floor (`dod`)."""
     model.eval()
-    correct = [0] * len(model.heads)
-    count = [0] * len(model.heads)
-    loss_sum, n_utts = np.zeros(len(model.heads)), 0
-    for apath, upath, n in items[:limit]:
+    heads = len(model.heads)
+    loss_sum, n_utts = np.zeros(heads), 0
+    by_lang = {}
+    for apath, upath, n, lang in select_val(items, limit):
         x = torch.from_numpy(read_frames(apath, 0, n))[None].to(device)
         lab = torch.from_numpy(np.load(upath).astype(np.int64))[None].to(device)
         out = model(x)
         _, per = ce.distill_loss(out["logits"], lab, model.cfg.lookahead)
         loss_sum += [float(p) for p in per]
         n_utts += 1
-        for h, (c, k) in enumerate(ce.head_accuracy(out["logits"], lab, model.cfg.lookahead)):
-            correct[h] += c
-            count[h] += k
+        tally = by_lang.setdefault(lang, {"top1": np.zeros(heads), "top5": np.zeros(heads),
+                                          "frames": np.zeros(heads), "utts": 0})
+        tally["utts"] += 1
+        top1 = ce.head_accuracy(out["logits"], lab, model.cfg.lookahead)
+        top5 = ce.head_topk_accuracy(out["logits"], lab, model.cfg.lookahead, k=5)
+        for h in range(heads):
+            tally["top1"][h] += top1[h][0]
+            tally["top5"][h] += top5[h][0]
+            tally["frames"][h] += top1[h][1]
     model.train()
-    acc = [c / max(k, 1) for c, k in zip(correct, count)]
-    return {"loss": (loss_sum / max(n_utts, 1)).tolist(), "acc": acc, "acc_mean": float(np.mean(acc))}
+    total = {k: sum(t[k] for t in by_lang.values()) if by_lang else np.zeros(heads)
+             for k in ("top1", "top5", "frames")}
+    acc = (total["top1"] / np.maximum(total["frames"], 1)).tolist()
+    result = {"loss": (loss_sum / max(n_utts, 1)).tolist(), "acc": acc,
+              "acc_mean": float(np.mean(acc)),
+              "top5": (total["top5"] / np.maximum(total["frames"], 1)).tolist(),
+              "by_lang": {}}
+    for lang, t in by_lang.items():
+        if lang is not None:
+            result["by_lang"][lang] = {
+                "acc": (t["top1"] / np.maximum(t["frames"], 1)).tolist(),
+                "top5": (t["top5"] / np.maximum(t["frames"], 1)).tolist(),
+                "frames": int(t["frames"].max()), "utts": int(t["utts"])}
+    result["dod"] = {
+        f"L{L}": bool(result["by_lang"]) and all(
+            v["acc"][h] >= DOD_TOP1 and v["top5"][h] >= DOD_TOP5
+            for v in result["by_lang"].values())
+        for h, L in enumerate(model.cfg.lookahead)}
+    return result
 
 
 def rng_state():
@@ -208,17 +270,25 @@ def train(args, log=print):
                 raise FileNotFoundError(f"{resume}: no checkpoint to resume")
             resume = None
 
-    train_items, labels_meta = join_items(args.train_manifest, args.train_units, log)
-    if labels_meta.get("tokenizer") != "teacher-km100":
-        log(f"[data] warning: training on {labels_meta.get('tokenizer')} labels, not teacher-km100")
+    train_items, labels_meta = join_items(args.train_manifest, args.train_units, log,
+                                          side=args.side, default_lang=args.default_lang,
+                                          subsets=args.train_subsets)
+    units.check_license(labels_meta, args.include_noncommercial)
+    if not str(labels_meta.get("tokenizer", "")).startswith("teacher-"):
+        log(f"[data] warning: training on {labels_meta.get('tokenizer')} labels, not a teacher's")
     val_items = []
     if args.val_manifest:
-        val_items, val_meta = join_items(args.val_manifest, args.val_units, log)
+        val_items, val_meta = join_items(args.val_manifest, args.val_units, log, side=args.side,
+                                         default_lang=args.default_lang,
+                                         subsets=args.val_subsets)
         units.check_compatible(labels_meta, val_meta)
-    labels_meta = {k: labels_meta.get(k) for k in
-                   ("tokenizer", "label_space", "vocab", "frame_rate_hz", "source")}
+    keep = ["tokenizer", "label_space", "vocab", "frame_rate_hz", "source"]
+    if labels_meta.get("noncommercial"):         # the taint follows the weights; M2 metadata is unchanged
+        keep += ["license", "noncommercial"]
+    labels_meta = {k: labels_meta.get(k) for k in keep}
 
     cfg = ce.EncoderConfig(vocab=int(labels_meta["vocab"]),
+                           **({"latent_dim": args.latent_dim} if args.latent_dim else {}),
                            **({"channels": tuple(int(c) for c in args.channels.split(","))}
                               if args.channels else {}))
     model = ce.ContentEncoder(cfg).to(device)
@@ -244,7 +314,11 @@ def train(args, log=print):
         random.seed(args.seed)
     summary = model.summary()
     log(f"[train] {run}: {summary['params'] / 1e6:.2f}M params, {summary['macs_per_second'] / 1e9:.2f} "
-        f"GMAC/s, {len(train_items)} train / {len(val_items)} val utterances, device {device}")
+        f"GMAC/s, D={cfg.latent_dim}, vocab {cfg.vocab}, {len(train_items)} train / "
+        f"{len(val_items)} val utterances, device {device}")
+    if cfg.vocab >= ce.MULTILINGUAL_VOCAB and summary["params"] > ce.MAX_PARAMS_MULTILINGUAL:
+        log(f"[train] warning: {summary['params'] / 1e6:.2f}M params exceeds Stage 03's "
+            f"{ce.MAX_PARAMS_MULTILINGUAL / 1e6:.0f}M budget")
 
     augmenter = None
     noise = manifest_paths(args.musan_manifest, set(args.musan_subsets.split(",")))
@@ -257,7 +331,14 @@ def train(args, log=print):
             f"(p {acfg.rir_p if rirs else 0}), EQ p {acfg.eq_p}, gain p {acfg.gain_p}")
     crop = int(round(args.crop_seconds * ce.FRAME_RATE_HZ))
     ds = CropDataset(train_items, crop, augmenter)
-    sampler = WeightedStream([max(n, crop) for _, _, n in train_items], seed=args.seed * 1_000_003 + step)
+    weights = [max(it[2], crop) for it in train_items]
+    ratios = sampling.parse_ratios(args.lang_ratios)
+    if ratios:
+        weights, shares = sampling.language_weights(weights, [it[3] for it in train_items], ratios)
+        log("[data] language sampling: " + ", ".join(
+            f"{lang} {100 * s['share']:.0f}% of draws ({s['items']} utterances)"
+            for lang, s in shares.items()))
+    sampler = WeightedStream(weights, seed=args.seed * 1_000_003 + step)
     loader = torch.utils.data.DataLoader(
         ds, batch_size=args.batch_size, sampler=sampler, num_workers=args.workers,
         pin_memory=device.type == "cuda", drop_last=True, worker_init_fn=worker_init,
@@ -273,10 +354,11 @@ def train(args, log=print):
     acc_c = np.zeros(len(cfg.lookahead))
     acc_n = np.zeros(len(cfg.lookahead))
     loss_sum, loss_n = np.zeros(len(cfg.lookahead)), 0
+    last_val = {}
 
     def checkpoint(name):
         save_checkpoint(ckpt_dir / name, model, opt, sched, step, args, labels_meta,
-                        {"best_val": best, "run_name": run,
+                        {"best_val": best, "run_name": run, "val": json.dumps(last_val),
                          "elapsed": elapsed0 + time.monotonic() - t_start})
 
     model.train()
@@ -322,6 +404,16 @@ def train(args, log=print):
                 writer.add_scalar(f"val/loss_L{L}", lo, step)
             log(f"[val] step {step}: loss " + " ".join(f"{lo:.3f}" for lo in v["loss"])
                 + "  acc " + " ".join(f"{a:.3f}" for a in v["acc"]))
+            for L, t5 in zip(cfg.lookahead, v["top5"]):
+                writer.add_scalar(f"val/top5_L{L}", t5, step)
+            for lang, s in v["by_lang"].items():
+                for L, a, t5 in zip(cfg.lookahead, s["acc"], s["top5"]):
+                    writer.add_scalar(f"val_{lang}/acc_L{L}", a, step)
+                    writer.add_scalar(f"val_{lang}/top5_L{L}", t5, step)
+                log(f"[val]   {lang}: top-1 " + " ".join(f"{a:.3f}" for a in s["acc"])
+                    + "  top-5 " + " ".join(f"{a:.3f}" for a in s["top5"])
+                    + f"  ({s['utts']} utterances)")
+            last_val = {"step": step, **v}
             if v["acc_mean"] > best:
                 best = v["acc_mean"]
                 checkpoint("best.pt")
@@ -344,9 +436,22 @@ def main(argv=None):
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog="\n".join(__doc__.splitlines()[2:]))
     p.add_argument("--train-manifest", action="append", required=True)
-    p.add_argument("--train-units", required=True, help="teacher-km100 units directory")
+    p.add_argument("--train-units", action="append", required=True,
+                   help="teacher units directory (repeatable / comma-separated: one per corpus)")
     p.add_argument("--val-manifest", action="append")
-    p.add_argument("--val-units")
+    p.add_argument("--val-units", action="append")
+    p.add_argument("--side", choices=units.SIDES,
+                   help="paired S2UT manifests: which audio to train on (src for the student)")
+    p.add_argument("--default-lang", help="language of rows without a `lang` field (e.g. en)")
+    p.add_argument("--train-subsets", help="keep only these manifest subsets (comma-separated)")
+    p.add_argument("--val-subsets", help="keep only these manifest subsets for validation")
+    p.add_argument("--lang-ratios", help="share of draws per language: 'balanced' (25%% each of "
+                   "en/es/fr/de), 'en,es,fr,de' or 'en=0.4,es=0.2,...' (default: by length)")
+    p.add_argument("--latent-dim", type=int,
+                   help=f"bottleneck / `latents` width D (default {ce.EncoderConfig().latent_dim}; "
+                   f"{ce.MULTILINGUAL_LATENT_DIM} for the M3 dual-output student)")
+    p.add_argument("--include-noncommercial", action="store_true",
+                   help="allow labels from the CC-BY-NC-SA mHuBERT-147 teacher (research only)")
     p.add_argument("--val-limit", type=int, default=200, help="validation utterances")
     p.add_argument("--val-every", type=int, default=2000)
     p.add_argument("--musan-manifest", action="append", help="MUSAN manifest (noise augmentation)")

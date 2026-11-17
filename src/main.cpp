@@ -244,7 +244,7 @@ Snapshot snapshot(const DuplexRouter& router, const std::atomic<uint64_t>& drops
         const auto period_ms = [](std::uint32_t frames, std::uint32_t rate) {
             return rate ? 1000.0 * frames / rate : 0.0;
         };
-        s.lat_ms = 1000.0 * (static_cast<double>(pipeline->geometry().algorithmic_samples()) +
+        s.lat_ms = 1000.0 * (static_cast<double>(pipeline->geometry().model_delay_samples()) +
                             static_cast<double>(std::max<std::int64_t>(s.queued, 0))) /
                             pipeline->geometry().sample_rate +
                    period_ms(stream->capture_internal_period, stream->capture_internal_rate) +

@@ -93,8 +93,9 @@ bundle, for the live runs only). Live latency runs also need a working cable rou
       a `ChunkAssembler(hop, context = 0)`. Load, validate and `warm_up()` every
       session **before** `engine.start()`.
 - [x] **`src/pipeline/LatencyGovernor.hpp`:**
-  - [x] Target occupancy is `--latency-target-ms`, by default algorithmic
-        latency + compute budget + margin (master budget).
+  - [x] Target occupancy is `--latency-target-ms`, by default the framing hop +
+        compute budget + margin (master budget; model lookahead lives in the
+        model, not the queue — [BUG-026](../Bug%20Report/BUG-026_latency_target_counts_lookahead_twice.md)).
   - [x] At startup, pre-fill the output queue with silence to the target level.
   - [x] When `queued` stays above target + one hop for N hops, drop output
         samples **only while the output is quiet** (gate closed / low energy).
@@ -118,8 +119,9 @@ bundle, for the live runs only). Live latency runs also need a working cable rou
         bins up to 2× hop).
   - [x] New `[stats]` fields: `inf_p50_us`, `inf_p95_us`, `inf_max_us`, `misses`
         (hops slower than the hop duration), `skipped`, `errors` (failed model
-        steps), and `lat_ms` (in-process estimate = algorithmic + queued +
-        reported device periods).
+        steps), and `lat_ms` (in-process estimate = model lookahead/OLA +
+        queued + reported device periods; `queued` already includes the framing
+        hop — [BUG-026](../Bug%20Report/BUG-026_latency_target_counts_lookahead_twice.md)).
   - [x] `analyze_soak.py --vc`: requires `misses` flat after warm-up and
         `queued` within target ± one hop. Underruns may still occur at startup.
 - [x] **Tests** (`tests/test_inference_pipeline.cpp`, `tests/test_latency_governor.cpp`;

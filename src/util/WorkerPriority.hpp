@@ -8,6 +8,7 @@
 #include <avrt.h>
 #elif defined(__APPLE__)
 #include <pthread.h>
+#include <pthread/qos.h>
 #include <sys/qos.h>
 #elif defined(__linux__)
 #include <pthread.h>
@@ -33,7 +34,9 @@ public:
         result_ = elevated_ ? 0 : static_cast<int>(GetLastError());
 #elif defined(__APPLE__)
         method_ = "QoS user-interactive";
-        old_qos_ = pthread_get_qos_class_np(pthread_self(), &old_relative_);
+        // The class is an out-parameter; the return value is an errno code.
+        if (pthread_get_qos_class_np(pthread_self(), &old_qos_, &old_relative_) != 0)
+            old_qos_ = QOS_CLASS_UNSPECIFIED;   // restore is skipped below
         result_ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
         elevated_ = result_ == 0;
 #elif defined(__linux__)

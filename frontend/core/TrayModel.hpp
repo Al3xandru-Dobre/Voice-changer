@@ -59,8 +59,10 @@ struct TrayInputs {
     std::string  language_pair;              // "es -> en"
     std::vector<std::string> language_pairs; // recent/known pairs
     double       queued_ms = 0.0;
+    bool         queued_valid = true;  // false in loopback mode: independent clocks (BUG-024)
     std::string  error_text;
     std::uint32_t retry_attempt = 0;
+    bool         device_unresolved = false;  // a remembered device is missing; Start is refused (BUG-020)
 };
 
 TrayState tray_state_for(const TrayInputs& in);

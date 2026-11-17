@@ -396,6 +396,16 @@ if(FLUXVOICE_BUILD_TESTS)
         add_test(NAME pitch_tracker COMMAND test_pitch_tracker ${CMAKE_SOURCE_DIR}/tests/data/pitch)
     endif()
 
+    # M3 stage 04: Wait-k policy state machine + unit/prosody FIFO (ORT-free).
+    # Replays tests/data/waitk/golden_trajectories.txt, written by the Python
+    # twin (python_training/make_waitk_golden.py). IPO off like the other
+    # allocation-counting tests.
+    add_executable(test_waitk_policy tests/test_waitk_policy.cpp tests/AllocationCounter.cpp)
+    target_include_directories(test_waitk_policy PRIVATE src tests)
+    set_target_properties(test_waitk_policy PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    fluxvoice_set_warnings(test_waitk_policy)
+    add_test(NAME waitk_policy COMMAND test_waitk_policy ${CMAKE_SOURCE_DIR}/tests/data/waitk)
+
     # OLA listening aid: writes reference / butt-joined / crossfaded WAVs into
     # the build directory. Run as a test so it keeps building and working.
     add_executable(ola_sine_test tools/ola_sine_test.cpp)
@@ -434,6 +444,11 @@ if(FLUXVOICE_BUILD_TESTS)
                  COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/python_training/tests/test_contract.py)
         add_test(NAME fixture_models_selftest
                  COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/tools/make_fixture_models.py --self-test)
+
+        # M3 stage 05: decision-gate eligibility + selection logic over fakes
+        # (standard library only; no models, no training environment).
+        add_test(NAME gate_s2ut_selftest
+                 COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/python_training/gate_s2ut.py --self-test)
     endif()
 
     # M2 stages 01-02 with the pinned training environment (Python 3.12, onnx,
@@ -495,6 +510,32 @@ if(FLUXVOICE_BUILD_TESTS)
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
         set_tests_properties(python_training_m3_stage01 PROPERTIES TIMEOUT 300
                              ENVIRONMENT "PYTHONIOENCODING=utf-8")
+        # M3 stage 03: multilingual teacher/codebook, K=1000 labelling + prosody,
+        # dual-output student, latents + silence bank, vocoder data path, v2 export.
+        add_test(NAME python_training_m3_stage03
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                         tests/test_multilingual.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        set_tests_properties(python_training_m3_stage03 PROPERTIES TIMEOUT 900
+                             ENVIRONMENT "PYTHONIOENCODING=utf-8")
+        # M3 stage 04: Python twin of WaitKPolicy / UnitProsodyFifo, plus live
+        # decision-for-decision parity against the built C++ test binary.
+        add_test(NAME python_training_m3_stage04
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                         tests/test_waitk_policy.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        set_tests_properties(python_training_m3_stage04 PROPERTIES TIMEOUT 300
+                             ENVIRONMENT "PYTHONIOENCODING=utf-8;FLUXVOICE_WAITK_TEST=$<TARGET_FILE:test_waitk_policy>")
+        # M3 stage 05: causal S2UT translator (forward vs step equivalence over
+        # ring wraps), step-graph export vs contract v2, trainer smoke and the
+        # gate. The 60 s equivalence run is opt-in: FLUXVOICE_SLOW_TESTS=1.
+        add_test(NAME python_training_m3_stage05
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider
+                         tests/test_translator.py tests/test_translator_export.py
+                         tests/test_train_s2ut.py tests/test_gate_s2ut.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        set_tests_properties(python_training_m3_stage05 PROPERTIES TIMEOUT 900
+                             ENVIRONMENT "PYTHONIOENCODING=utf-8")
     endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)
@@ -542,8 +583,11 @@ if(FLUXVOICE_BUILD_TESTS)
     set(_probe_args_two_commands       record latency --input 0 out.wav)
     set(_probe_args_name_and_index     tone --input 0 --input-name CABLE --output 0 out.wav)
     set(_probe_args_loopback_with_tone tone --loopback --input 0 --output 0 out.wav)
+    set(_probe_args_bad_marker         latency --input 0 --output 0 --marker whistle)
+    set(_probe_args_marker_with_tone   tone --marker speech --input 0 --output 0 out.wav)
+    set(_probe_args_speech_short_ivl   latency --input 0 --output 0 --marker speech --interval-ms 200)
     foreach(_case no_command no_input no_output no_wav latency_wav short_interval two_commands
-                  name_and_index loopback_with_tone)
+                  name_and_index loopback_with_tone bad_marker marker_with_tone speech_short_ivl)
         add_test(NAME probe_rejects_${_case} COMMAND fv_probe ${_probe_args_${_case}})
         set_tests_properties(probe_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
     endforeach()

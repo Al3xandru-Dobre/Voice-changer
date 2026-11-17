@@ -79,6 +79,8 @@ struct Options {
     Command     cmd      = Command::None;
     bool        list     = false;
     bool        loopback = false;  // record playback endpoint via native loopback (M1.5 stage 06)
+    bool        has_marker = false;
+    probe::MarkerKind marker_kind = probe::MarkerKind::Chirp;
     int         input = -1, output = -1;
     std::string input_name, output_name;  // substring match (see header note)
     uint32_t    rate = 48000, seconds = 10, freq = 440, count = 60, interval_ms = 500;
@@ -94,12 +96,12 @@ void print_usage(const char* argv0) {
         "  " << argv0 << " --list-devices\n"
         "  " << argv0 << " record  [--loopback] --input I [--seconds S] [--rate R] out.wav\n"
         "  " << argv0 << " tone    --output O --input I [--seconds S] [--freq F] [--rate R] out.wav\n"
-        "  " << argv0 << " latency --output O --input I [--count N] [--interval-ms M] [--rate R]\n"
-        "                   [--csv out.csv]\n"
+        "  " << argv0 << " latency --output O --input I [--marker chirp|speech] [--count N]\n"
+        "                   [--interval-ms M] [--rate R] [--csv out.csv]\n"
         "\n"
         "  record    record capture device I to a 16-bit WAV\n"
         "  tone      play a sine into O while recording I to a WAV\n"
-        "  latency   play a chirp every M ms into O, find it in I, report the delay\n"
+        "  latency   play a marker every M ms into O, find it in I, report the delay\n"
         "\n"
         "  --input <index>       capture device (see --list-devices; or playback device\n"
         "                        when --loopback is used)\n"
@@ -112,9 +114,11 @@ void print_usage(const char* argv0) {
         "                        (Windows WASAPI; valid with 'record' only)\n"
         "  --seconds <s>         record / tone length (default 10)\n"
         "  --freq <hz>           tone frequency (default 440)\n"
+        "  --marker <kind>       latency marker: 'chirp' (20 ms waveform, default) or\n"
+        "                        'speech' (150 ms speech burst, log-energy envelope)\n"
         "  --count <n>           latency markers (default 60)\n"
         "  --interval-ms <ms>    time between markers, and the largest delay that\n"
-        "                        can be measured, plus 20 ms (default 500)\n"
+        "                        can be measured, plus marker length (default 500)\n"
         "  --rate <hz>           fv_probe's own sample rate (default 48000)\n"
         "  --csv <path>          latency: write marker,t_s,found,latency_ms,score rows\n"
         "  -h, --help            this help\n";
@@ -339,6 +343,17 @@ int main(int argc, char** argv) {
         }
         else if (a == "--seconds")         { if (!value(1, 24 * 3600, opt.seconds)) return 1; }
         else if (a == "--freq")            { if (!value(20, 20000, opt.freq)) return 1; }
+        else if (a == "--marker") {
+            if (i + 1 >= argc) { std::cerr << "Missing value for --marker\n"; return 1; }
+            const std::string_view m = argv[++i];
+            if (m == "chirp")       opt.marker_kind = probe::MarkerKind::Chirp;
+            else if (m == "speech") opt.marker_kind = probe::MarkerKind::Speech;
+            else {
+                std::cerr << "Invalid --marker '" << m << "' (expected 'chirp' or 'speech')\n";
+                return 1;
+            }
+            opt.has_marker = true;
+        }
         else if (a == "--count")           { if (!value(1, 1000000, opt.count)) return 1; }
         else if (a == "--interval-ms")     { if (!value(100, 60000, opt.interval_ms)) return 1; }
         else if (a == "--rate")            { if (!value(8000, 192000, opt.rate)) return 1; }
@@ -357,6 +372,10 @@ int main(int argc, char** argv) {
         const char* err = nullptr;
         if (opt.cmd == Command::None)                              err = "Missing command (record, tone or latency)";
         else if (opt.loopback && opt.cmd != Command::Record)       err = "--loopback is only valid with the record command";
+        else if (opt.has_marker && opt.cmd != Command::Latency)    err = "--marker is only valid with the latency command";
+        else if (opt.cmd == Command::Latency &&
+                 opt.marker_kind == probe::MarkerKind::Speech &&
+                 opt.interval_ms < 250)                            err = "--marker speech (150 ms) requires --interval-ms >= 250";
         else if (opt.input >= 0 && !opt.input_name.empty())        err = "--input and --input-name are mutually exclusive";
         else if (opt.output >= 0 && !opt.output_name.empty())      err = "--output and --output-name are mutually exclusive";
         else if (!has_input)                                       err = "--input or --input-name is required";
@@ -419,7 +438,9 @@ int main(int argc, char** argv) {
     uint64_t total = static_cast<uint64_t>(opt.seconds) * opt.rate;
     if (opt.cmd == Command::Tone) s.phase_step = kTwoPi * opt.freq / opt.rate;
     if (opt.cmd == Command::Latency) {
-        s.marker = probe::make_chirp(opt.rate, opt.rate / 50, 500.0, 3500.0, 0.5);  // 20 ms
+        s.marker = (opt.marker_kind == probe::MarkerKind::Speech)
+                       ? probe::make_speech_burst(opt.rate, 0.5)
+                       : probe::make_chirp(opt.rate, opt.rate / 50, 500.0, 3500.0, 0.5);
         s.sched.first    = opt.rate;  // 1 s for both ends to settle
         s.sched.interval = static_cast<uint64_t>(opt.rate) * opt.interval_ms / 1000;
         s.sched.count    = opt.count;
@@ -458,8 +479,11 @@ int main(int argc, char** argv) {
     WavWriter wav;
     std::optional<probe::MarkerDetector> det;
     if (opt.cmd == Command::Latency) {
-        det.emplace(s.marker, s.sched);
-        std::cout << "Probing : " << opt.count << " chirps, one every " << opt.interval_ms
+        const double min_score = opt.marker_kind == probe::MarkerKind::Speech ? 0.65 : 0.5;
+        det.emplace(s.marker, s.sched, min_score, opt.marker_kind, opt.rate);
+        std::cout << "Probing : " << opt.count
+                  << (opt.marker_kind == probe::MarkerKind::Speech ? " speech bursts" : " chirps")
+                  << ", one every " << opt.interval_ms
                   << " ms (" << static_cast<double>(total) / opt.rate << " s)\n";
     } else if (!wav.open(opt.wav, opt.rate)) {
         std::cerr << "Cannot write " << opt.wav << '\n';

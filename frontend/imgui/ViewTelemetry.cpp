@@ -26,10 +26,13 @@ void draw_telemetry(ViewContext& ctx) {
             widgets::kv_row("Input overruns", std::to_string(t.input_overruns));
             widgets::kv_row("Output underruns", std::to_string(t.output_underruns));
             widgets::kv_row("Output drops", std::to_string(t.output_drops));
+            widgets::kv_row("Overruns (lifetime)", std::to_string(t.lifetime_input_overruns));
+            widgets::kv_row("Underruns (lifetime)", std::to_string(t.lifetime_output_underruns));
+            widgets::kv_row("Drops (lifetime)", std::to_string(t.lifetime_output_drops));
             char q[96];
             std::snprintf(q, sizeof q, "%lld samples = %.1f ms at %u Hz (underruns - overruns - drops)",
                           static_cast<long long>(t.queued_samples), t.queued_ms(), t.sample_rate);
-            widgets::kv_row("Queued audio", q);
+            widgets::kv_row("Queued audio", t.queued_valid ? q : "n/a (independent clocks)");
             widgets::kv_row("Resident memory", std::to_string(t.rss_bytes / 1024) + " KB");
             char p[64];
             std::snprintf(p, sizeof p, "%llu pushed, %llu applied", static_cast<unsigned long long>(t.params_pushed),

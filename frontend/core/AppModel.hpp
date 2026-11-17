@@ -112,6 +112,13 @@ public:
     Result<EndpointInfo> probe(const DeviceSelection& sel, EndpointDirection dir) const;
     std::string capture_name() const;
     std::string playback_name() const;
+    /// A remembered `name:` device that is missing or ambiguous in the current
+    /// list (BUG-020). While either is set, start_engine() refuses instead of
+    /// following the system default; choosing a row clears it, and a device
+    /// list refresh restores the explicit endpoint once the name resolves.
+    const std::optional<std::string>& unresolved_capture() const { return unresolved_capture_; }
+    const std::optional<std::string>& unresolved_playback() const { return unresolved_playback_; }
+    bool device_unresolved() const { return unresolved_capture_.has_value() || unresolved_playback_.has_value(); }
 
     // --- parameters -------------------------------------------------------
     const VoiceParams& params() const { return params_; }
@@ -166,7 +173,17 @@ public:
     VoiceStudioModel&       studio()       { return studio_; }
     const VoiceStudioModel& studio() const { return studio_; }
     bool studio_write_job(std::string& error);
+    /// Persist the draft under studio_dir / voice_name (BUG-021). Refuses a
+    /// name that fails is_safe_project_name() and never writes over another
+    /// project's draft (see studio_name_conflict). Renaming the current
+    /// project moves its draft, so typing a name produces one directory.
     bool studio_save_draft();
+    /// The typed voice name belongs to another project already on disk;
+    /// the UI offers studio_open_project() instead of overwriting it.
+    std::optional<std::string> studio_name_conflict() const;
+    bool studio_open_project(std::string_view name);
+    /// Project whose directory holds the current draft ("" = not saved yet).
+    const std::string& studio_project() const { return studio_project_; }
     std::optional<StudioStatus> studio_status() const { return studio_status_; }
 
     // --- tray & window intents --------------------------------------------
@@ -204,6 +221,9 @@ private:
     void push_params();
     void load_bundle_state();
     void restore_device_policy(bool& capture_ok, bool& playback_ok);
+    void retry_unresolved_devices();
+    AudioError unresolved_device_error() const;
+    int count_named(std::string_view name, EndpointDirection dir) const;
     std::string policy_text(const DeviceSelection& sel, EndpointDirection dir) const;
     DeviceSelection selection_from_policy(std::string_view policy, EndpointDirection dir, bool& ok) const;
     std::optional<std::uint16_t> voice_index(std::string_view name) const;
@@ -222,6 +242,9 @@ private:
     DeviceSelection   capture_sel_{FollowSystemDefault{}};
     DeviceSelection   playback_sel_{FollowSystemDefault{}};
     CaptureMode       capture_mode_ = CaptureMode::OrdinaryMicrophone;
+    std::optional<std::string> unresolved_capture_;   // remembered name, not resolvable now
+    std::optional<std::string> unresolved_playback_;
+    std::uint64_t     seen_generation_ = 0;           // snapshot generation last checked for them
 
     VoiceParams       params_;
     std::string       active_bundle_;
@@ -236,6 +259,7 @@ private:
     std::string       translation_message_;
 
     std::optional<StudioStatus> studio_status_;
+    std::string       studio_project_;
 
     bool window_visible_        = true;
     bool mini_panel_            = false;

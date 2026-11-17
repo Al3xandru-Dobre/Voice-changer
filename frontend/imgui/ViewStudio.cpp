@@ -113,9 +113,21 @@ void draw_step_name(ViewContext& ctx) {
     widgets::dim_text_wrapped("A custom voice is a new speaker row fine-tuned into the multi-speaker vocoder. It needs "
                               "1-3 hours of clean recordings and the right to use the voice.");
     ImGui::SetNextItemWidth(300.0f * ctx.scale);
-    if (g_name.draw("Voice name", d.voice_name, "lowercase letters, digits, - or _ (e.g. me)")) app.studio_save_draft();
+    // The name is the project directory: save when the field loses focus (or
+    // on Next), never per keystroke (BUG-021).
+    static_cast<void>(g_name.draw("Voice name", d.voice_name, "lowercase letters, digits, - or _ (e.g. me)"));
+    if (ImGui::IsItemDeactivatedAfterEdit()) static_cast<void>(app.studio_save_draft());
     if (const auto problem = m.name_problem(&app.catalog())) {
         if (!d.voice_name.empty()) widgets::notice(problem->c_str(), theme_colors().warning);
+    }
+    if (const auto conflict = app.studio_name_conflict()) {
+        widgets::notice(conflict->c_str(), theme_colors().warning);
+        if (ImGui::Button("Open existing project")) {
+            const std::string name = d.voice_name;
+            if (!app.studio_open_project(name))
+                app.notify(Notice::Level::Error, "Voice Studio project '" + name + "' has no readable draft.json.");
+            return;  // `d` refers to the replaced draft
+        }
     }
     ImGui::SetNextItemWidth(300.0f * ctx.scale);
     if (g_display.draw("Display name", d.display_name, "as shown in the voice list")) app.studio_save_draft();
@@ -310,7 +322,11 @@ void draw_studio(ViewContext& ctx) {
     ImGui::Spacing();
 
     std::string why;
-    const bool can = m.can_advance(&why);
+    bool can = m.can_advance(&why);
+    if (can && m.step() == StudioStep::NameConsent && app.studio_name_conflict()) {
+        can = false;
+        why = "That name belongs to an existing project; open it or choose another name.";
+    }
     ImGui::BeginDisabled(m.step() == StudioStep::NameConsent);
     if (ImGui::Button("Back", ImVec2(100.0f * ctx.scale, 0.0f))) { m.prev(); app.studio_save_draft(); }
     ImGui::EndDisabled();

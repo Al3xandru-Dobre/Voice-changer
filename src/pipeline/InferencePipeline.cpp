@@ -89,7 +89,7 @@ struct InferencePipeline::State {
           governor(GovernorConfig{
               g.sample_rate, g.hop,
               opts.latency_target_samples ? opts.latency_target_samples :
-                  LatencyGovernor::default_target(g.algorithmic_samples(), g.hop, g.sample_rate),
+                  LatencyGovernor::default_target(g.queue_samples(), g.hop, g.sample_rate),
               3, opts.quiet_peak}),
           histogram(g.hop_us()),
           frame_levels(g.cond_frames, 0.0f),

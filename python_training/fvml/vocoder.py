@@ -18,6 +18,14 @@ Conditioning matches ModelContract v1 (Documents/Milestone 2/02_model_contract_f
   - `spk_emb` [B, 64] float32 driving FiLM (gamma, beta) after each upsampling
     stage. A learned speaker table nn.Embedding(n_speakers, 64) supplies these
     vectors during training and exports its rows to voices.json in Stage 06.
+
+Multilingual (Milestone 3 / Stage 03): the same generator over the K = 1000
+mhubert-vp codebook (`vocab=1000`, `unit_dim=128`: MULTILINGUAL_VOCAB), trained
+on {en, es, fr, de} studio voices. There is deliberately NO language input:
+phonetics come from the unit ids and timbre from `spk_emb` alone, so an English
+voice renders Spanish, French or German units without being pulled toward a
+native training speaker. A voice's language is metadata only (`lang` in
+voices.json), never a tensor.
 """
 import dataclasses
 import json
@@ -37,6 +45,7 @@ COND_FRAME_SAMPLES = 320                        # 20 ms conditioning hop at 16 k
 COND_INPUTS = contract.COND_INPUTS              # ("logf0", "voicing", "aperiodicity", "energy", "spk_emb")
 FRAME_COND_INPUTS = ("logf0", "voicing", "aperiodicity", "energy")
 LRELU_SLOPE = 0.1
+MULTILINGUAL_VOCAB = 1000                       # M3 Stage 03: the mhubert-vp km1000 codebook
 
 DEFAULT_SPEAKERS = ("lj", "hifitts_92", "hifitts_8051", "hifitts_6097", "hifitts_9017")
 SPEAKER_METADATA = {
@@ -423,6 +432,8 @@ class UnitVocoder(StreamingModule):
             }
             if meta.get("attribution"):
                 entry["attribution"] = meta["attribution"]
+            if meta.get("lang"):                # metadata only: the generator never sees it
+                entry["lang"] = meta["lang"]
             voices.append(entry)
         data = {"schema": 1, "voices": voices}
         contract.validate_voices(data, self.contract(1))

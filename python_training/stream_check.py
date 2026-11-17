@@ -6,6 +6,11 @@ step() frames_per_step frames at a time (1, 2 and 4) must match one forward()
 over the whole signal with max |delta logit| <= 1e-5 and argmax agreement
 >= 99.9 % for every head.
 
+Milestone 3 / Stage 03 (dual-output encoder): the same run also gates the
+`latents` port, max |delta| <= 1e-5, so both outputs of the student are proven
+streaming-exact. --multilingual checks a random-init D = 128 / K = 1000 encoder
+(or a vocab-1000 vocoder) when no checkpoint is given.
+
 Milestone 2 / Stage 05 (vocoder): on >= 30 s of speech, running UnitVocoder.step()
 frames_per_step frames at a time (1, 2 and 4) must match offline forward() with
 max |delta| <= 1e-4 and no chunk-boundary step larger than the reference signal's
@@ -14,6 +19,7 @@ own maximum sample-to-sample slope.
   stream_check.py                                         # random-init encoder
   stream_check.py --role vocoder --seconds 30             # random-init vocoder
   stream_check.py --checkpoint checkpoints/<run>/final.pt # auto-detects role
+  stream_check.py --multilingual                          # random-init M3 dual-output encoder
 
 Exit status: 0 = within tolerance, 1 = failed or inputs missing.
 """
@@ -28,6 +34,7 @@ from fvml import audio, features, parity, paths, units, vocoder
 from fvml import content_encoder as ce
 
 MAX_ABS = 1e-5
+LATENT_MAX_ABS = 1e-5          # M3 Stage 03: the `latents` port, same bound as the logits
 MIN_AGREEMENT = 0.999
 VOCODER_MAX_ABS = 1e-4
 VOCODER_MIN_SNR_DB = 90.0
@@ -87,7 +94,8 @@ def check(model, wav, fps_list=(1, 2, 4)):
     ref = model(wav[None])
     report = {"role": "encoder", "seconds": wav.shape[-1] / ce.SAMPLE_RATE,
               "frames": int(wav.shape[-1] // ce.FRAME_SAMPLES),
-              "fps": {}, "pass": True}
+              "latent_dim": model.cfg.latent_dim, "vocab": model.cfg.vocab,
+              "params": model.num_params(), "fps": {}, "pass": True}
     for fps in fps_list:
         got = stream(model, wav, fps)
         entry = {}
@@ -99,7 +107,9 @@ def check(model, wav, fps_list=(1, 2, 4)):
                               "snr_db": r.snr_db, "pass": ok}
             report["pass"] &= ok
         r = parity.compare(ref["latents"][0].numpy(), got["latents"][0].numpy(), steps=False)
-        entry["latents"] = {"max_abs": r.max_abs, "snr_db": r.snr_db}
+        ok = r.max_abs <= LATENT_MAX_ABS
+        entry["latents"] = {"max_abs": r.max_abs, "snr_db": r.snr_db, "pass": ok}
+        report["pass"] &= ok
         report["fps"][fps] = entry
     return report
 
@@ -197,6 +207,9 @@ def main(argv=None):
                    help="stream duration in seconds (default 60 for encoder, 30 for vocoder)")
     p.add_argument("--fps", default="1,2,4")
     p.add_argument("--seed", type=int, default=0, help="random-init seed")
+    p.add_argument("--multilingual", action="store_true",
+                   help="random init only: the M3 configuration (encoder D=128 / K=1000, "
+                   "vocoder vocab 1000) instead of the M2 one")
     p.add_argument("--threads", type=int, default=0, help="torch threads (0 = default)")
     p.add_argument("--out", help="write the JSON report here")
     args = p.parse_args(argv)
@@ -218,14 +231,15 @@ def main(argv=None):
             model = vocoder.UnitVocoder.from_checkpoint(args.checkpoint)[0]
         else:
             torch.manual_seed(args.seed)
-            model = vocoder.UnitVocoder()
+            model = vocoder.UnitVocoder(vocoder.VocoderConfig(vocab=vocoder.MULTILINGUAL_VOCAB)
+                                        if args.multilingual else vocoder.VocoderConfig())
         report = check_vocoder(model, wav, fps_list, seed=args.seed)
     else:
         if args.checkpoint:
             model = ce.ContentEncoder.from_checkpoint(args.checkpoint)[0]
         else:
             torch.manual_seed(args.seed)
-            model = ce.ContentEncoder()
+            model = ce.ContentEncoder(ce.MULTILINGUAL if args.multilingual else ce.EncoderConfig())
         report = check(model, wav, fps_list)
     report["checkpoint"] = args.checkpoint
     text = json.dumps(report, indent=2)
@@ -244,6 +258,9 @@ def main(argv=None):
                 if head != "latents":
                     print(f"fps {fps} {head}: max|d| {r['max_abs']:.2e}  argmax {r['argmax_agreement']:.5f}"
                           f"  {'ok' if r['pass'] else 'FAIL'}", file=sys.stderr)
+                else:
+                    print(f"fps {fps} latents: max|d| {r['max_abs']:.2e}  "
+                          f"{'ok' if r['pass'] else 'FAIL'}", file=sys.stderr)
     return 0 if report["pass"] else 1
 
 

@@ -134,8 +134,8 @@ void draw_meters_card(ViewContext& ctx) {
     ImGui::Spacing();
 
     char buf[96];
-    std::snprintf(buf, sizeof buf, "Queued audio %.0f ms  |  %llu underruns  |  %llu overruns  |  %llu drops",
-                  t.queued_ms(), static_cast<unsigned long long>(t.output_underruns),
+    std::snprintf(buf, sizeof buf, "Queued audio %s  |  %llu underruns  |  %llu overruns  |  %llu drops",
+                  t.queued_ms_text().c_str(), static_cast<unsigned long long>(t.output_underruns),
                   static_cast<unsigned long long>(t.input_overruns), static_cast<unsigned long long>(t.output_drops));
     ImGui::TextUnformatted(buf);
     const std::array<float, 60> hist = app.underrun_history().ordered();

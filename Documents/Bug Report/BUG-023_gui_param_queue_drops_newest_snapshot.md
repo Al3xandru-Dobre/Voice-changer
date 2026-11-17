@@ -8,7 +8,7 @@
 | **Name** | *Oldest wins* — a full queue keeps stale snapshots and discards new ones |
 | **Reported** | 2026-11-14 |
 | **Severity** | Medium (output gain and limiter can differ from the sliders while the UI reports "applied") |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-15 — `EngineHost` uses `ParamChannel`; `AppModel::tick` calls `flush_params()`; native build/test legs pending |
 | **Component** | `frontend/core/EngineHost.cpp` (`push_params`), `frontend/core/AppModel.cpp` |
 | **Blocks** | [Milestone 4 / Stage 05](../Milestone%204/05_gui_engine_host_mode_a.md) (replaces the queue with `ParamChannel`) |
 

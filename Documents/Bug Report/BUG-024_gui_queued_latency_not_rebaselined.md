@@ -8,7 +8,7 @@
 | **Name** | *Sticky residue* — discarded samples stay in the latency readout |
 | **Reported** | 2026-11-14 |
 | **Severity** | Medium (the latency shown in the status bar, Live card, Mini panel, tray tooltip and `[stats]` line is wrong after the first restart and drifts further with each one) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-15 — `EngineHost::reset_dsp` rebaselines; `telemetry()` reports per-stream + lifetime counters; loopback shows "n/a"; native build/test legs pending |
 | **Component** | `frontend/core/EngineHost.cpp` (`telemetry()`), `frontend/core/Telemetry.cpp` |
 | **Blocks** | [Milestone 4 / Stage 06](../Milestone%204/06_live_latency_telemetry.md) |
 

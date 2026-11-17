@@ -6,7 +6,10 @@ The only inputs are WAV/FLAC files plus the frozen lists, so C++ output
 Metrics (research §7):
   wer, cer   Whisper large-v3 on the output vs. the list transcript (or vs.
              Whisper on the source with ref_text="source"), Whisper's
-             normaliser on both sides, corpus level
+             normaliser on both sides, corpus level. `language` (default "en")
+             is forced on Whisper and picks the normaliser: English keeps
+             Whisper's own, es/fr/de use the diacritic-preserving one
+             (Milestone 3 / Stage 03 per-language resynthesis)
   tgt_cos    ECAPA cosine of each output to the target voice's reference centroid
   src_cos    ECAPA cosine of each output to its own source utterance (leakage)
   utmos      UTMOS22-strong
@@ -48,6 +51,7 @@ class EvalConfig:
     max_lag_ms: float = 200.0
     timing: object = None           # CSV utt_id,seconds; default <converted>/timing.csv
     limit: int = None               # first N rows (smoke runs)
+    language: str = "en"            # Whisper language + text normaliser (en/es/fr/de)
 
 
 def find_output(directory, utt_id):
@@ -94,14 +98,17 @@ def evaluate(cfg, out_dir, log=print):
 
     if "wer" in cfg.metrics:
         t = time.monotonic()
+        if cfg.language not in asr.SUPPORTED_LANGS:
+            raise ValueError(f"unsupported evaluation language {cfg.language!r} "
+                             f"(supported: {', '.join(asr.SUPPORTED_LANGS)})")
         w = asr.Whisper(cfg.device, cfg.batch_size)
-        hyps = w.transcribe(outs)
+        hyps = w.transcribe(outs, language=cfg.language)
         if cfg.ref_text == "source":
-            refs_raw = w.transcribe(srcs) if not baseline else hyps
+            refs_raw = w.transcribe(srcs, language=cfg.language) if not baseline else hyps
         else:
             refs_raw = [r["text"] for r in rows]
-        refs = [w.normalize(x) for x in refs_raw]
-        hyps_n = [w.normalize(x) for x in hyps]
+        refs = [w.normalize(x, language=cfg.language) for x in refs_raw]
+        hyps_n = [w.normalize(x, language=cfg.language) for x in hyps]
         rates = asr.error_rates(refs, hyps_n)
         summary.update(wer=rates["wer"], cer=rates["cer"])
         extra["wer_skipped_empty_refs"] = rates["skipped"]
@@ -178,7 +185,7 @@ def evaluate(cfg, out_dir, log=print):
 
     stage_s["total"] = time.monotonic() - t_start
     result = {**summary, "n": len(rows), "mode": "baseline" if baseline else "converted",
-              "voice": cfg.voice, **extra, "eval_seconds": {k: round(v, 1) for k, v in stage_s.items()},
+              "voice": cfg.voice, "language": cfg.language, **extra, "eval_seconds": {k: round(v, 1) for k, v in stage_s.items()},
               "meta": run_metadata(cfg)}
     write_outputs(out_dir, per, result)
     log(f"[eval] done in {stage_s['total']:.0f} s -> {out_dir}")
@@ -202,7 +209,9 @@ def run_metadata(cfg):
         "device": torch.cuda.get_device_name(0) if str(cfg.device).startswith("cuda") else str(cfg.device),
         "sources": str(cfg.sources), "sources_sha256": _sha256(cfg.sources),
         "targets": str(cfg.targets) if cfg.targets else None,
-        "asr": f"{asr.MODEL}@{asr.REVISION[:12]} fp16, Whisper EnglishTextNormalizer (transformers)",
+        "asr": f"{asr.MODEL}@{asr.REVISION[:12]} fp16, " + (
+            "Whisper EnglishTextNormalizer (transformers)" if cfg.language == "en" else
+            f"language={cfg.language}, diacritic-preserving normaliser (fvml.asr)"),
         "speaker": f"{speaker.SOURCE}@{speaker.REVISION[:12]} (ECAPA-TDNN)",
         "mos": mos.MODEL, "f0": f0_ref.TRACKER,
         "packages": {p: version(p) for p in ("torch", "transformers", "speechbrain", "speechmos",

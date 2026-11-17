@@ -95,6 +95,7 @@ std::uint64_t TraySpec::menu_hash() const {
 }
 
 TrayState tray_state_for(const TrayInputs& in) {
+    if (in.device_unresolved && in.stream != StreamState::Running) return TrayState::Error;
     switch (in.stream) {
         case StreamState::Error:
         case StreamState::AwaitingUser:
@@ -122,7 +123,7 @@ TraySpec build_tray_spec(const TrayInputs& in) {
         case TrayState::Running:
             s.tooltip += " - Running";
             if (!in.preset.empty()) s.tooltip += " - " + in.preset;
-            s.tooltip += " - " + fmt_ms(in.queued_ms);
+            s.tooltip += " - " + (in.queued_valid ? fmt_ms(in.queued_ms) : std::string("n/a (independent clocks)"));
             break;
         case TrayState::Muted:      s.tooltip += " - Muted"; break;
         case TrayState::Recovering:

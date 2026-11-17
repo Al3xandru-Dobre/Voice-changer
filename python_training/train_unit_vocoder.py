@@ -24,12 +24,29 @@ Losses & discriminators:
   - AdamW lr 2e-4, betas (0.8, 0.99), exponential decay 0.999/epoch, bf16
     autocast on CUDA, resumable checkpoints every --ckpt-minutes.
 
+Multilingual vocoder (Milestone 3 / Stage 03,
+Documents/Milestone 3/03_multilingual_encoder_vocoder_upgrade.md): the vocabulary
+follows the labels (K = 1000 mhubert-vp units), the unit embedding stays 128 wide,
+and no language token enters the generator. What changes is the data:
+  --lang-ratios m3-vocoder   40% en / 20% es / 20% fr / 20% de of all draws, so
+                             English Mode A quality does not regress
+  --default-lang en          tag for rows without a `lang` field (LJSpeech, Hi-Fi TTS)
+  --train-subsets train      hold out the corpora's dev/test clips (CSS10, CML-TTS)
+Each voice's language (one per speaker) and the licence/source its manifest rows
+carry are stored in the checkpoint and written to voices.json (`lang`).
+Units from the non-commercial mHuBERT-147 teacher need --include-noncommercial.
+
 Usage:
   train_unit_vocoder.py --train-manifest ljspeech.jsonl --train-manifest hifitts.jsonl \\
       --train-units data/units/teacher-km100/lj --train-units data/units/teacher-km100/hifitts \\
       --run-name voc_a
   train_unit_vocoder.py ... --run-name voc_a --resume auto
   train_unit_vocoder.py ... --finetune-from checkpoints/voc_a/final.pt --steps 50000 --run-name voc_ft
+  # Milestone 3: {en, es, fr, de} studio voices over K = 1000 units
+  train_unit_vocoder.py --lang-ratios m3-vocoder --default-lang en --train-subsets train \\
+      --train-manifest ljspeech.jsonl,hifitts.jsonl,css10-es.jsonl,css10-fr.jsonl,css10-de.jsonl \\
+      --train-manifest cml-tts-es.jsonl,cml-tts-fr.jsonl,cml-tts-de.jsonl \\
+      --train-units data/units/mhubert/lj,data/units/mhubert/hifitts,... --run-name voc_m3
 
 Stage 10 target-voice fine-tune recipe (Documents/Milestone 2/10_*.md):
   # prepare_target_voice.py -> <data>/private/me/{train.jsonl, me_targets.tsv,
@@ -63,7 +80,7 @@ import numpy as np       # noqa: E402
 import soundfile as sf   # noqa: E402
 import torch             # noqa: E402
 
-from fvml import audio, evallist, features, paths, units, vocoder  # noqa: E402
+from fvml import audio, evallist, features, paths, sampling, units, vocoder  # noqa: E402
 
 COND_FS = vocoder.COND_FRAME_SAMPLES
 PREROLL_COND_FRAMES = 20     # 400 ms causal warmup for HPF, YIN window and logf0_held
@@ -193,16 +210,27 @@ def read_all_units_dirs(specs):
             meta0 = meta
         else:
             units.check_compatible(meta0, meta)
+            # M3: the licence check reads the first directory's meta, so a later one may
+            # not smuggle in non-commercial units (fvml.units.read_units_dirs does the same).
+            if bool(meta.get("noncommercial")) != bool(meta0.get("noncommercial")):
+                raise units.UnitsMismatch(f"{d}: mixes commercial and non-commercial unit streams")
         for r in urows:
             by_id[r["utt_id"]] = (pathlib.Path(d) / r["units"], int(r["n_frames"]), r)
     return meta0, by_id
 
 
-def join_vocoder_items(manifest_spec, units_spec, exclude_targets=None, speakers_order=None, log=print):
+def join_vocoder_items(manifest_spec, units_spec, exclude_targets=None, speakers_order=None, log=print,
+                       *, side=None, default_lang=None, subsets=None, info=None):
     """Join manifest rows with unit files, excluding held-out target clips.
     Returns (items, labels_meta, speakers), where each item is
-    (audio_path, units_path, n_unit_frames, spk_idx, speaker_name)."""
+    (audio_path, units_path, n_unit_frames, spk_idx, speaker_name).
+
+    Milestone 3: `side` reads one audio of paired S2UT rows, `default_lang`
+    tags rows without a language, `subsets` keeps only those manifest subsets.
+    A dict passed as `info` receives "speaker_lang" ({speaker: lang or None})
+    and "speaker_meta" ({speaker: lang / license / source found in its rows})."""
     rows, _ = units.read_manifests(manifest_spec)
+    rows = units.filter_subsets(units.audio_rows(rows, side, default_lang), subsets)
     meta, by_id = read_all_units_dirs(units_spec)
     excl_ids, excl_paths = load_excluded_ids(exclude_targets)
     fs = int(meta["frame_samples"])
@@ -211,6 +239,7 @@ def join_vocoder_items(manifest_spec, units_spec, exclude_targets=None, speakers
     missing, bad, excluded = 0, 0, 0
     found_speakers = []
     seen_speakers = set()
+    spk_langs, spk_meta = {}, {}
     for r in rows:
         uid = r["utt_id"]
         if uid in excl_ids or r.get("path") in excl_paths:
@@ -230,9 +259,24 @@ def join_vocoder_items(manifest_spec, units_spec, exclude_targets=None, speakers
             seen_speakers.add(spk)
             found_speakers.append(spk)
         raw_items.append((str(paths.resolve(r["path"])), str(upath), n_frames, spk))
+        spk_langs.setdefault(spk, set()).add(r.get("lang"))
+        derived = spk_meta.setdefault(spk, {})
+        if r.get("lang"):
+            derived["lang"] = r["lang"]
+        if r.get("license"):                 # the M3 corpora say where each row comes from
+            derived.setdefault("license", r["license"])
+            if r.get("dataset"):
+                derived.setdefault("source", r["dataset"])
 
     if not raw_items:
         raise ValueError(f"no usable training utterances found for {units_spec}")
+    mixed = sorted(s for s, langs in spk_langs.items() if len(langs) > 1)
+    if mixed:
+        raise ValueError(f"speaker(s) {', '.join(mixed)} have rows in several languages (or some "
+                         "rows untagged): a voice has one `lang`; check --default-lang")
+    if isinstance(info, dict):
+        info["speaker_lang"] = {s: next(iter(langs)) for s, langs in spk_langs.items()}
+        info["speaker_meta"] = {s: m for s, m in spk_meta.items() if m}
 
     if speakers_order:
         speakers = [validate_speaker_name(str(s)) for s in speakers_order]
@@ -596,21 +640,29 @@ def train(args, log=print):
         prior_ck = torch.load(ft_path, map_location="cpu", weights_only=True)
 
     prior_speakers = prior_ck.get("speakers") if prior_ck else None
+    data_info = {}
     train_items, labels_meta, speakers = join_vocoder_items(
         args.train_manifest, args.train_units, args.exclude_targets,
-        speakers_order=prior_speakers, log=log
+        speakers_order=prior_speakers, log=log, side=args.side,
+        default_lang=args.default_lang, subsets=args.train_subsets, info=data_info
     )
+    units.check_license(labels_meta, args.include_noncommercial)
     val_items = []
     if args.val_manifest:
         val_items, val_meta, _ = join_vocoder_items(
             args.val_manifest, args.val_units, exclude_targets=None,
-            speakers_order=speakers, log=log
+            speakers_order=speakers, log=log, side=args.side,
+            default_lang=args.default_lang, subsets=args.val_subsets
         )
         units.check_compatible(labels_meta, val_meta)
 
-    labels_meta_clean = {k: labels_meta.get(k) for k in
-                         ("tokenizer", "label_space", "vocab", "frame_samples",
-                          "frame_rate_hz", "lookahead_frames", "source")}
+    keep = ["tokenizer", "label_space", "vocab", "frame_samples", "frame_rate_hz",
+            "lookahead_frames", "source"]
+    if labels_meta.get("noncommercial"):     # the taint follows the weights; M2 metadata is unchanged
+        keep += ["license", "noncommercial"]
+    labels_meta_clean = {k: labels_meta.get(k) for k in keep}
+    speaker_lang = data_info.get("speaker_lang", {})
+    lang_ratios = sampling.parse_ratios(args.lang_ratios)
 
     cfg = vocoder.VocoderConfig(
         sample_rate=audio.SAMPLE_RATE,
@@ -644,6 +696,14 @@ def train(args, log=print):
         if not mp.is_file():
             raise FileNotFoundError(f"--speaker-metadata {mp} not found")
         speaker_metadata.update(json.loads(mp.read_text(encoding="utf-8")))
+    # Milestone 3: what the manifest rows say about a voice (its language, and the
+    # licence/source of the multilingual corpora) fills the gaps left by the built-in
+    # table, the prior checkpoint and --speaker-metadata. It never overrides them.
+    for spk, found in data_info.get("speaker_meta", {}).items():
+        derived = {k: val for k, val in found.items()
+                   if k not in vocoder.SPEAKER_METADATA.get(spk, {})}
+        if derived:
+            speaker_metadata[spk] = {**derived, **speaker_metadata.get(spk, {})}
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
@@ -743,6 +803,13 @@ def train(args, log=print):
     ds = VocoderCropDataset(train_items, crop_u, unit_repeat=cfg.unit_repeat,
                             lookahead_frames=cond_lookahead)
     weights = [max(n, crop_u) for _, _, n, _, _ in train_items]
+    if lang_ratios:
+        weights, shares = sampling.language_weights(
+            weights, [speaker_lang.get(it[4]) for it in train_items], lang_ratios)
+        log("[train] language sampling: " + ", ".join(
+            f"{lang} {100 * s['share']:.0f}% of draws ({s['items']} utterances, "
+            f"{sum(1 for sp in speakers if speaker_lang.get(sp) == lang)} voice(s))"
+            for lang, s in shares.items()))
     mix_names = {s.strip() for s in (args.mix_speakers or "").split(",") if s.strip()}
     if mix_names:
         unknown = mix_names - set(speakers)
@@ -790,6 +857,7 @@ def train(args, log=print):
              "stopped_early": stopped_early, "speaker_init": speaker_init,
              "early_stop_since": stopper.since,
              "speaker_metadata": speaker_metadata, "run_name": run,
+             "lang_ratios": json.dumps(lang_ratios) if lang_ratios else None,
              "elapsed": elapsed0 + time.monotonic() - t_start},
             extra_metadata=speaker_metadata
         )
@@ -911,6 +979,12 @@ def train(args, log=print):
             writer.add_scalar("val/loss_mel", val_mel, step)
             for spk_name, spk_mel in per_spk_val.items():
                 writer.add_scalar(f"val/loss_mel_{spk_name}", spk_mel, step)
+            per_lang_val = {}
+            for spk_name, spk_mel in per_spk_val.items():
+                if speaker_lang.get(spk_name):
+                    per_lang_val.setdefault(speaker_lang[spk_name], []).append(spk_mel)
+            for lang, vals in sorted(per_lang_val.items()):   # English must not regress
+                writer.add_scalar(f"val/loss_mel_lang_{lang}", float(np.mean(vals)), step)
             spk_str = (" (" + ", ".join(f"{k}={v:.3f}" for k, v in per_spk_val.items()) + ")"
                        if len(per_spk_val) > 1 else "")
             utmos_str = f"  utmos {val_utmos:.3f}" if val_utmos is not None else ""
@@ -959,6 +1033,15 @@ def parse_args(argv=None):
     p.add_argument("--val-units", action="append", help="optional validation units directory")
     p.add_argument("--val-limit", type=int, default=50)
     p.add_argument("--val-every", type=int, default=2000)
+    p.add_argument("--lang-ratios", help="share of draws per language: 'm3-vocoder' (40%% en, "
+                   "20%% es/fr/de), 'balanced', 'en,es' or 'en=0.4,es=0.2,...' (default: by length)")
+    p.add_argument("--default-lang", help="language of rows without a `lang` field (e.g. en)")
+    p.add_argument("--train-subsets", help="keep only these manifest subsets (comma-separated)")
+    p.add_argument("--val-subsets", help="keep only these manifest subsets for validation")
+    p.add_argument("--side", choices=units.SIDES,
+                   help="paired S2UT manifests: which audio of each pair to train on")
+    p.add_argument("--include-noncommercial", action="store_true",
+                   help="allow units from the CC-BY-NC-SA mHuBERT-147 teacher (research only)")
     p.add_argument("--exclude-targets", default=str(paths.EVAL_LISTS / "targets.tsv"),
                    help="held-out target reference TSV(s), comma-separated, to exclude "
                         "from training ('' = none)")

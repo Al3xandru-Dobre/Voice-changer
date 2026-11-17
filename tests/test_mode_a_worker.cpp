@@ -129,11 +129,46 @@ void test_param_channel_delivery() {
     CHECK(pipeline.params().get(ParamId::TimbreBlend) == 0.5f);
     CHECK(channel.applied_generation() == gen);
 }
+
+void test_lookahead_does_not_inflate_queue_target() {
+    std::size_t base_target = 0;
+    for (int lookahead : {0, 1, 2}) {
+        DuplexRouter router;
+        test::FakeModelStep enc(test::fake_contract(ModelRole::kEncoder, 1, lookahead));
+        test::FakeModelStep voc(test::fake_contract(ModelRole::kVocoder, 1, 0));
+        const std::array<float, 4> embedding{};
+        InferencePipeline pipeline(enc, voc, {4.8, 0.25, -4.0, 1.5}, embedding, raw_options());
+        const std::size_t target = pipeline.governor().target_samples();
+        if (lookahead == 0) base_target = target;
+        CHECK(target == 560);
+        CHECK(target == base_target);
+        CHECK(pipeline.geometry().model_delay_samples() == static_cast<std::size_t>(lookahead * 320));
+        CHECK(pipeline.geometry().algorithmic_samples() ==
+              pipeline.geometry().queue_samples() + pipeline.geometry().model_delay_samples());
+
+        ModeAWorker worker(router, pipeline);
+        CHECK(worker.prepare());
+        std::vector<float> got;
+        got.reserve(320 * 12);
+        std::array<float, 320> in{}, out{};
+        for (int step = 0; step < 12; ++step) {
+            in.fill(0.0f);
+            if (step == 0) in[7] = 1.0f;
+            router.process(out.data(), in.data(), in.size());
+            got.insert(got.end(), out.begin(), out.end());
+            CHECK(worker.pump());
+        }
+        const std::size_t expected_pos = target + pipeline.geometry().model_delay_samples() + 7;
+        CHECK(got[expected_pos] == 1.0f);
+        CHECK(std::count(got.begin(), got.end(), 1.0f) == 1);
+    }
+}
 } // namespace
 
 int main() {
     for (int fps : {1, 2, 4}) test_stream_and_accounting(fps);
     test_stall_recovery_and_failures();
     test_param_channel_delivery();
+    test_lookahead_does_not_inflate_queue_target();
     return test::finish("mode_a_worker");
 }

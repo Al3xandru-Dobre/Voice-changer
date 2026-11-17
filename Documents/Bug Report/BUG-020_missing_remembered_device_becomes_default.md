@@ -8,7 +8,7 @@
 | **Name** | *Quiet default* — the GUI substitutes the system default for a missing explicit device |
 | **Reported** | 2026-11-14 |
 | **Severity** | High (processed speech can be routed to speakers; violates the "never silently replace an explicit selection" rule) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-15 — native legs pending, see [Resolution](#resolution) |
 | **Component** | `frontend/core/AppModel.cpp` (`selection_from_policy`, `restore_device_policy`, `start_engine`) |
 | **Blocks** | [Milestone 4 / Stage 02](../Milestone%204/02_device_selectors.md), [Stage 04](../Milestone%204/04_build_gate_frontend_hardening.md) |
 
@@ -90,3 +90,46 @@ endpoint is selected.
 
 Open Devices and choose a device explicitly after any "remembered device is
 no longer listed" notice, before starting the engine.
+
+## Resolution
+
+**2026-11-15: fix in tree, native legs pending.**
+
+- **Unresolved state.** When `selection_from_policy` cannot resolve a
+  remembered name (missing or ambiguous), `AppModel` keeps the name in
+  `unresolved_capture_` / `unresolved_playback_`.
+- **Start refused.** `start_engine()` refuses while either is set. Live,
+  Devices, tray "Engine on", the Mini panel and hotkeys all call it. The
+  error is a typed `DeviceNotFound` message. It names the device and says
+  whether it is missing or matches more than one endpoint.
+- **Explicit choice.** Choosing any row clears the state, including an
+  explicit "Follow system default". `apply_devices()` keeps the remembered
+  policy for an unresolved side, so the substitution is never saved.
+- **Retry.** `refresh_devices()` and a new snapshot generation in `tick()`
+  (hot-plug) retry the name. When it resolves uniquely, the explicit endpoint
+  is restored with an Info notice. The engine is not auto-started.
+- **Tray and status text.** The tray uses `TrayState::Error` while a device is
+  unresolved (`TrayInputs::device_unresolved`), and the tooltip names the
+  device. `capture_name()` / `playback_name()` show "<name> (not listed)".
+  The status line explains the refusal.
+- **Devices view.** The combo shows the "(device no longer listed)"
+  placeholder instead of the default row. A notice names the device, and
+  "Apply and start" is disabled until a choice is made.
+
+Regression tests are in `tests/test_frontend_model.cpp`.
+
+- **`test_app_model_restores_policy`:**
+  - `start_engine()` and tray `ToggleEngine` both fail, with `open_calls == 0`.
+  - The refusal message names `USB Mic`, and the tray is in the error state.
+  - `apply_devices()` keeps `name:USB Mic`.
+  - After the device is added and the list refreshed, the explicit endpoint is
+    selected and opened as non-default.
+  - An ambiguous name is refused with "more than one". Choosing the default
+    row explicitly clears it.
+- **`test_tray_model`:** `device_unresolved` gives `TrayState::Error`.
+
+| Leg | Evidence |
+|---|---|
+| Windows / zig 0.15.2 (Clang 20), strict + `-Werror`, `FLUXVOICE_BUILD_GUI=OFF` | Build pass. CTest 82/82 incl. `frontend_model`. |
+| `frontend/imgui/ViewDevices.cpp` | **NOT COMPILED** locally (SDL3 / Dear ImGui not available offline). Needs a GUI CI leg. |
+| MSVC, Linux GCC/Clang, macOS | NOT RUN |

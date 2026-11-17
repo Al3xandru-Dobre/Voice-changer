@@ -18,8 +18,14 @@ struct PipelineGeometry {
     std::size_t cond_frame_samples = 0;
     std::size_t cond_frames = 0;
 
+    std::size_t queue_samples() const noexcept {
+        return hop;
+    }
+    std::size_t model_delay_samples() const noexcept {
+        return lookahead_frames * frame_samples + overlap_samples;
+    }
     std::size_t algorithmic_samples() const noexcept {
-        return hop + lookahead_frames * frame_samples + overlap_samples;
+        return queue_samples() + model_delay_samples();
     }
     std::uint64_t hop_us() const noexcept {
         return sample_rate ? std::uint64_t{hop} * 1000000 / sample_rate : 0;

@@ -99,6 +99,11 @@ struct StudioCommands {
     std::string export_;
 };
 
+/// A voice name that may name a project directory under the Studio root: the
+/// voices.json rule ([a-z0-9_-]+, so no separators, dots or drive letters)
+/// and not a Windows reserved device name (con, nul, com1, ...).
+bool is_safe_project_name(std::string_view name);
+
 class VoiceStudioModel {
 public:
     static constexpr double kMinimumMinutes = 60.0;
@@ -140,6 +145,9 @@ public:
     float  progress_to_minimum() const;  // 0..1 against kMinimumMinutes
 
     // Outputs
+    /// studio_root / voice_name, or studio_root / "untitled" when the name is
+    /// not is_safe_project_name(): a path is never built from unvalidated text.
+    /// The writers (save_draft, write_job) refuse an unsafe name outright.
     std::filesystem::path project_dir(const std::filesystem::path& studio_root) const;
     StudioCommands commands(const std::filesystem::path& repo_root, const std::filesystem::path& studio_root,
                             const std::filesystem::path& models_root, Shell shell) const;

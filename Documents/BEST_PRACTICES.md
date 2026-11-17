@@ -85,6 +85,13 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Route **all** "could not open" failures — catalog refresh, resolve, feedback refusal, `open_stream`, `start_stream` — through one classification point (today `enter_failure_state` / the `fail()` helper inside `open_resolved_internal`).
   - When a retry depends on state the failure destroyed (the catalog), the recovery path must rebuild that state inside the retry attempt — otherwise the retry is guaranteed to fail and the attempt count is wasted.
 
+### 2.7 "Explicit but not resolvable" is a state, not a fallback value
+- **Past mistake ([`BUG-020`](Bug%20Report/BUG-020_missing_remembered_device_becomes_default.md)):** The GUI restored a remembered `name:` device. When the name was missing or ambiguous, `selection_from_policy` returned `FollowSystemDefault{}`, the nearest valid `DeviceSelection`. The first launch showed a warning, but every later Start (tray, Mini panel, hotkey) opened the system default, so converted speech could play on the speakers.
+- **Rule:**
+  - When a type has no value for "the user chose X but X is unavailable", keep that state beside it (`unresolved_capture_` / `unresolved_playback_`). Never store a substitute in the live selection.
+  - Enforce the refusal in the one command every entry point shares (`AppModel::start_engine`), not in the view that happened to show the warning.
+  - Clear the state only on an explicit user choice (including an explicit "Follow system default") or when a refresh resolves the name uniquely. Never persist the substitute.
+
 ---
 
 ## 3. Real-Time C++ Audio Threading, Queues & Latency Accounting
@@ -173,6 +180,9 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Feed the Stage 2 translator with Stage 1's continuous pre-quantization `latents` (`[1, frames_per_step, D]` f32), and train with StreamSpeech-style multi-task auxiliary CTC supervision (source ASR CTC + target text S2TT CTC), dropping the text heads at ONNX export so runtime stays 100% textless.
   - Split the exported translator into `translator_enc.onnx` and `translator_dec.onnx` stepping on 80 ms chunks ($C = 4 \times 20\text{ ms}$ frames at 50 Hz) with static ring-buffer KV caches ($W_{\text{src}} = W_{\text{tgt}} = 128$ chunks). On `kRead`, run only Stage 1 + `translator_enc` and skip `translator_dec` and Stage 3 (`vocoder`).
   - Predict target-frame prosody (`f0_z, voicing, aperiodicity, energy_z`) from `translator_dec` and drive the Mode B output noise gate from `WaitKPolicy` active output + predicted target energy rather than live microphone energy.
+  - **Drain partial `<EOS>` chunks from `UnitProsodyFifo` (`[BUG-028](Bug%20Report/BUG-028_fifo_strands_partial_eos_chunk_frames.md)`):** When an `s2`/`s4` vocoder consumes `2` or `4` frames per hop, a chunk ending at `[u0, .., <EOS>, <PAD>]` pushes `1..3` frames into the FIFO. Always pad/drain and clear any sub-hop remainder on `<EOS>` / `flushes_completed()` so final consonants are not dropped and stranded frames never bleed into the next utterance.
+  - **Match readiness scale end to end (`[BUG-029](Bug%20Report/BUG-029_ctc_adaptive_probability_never_catches_up.md)`):** `WaitKPolicy::on_source_readiness` expects expected target chunks in `[0, 2]`; training targets and runtime inference must map `readiness_logit` onto `[0, 2]` (not `sigmoid` in `(0, 1)`), otherwise two-write catch-up steps can never fire at constant $k$.
+  - **Audit `<EOS>` termination, not just `<PAD>` steps, and keep NC taint across every manifest/checkpoint hop (`[BUG-027](Bug%20Report/BUG-027_s2ut_data_prep_archive_plumbing_broken.md)`, `[BUG-030](Bug%20Report/BUG-030_silence_tail_babble_passes_gate_and_eval.md)`, `[BUG-031](Bug%20Report/BUG-031_s2ut_pipeline_drops_noncommercial_taint.md)`, `[BUG-032](Bug%20Report/BUG-032_cpp_voice_catalog_ignores_voice_lang_field.md)`):** Test dataset registries without rewriting `Archive` descriptors in test helpers; fail `gate_s2ut` when `trailing_silence` clips hit `max_flush_ratio`/`max_flush_steps` without `<EOS>`; propagate `noncommercial: true` from both manifest rows and teacher metadata into checkpoints and ONNX contract `license` strings; and keep every `voices.json` field (`"lang"`) validated identically in Python and both C++ `VoiceCatalog` parsers.
 
 ### 4.5 Configure ONNX Runtime C++ for deterministic real-time execution
 - **Hazards ([Milestone 2 Research §9–§10](Research_documents/M2_TEXTLESS_VC_RESEARCH.md)):**
@@ -246,6 +256,7 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - `<windows.h>`/`<psapi.h>` only inside `_WIN32` guards (with `NOMINMAX`); `<unistd.h>` only under POSIX/Linux guards; `<mach/mach.h>` only under `__APPLE__`. `util.h`-style grab-bag headers are not portable — include the specific owning header instead.
   - Link platform libraries per-OS in CMake (`ole32`/`winmm`/`psapi` on WIN32, `dl`/`m` on UNIX, `-framework …` on APPLE) — never `#pragma comment(lib, …)`, which is a compiler-specific MSVC-dialect feature (clang-cl also honours it) and not portable across GCC/Clang/other platforms. Keep dependency edges in CMake where every toolchain sees them.
   - ISO C++20 only: no MSVC-only extensions, no GNU C extensions, and no reliance on transitive standard includes that the standard does not guarantee.
+  - Code behind an OS guard is compiled only on that OS. An `#elif defined(__APPLE__)` branch written without a macOS compiler is unverified until the `macos-clang` CI leg builds it ([`BUG-019`](Bug%20Report/BUG-019_macos_qos_call_wrong_arity.md): `pthread_get_qos_class_np` was called with two arguments instead of three). Take signatures from the SDK header, and give the branch a test that runs on that OS.
 
 ### 5.5 Per-toolchain build directories & the optional ONNX Runtime SDK
 - **Rule:**
@@ -277,6 +288,13 @@ This is the default for all future C++ source, header, test and CMake work, not 
 5. **Report evidence, not inferred portability.** Record each native compiler's identity/version, OS/architecture, configure/build/test commands, result and raw log or CI run reference. A local MSVC pass or a clang-tidy parse using MSVC headers is not a Linux/AppleClang pass. Mark unavailable or unexecuted legs NOT RUN/pending, retain the reason and name the required CI follow-up. Cross-platform verification requires green native configure/build/CTest runs for all four legs in `.github/workflows/build.yml`; compilation alone does not verify live audio routing or OS permissions. Documentation-only changes need link/diff validation, not a fabricated new C++ test result.
 
 Compiler failures must leave behind the minimal upstream fix, a relevant regression check and a concise lesson here (with a condensed reminder in `MEMORY.md`/`AGENTS.md` when it changes the standing workflow). Keep research snapshots unchanged and do not mark milestone acceptance complete until its evidence exists.
+
+### 5.7 A user-typed name that becomes a path is validated at the writer, and persisted on commit
+- **Past mistake ([`BUG-021`](Bug%20Report/BUG-021_studio_draft_saved_per_keystroke_unvalidated_path.md)):** The Voice Studio saved its draft into `studio_root / voice_name` on every keystroke. Typing `alex` created `a/`, `al/`, `ale/` and `alex/`. Typing an existing project's name overwrote its draft, and `..\x` escaped the root. A `name_problem()` check existed but was used only for display.
+- **Rule:**
+  - The function that writes the path enforces the rule (`is_safe_project_name`: `[a-z0-9_-]+`, no Windows device names). A path is never built from an unvalidated name; `project_dir` falls back to `untitled`.
+  - Save a field that also defines the storage location when the edit is committed (focus lost, Next), not on every edit event. Track which directory owns the current state, so a rename moves it rather than leaving a copy behind.
+  - Never write over an existing project the user has not opened. Report a name conflict and offer to open that project instead.
 
 ---
 

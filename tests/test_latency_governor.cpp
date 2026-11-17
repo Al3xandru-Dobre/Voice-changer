@@ -44,7 +44,6 @@ void test_policy() {
     LatencyGovernor long_hop({16000, 3200, 560, 3, 0.001f});
     CHECK(long_hop.skip_output(2961, loud) == 320);
     CHECK(LatencyGovernor::default_target(320, 320, 16000) == 560);
-    CHECK(LatencyGovernor::default_target(640, 320, 16000) == 880);
     CHECK(LatencyGovernor::default_target(640, 640, 16000) == 1040);
     CHECK(LatencyGovernor::default_target(1280, 1280, 16000) == 2080);
     bool rejected = false;

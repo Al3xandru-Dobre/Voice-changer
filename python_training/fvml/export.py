@@ -15,9 +15,15 @@ hops (not one) is what proves it.
 
 Encoder graphs run the trunk and one delay head (head index -> lookahead L) and
 emit `units`, the argmax of the head's logits. While exporting, the logits are a
-graph output too. The shipped file drops them, since contract v1 allows no
+graph output too. The shipped file drops them, since the contract allows no
 extra output, and parity adds them back in memory (with_outputs) to measure
 |Δlogit|.
+
+Contract v2 (Milestone 3 / Stages 02-03) makes the encoder dual-output: the same
+graph also emits `latents` [1, frames_per_step, latent_dim] f32, the LayerNorm
+output the head reads, for Mode B's translator. `latents` at step t describe
+frame t (the trunk has no lookahead); `units` of head L describe frame t - L,
+which is what the contract's lookahead_frames says. v1 graphs are unchanged.
 
 Vocoder graphs wrap fvml.vocoder.UnitVocoder (Stage 05) through this much of
 its API:
@@ -63,6 +69,8 @@ PARITY_SECONDS = 60.0           # > 2x any attention / KV window
 GOLDEN_SECONDS = 10.0
 MIN_UNIT_AGREEMENT = 0.999
 LOGIT_ATOL = 1e-4               # |Δlogit| above this counts as the first divergence
+LATENT_RTOL = 1e-4              # v2 encoder: max |Δlatents| relative to the latents' RMS
+MIN_LATENT_RMS = 1e-3           # ... of a non-silent port (the LayerNorm output is ~1)
 MIN_VOCODER_SNR_DB = 50.0
 COMPUTE_BUDGET = 0.5            # encoder + vocoder p95 <= 50% of the hop
 
@@ -140,24 +148,40 @@ def head_index(model, head):
     return i
 
 
-def encoder_contract(model, head, frames_per_step, license):
-    """Contract of a ContentEncoder exported with delay head `head`."""
+def check_contract_version(version):
+    if version not in fc.SUPPORTED_CONTRACT_VERSIONS:
+        raise ExportError(f"unsupported contract_version {version} (this exporter writes "
+                          f"{' and '.join(map(str, fc.SUPPORTED_CONTRACT_VERSIONS))})")
+    return version
+
+
+def encoder_contract(model, head, frames_per_step, license, contract_version=fc.CONTRACT_VERSION):
+    """Contract of a ContentEncoder exported with delay head `head`. Version 2
+    is the dual-output encoder: it adds latent_dim (the `latents` port)."""
     from . import content_encoder as ce
     graph_states = [n for n in model.init_state() if n.startswith(_head_prefixes(head))]
-    return make_contract({"role": "encoder", "sample_rate": ce.SAMPLE_RATE,
-                          "frame_samples": ce.FRAME_SAMPLES,
-                          "lookahead_frames": model.cfg.lookahead[head],
-                          "content_kind": "discrete", "vocab": model.cfg.vocab,
-                          "license": license}, frames_per_step, graph_states)
+    fields = {"role": "encoder", "sample_rate": ce.SAMPLE_RATE,
+              "frame_samples": ce.FRAME_SAMPLES,
+              "lookahead_frames": model.cfg.lookahead[head],
+              "content_kind": "discrete", "vocab": model.cfg.vocab,
+              "license": license}
+    if check_contract_version(contract_version) == fc.CONTRACT_VERSION_V2:
+        fields.update(contract_version=fc.CONTRACT_VERSION_V2, latent_dim=model.cfg.latent_dim)
+    return make_contract(fields, frames_per_step, graph_states)
 
 
 def _head_prefixes(head):
     return ("trunk.", f"heads.{head}.")
 
 
-def encoder_graph(model, head, frames_per_step):
+def latents_spec(c):
+    return TensorSpec("latents", "f32", (1, c.frames_per_step, c.latent_dim))
+
+
+def encoder_graph(model, head, frames_per_step, contract_version=fc.CONTRACT_VERSION):
     """Step graph of a ContentEncoder: trunk + head `head` -> units (+ logits).
-    The other heads are left out, with their caches."""
+    The other heads are left out, with their caches. Version 2 also outputs
+    `latents`, the tensor the head reads: one trunk pass feeds both ports."""
     from . import content_encoder as ce
     prefixes = _head_prefixes(head)
     init = {n: t for n, t in model.init_state().items() if n.startswith(prefixes)}
@@ -168,21 +192,29 @@ def encoder_graph(model, head, frames_per_step):
         stream = StreamState(conv_names, state)
         latents = trunk(ins["audio"].unsqueeze(1), stream)
         logits = head_module(latents.transpose(1, 2), stream)
-        return {"units": logits.argmax(-1), "logits": logits}, stream.result()
+        return {"units": logits.argmax(-1), "latents": latents, "logits": logits}, stream.result()
 
+    outputs = [TensorSpec("units", "i64", (1, frames_per_step))]
+    if check_contract_version(contract_version) == fc.CONTRACT_VERSION_V2:
+        outputs.append(TensorSpec("latents", "f32",
+                                  (1, frames_per_step, model.cfg.latent_dim)))
     return StepGraph(model, step,
                      [TensorSpec("audio", "f32", (1, frames_per_step * ce.FRAME_SAMPLES))],
-                     [TensorSpec("units", "i64", (1, frames_per_step))], init,
+                     outputs, init,
                      debug_outputs=[TensorSpec("logits", "f32",
                                                (1, frames_per_step, model.cfg.vocab))])
 
 
-def vocoder_contract(model, ckpt, frames_per_step):
+def vocoder_contract(model, ckpt, frames_per_step, contract_version=fc.CONTRACT_VERSION):
     """The vocoder's contract from its stored config (licence: the
-    checkpoint's `license` key if present)."""
+    checkpoint's `license` key if present). Version 2 changes the stamp only:
+    a Mode B bundle's vocoder has the same tensors as a Mode A one."""
+    import dataclasses
     license = ckpt.get("license") if isinstance(ckpt, dict) else None
+    check_contract_version(contract_version)
     try:
-        c = model.contract(frames_per_step, license=license)
+        c = dataclasses.replace(model.contract(frames_per_step, license=license),
+                                contract_version=contract_version)
         c.validate()
     except (TypeError, ValueError) as e:     # ContractError is a ValueError
         raise ExportError(f"invalid vocoder contract: {e}") from None
@@ -392,36 +424,62 @@ def encoder_offline(model, head, wav):
     return model(torch.from_numpy(np.ascontiguousarray(wav, np.float32))[None])["logits"][head][0].numpy()
 
 
-def encoder_chunked(stream, wav):
-    """(units (frames,), logits (frames, vocab) or None) from an encoder
-    OrtStream fed one hop at a time from a fresh state."""
+@torch.no_grad()
+def encoder_offline_latents(model, wav):
+    """The `latents` port through forward() on the whole signal: (frames, D)."""
+    return model(torch.from_numpy(np.ascontiguousarray(wav, np.float32))[None])["latents"][0].numpy()
+
+
+def encoder_chunked_all(stream, wav):
+    """{output name: (frames, ...)} for every non-state output of an encoder
+    OrtStream fed one hop at a time from a fresh state (`units`, plus `latents`
+    of a v2 graph and `logits` when exposed)."""
     hop = stream.contract.hop
     stream.reset()
-    units, logits = [], []
+    parts = {}
     for i in range(len(wav) // hop):
         out = stream.step({"audio": np.ascontiguousarray(wav[None, i * hop:(i + 1) * hop],
                                                          np.float32)})
-        units.append(out["units"][0])
-        if "logits" in out:
-            logits.append(out["logits"][0])
-    return np.concatenate(units), (np.concatenate(logits) if logits else None)
+        for name, value in out.items():
+            parts.setdefault(name, []).append(value[0])
+    return {name: np.concatenate(v) for name, v in parts.items()}
+
+
+def encoder_chunked(stream, wav):
+    """(units (frames,), logits (frames, vocab) or None) from an encoder
+    OrtStream fed one hop at a time from a fresh state."""
+    out = encoder_chunked_all(stream, wav)
+    return out["units"], out.get("logits")
 
 
 def encoder_parity(model, head, path, wav):
     """ORT chunked (fresh state, states fed back) vs. PyTorch forward() offline.
     Gate: shipped `units` agree with the offline argmax on >= 99.9% of frames;
-    max |Δlogit| catches real drift."""
-    stream = OrtStream(path, extra_outputs=[logits_spec(read_contract(path))])
+    max |Δlogit| catches real drift. A v2 (dual-output) graph is also gated on
+    its `latents`: max |Δ| <= 1e-4 of the port's RMS, on a non-silent port."""
+    c = read_contract(path)
+    stream = OrtStream(path, extra_outputs=[logits_spec(c)])
     wav = whole_hops(wav, stream.contract.hop)
     ref = encoder_offline(model, head, wav)
-    units, logits = encoder_chunked(stream, wav)
+    out = encoder_chunked_all(stream, wav)
+    units, logits = out["units"], out["logits"]
     r = fp.compare(ref, logits, atol=LOGIT_ATOL, argmax_axis=-1, steps=False)
     agreement = float(np.mean(units == ref.argmax(-1)))
-    return {"seconds": len(wav) / stream.contract.sample_rate, "frames": int(len(units)),
-            "unit_agreement": agreement, "max_abs_logit": r.max_abs,
-            "mean_abs_logit": r.mean_abs, "logit_snr_db": _finite(r.snr_db),
-            "first_divergence_frame": None if r.first_divergence is None else r.first_divergence[0],
-            "pass": bool(agreement >= MIN_UNIT_AGREEMENT)}
+    report = {"seconds": len(wav) / stream.contract.sample_rate, "frames": int(len(units)),
+              "unit_agreement": agreement, "max_abs_logit": r.max_abs,
+              "mean_abs_logit": r.mean_abs, "logit_snr_db": _finite(r.snr_db),
+              "first_divergence_frame": None if r.first_divergence is None
+              else r.first_divergence[0],
+              "pass": bool(agreement >= MIN_UNIT_AGREEMENT)}
+    if c.contract_version == fc.CONTRACT_VERSION_V2:
+        ref_lat = encoder_offline_latents(model, wav)
+        lat = fp.compare(ref_lat, out["latents"], steps=False)
+        rms = float(np.sqrt(np.mean(np.square(ref_lat, dtype=np.float64))))
+        ok = bool(rms >= MIN_LATENT_RMS and lat.max_abs <= LATENT_RTOL * rms)
+        report.update(max_abs_latents=lat.max_abs, latents_rms=rms,
+                      latents_snr_db=_finite(lat.snr_db), latents_pass=ok)
+        report["pass"] = bool(report["pass"] and ok)
+    return report
 
 
 # -- vocoder -------------------------------------------------------------------

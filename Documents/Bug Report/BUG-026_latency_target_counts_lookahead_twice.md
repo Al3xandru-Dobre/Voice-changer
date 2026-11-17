@@ -8,8 +8,8 @@
 | **Name** | *Double lookahead* — the queue is prefilled for a delay the model already adds |
 | **Reported** | 2026-11-14 |
 | **Severity** | Medium (projected `T − B` is one lookahead above the master budget: 100 ms instead of 80 ms for A1, 140 ms instead of 100 ms for A2; no effect at lookahead 0) |
-| **Status** | ◐ diagnosed by arithmetic — not measured (no trained bundle, no live run) |
-| **Component** | `src/pipeline/InferencePipeline.cpp:89-92`, `src/pipeline/PipelineGeometry.hpp:21-23`, `src/pipeline/LatencyGovernor.hpp:44-48`; spec text in `Documents/Milestone 2/08_realtime_mode_a_pipeline.md:96-97` |
+| **Status** | ☑ fixed (2026-11-14) |
+| **Component** | `src/pipeline/InferencePipeline.cpp:89-92`, `src/pipeline/PipelineGeometry.hpp:21-29`, `src/pipeline/LatencyGovernor.hpp:42-49`, `src/main.cpp:247-251`; spec text in `Documents/Milestone 2/08_realtime_mode_a_pipeline.md:96-97`, `:121-122` |
 | **Blocks** | [Milestone 2 / Stage 08](../Milestone%202/08_realtime_mode_a_pipeline.md) live acceptance, [Stage 11](../Milestone%202/11_verification_exit.md) (`T − B` Must line) |
 
 ## Summary
@@ -92,3 +92,10 @@ assert its output position equals `target + L × frame_samples` and that
 ## Workaround
 
 Pass `--latency-target-ms` explicitly with the lookahead subtracted (A1: 35).
+
+## Fix landed (2026-11-14)
+
+- `PipelineGeometry`: split `algorithmic_samples()` disjointly into `queue_samples() = hop` (the framing occupancy paid inside the queues) and `model_delay_samples() = lookahead_frames * frame_samples + overlap_samples` (model lookahead + OLA tail outside the queues).
+- `InferencePipeline`: passes `g.queue_samples()` to `LatencyGovernor::default_target`, so default startup prefill is `35 ms` (`560` samples) for `s1` and `65 ms` (`1040` samples) for `s2` regardless of `lookahead_frames`.
+- `src/main.cpp`: computes `[stats]` `lat_ms` from `model_delay_samples() + max(queued, 0)` plus backend capture/playback periods, removing the duplicate `+1 hop` from `lat_ms`.
+- `tests/test_mode_a_worker.cpp`: `test_lookahead_does_not_inflate_queue_target` pins `target == 560` across `L in {0, 1, 2}` and verifies an impulse arrives at `target + model_delay_samples()`.

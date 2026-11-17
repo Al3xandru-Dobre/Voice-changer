@@ -4,7 +4,7 @@
 > [Documents index](../README.md) ·
 > Research basis: [Simultaneous S2UT research](../Research_documents/M3_WAITK_S2UT_RESEARCH.md)
 
-**Status:** ◐ in progress — Stage 02 done, Stage 01 harness & data tooling implemented (2026-11-14)
+**Status:** ◐ in progress — Stage 02 done; Stages 01, 03, 04 and 05 implemented and unit-tested (2026-11-15). Open: external corpus downloads (01), multilingual k-means / student / vocoder training (03), native MSVC / GCC / AppleClang CI legs (04), S2UT training and the decision gate (05)
 **Goal from README:** *Train/fine-tune causal S2UT transformer on discrete
 units. Implement `WaitKPolicy` in C++ and connect between encoder and
 vocoder.*
@@ -116,9 +116,9 @@ C++ track:  02 (contract v2) ─► 04 (WaitKPolicy & FIFO) ─► 07 (C++ S2UT 
 |---|---|---|---|---|
 | 01 | [Bidirectional datasets & SimulEval harness](01_multilingual_data_simuleval_harness.md) | §6 §7 §10 | `prepare_s2ut_data.py`; 6-pair eval lists; `eval_s2ut.py` (ASR-BLEU, AL) | ◐ |
 | 02 | [Translator contract v2 & fixture models](02_translator_contract_v2_fixtures.md) | §4 §8 | Contract v2 in `ModelContract.hpp` & `fvml/contract.py`; translator fixtures | ☑ |
-| 03 | [Multilingual encoder & vocoder upgrade](03_multilingual_encoder_vocoder_upgrade.md) | §3 | `mhubert-vp` km1000; dual-output student (`latents` + `units`); `{en,es,fr,de}` vocoder | ☐ |
-| 04 | [`WaitKPolicy` & streaming unit/prosody FIFO](04_waitk_policy_streaming_state_machine.md) | §4 §9 | Upgraded `WaitKPolicy.hpp` + `UnitProsodyFifo.hpp`; `test_waitk_policy` | ☐ |
-| 05 | [Causal S2UT translator & policy decision gate](05_causal_s2ut_translator_policy_gate.md) | §2 §4 | Multi-task CTC Conformer-Transformer; Wait-*k* vs. Adaptive gate table | ☐ |
+| 03 | [Multilingual encoder & vocoder upgrade](03_multilingual_encoder_vocoder_upgrade.md) | §3 | `mhubert-vp` km1000; dual-output student (`latents` + `units`); `{en,es,fr,de}` vocoder | ◐ |
+| 04 | [`WaitKPolicy` & streaming unit/prosody FIFO](04_waitk_policy_streaming_state_machine.md) | §4 §9 | Upgraded `WaitKPolicy.hpp` + `UnitProsodyFifo.hpp`; `test_waitk_policy` | ◐ |
+| 05 | [Causal S2UT translator & policy decision gate](05_causal_s2ut_translator_policy_gate.md) | §2 §4 | Multi-task CTC Conformer-Transformer; Wait-*k* vs. Adaptive gate table | ◐ |
 | 06 | [Translated prosody & stateful ONNX export](06_translated_prosody_stateful_onnx_export.md) | §5 §8 | Prosody head; `translator_enc.onnx` + `translator_dec.onnx` + `langs.json`; parity | ☐ |
 | 07 | [C++ translator runtime & `fv_s2ut_file`](07_cpp_translator_runtime_offline_runner.md) | §8 §9 | Shared `mem_kv` `OrtModel` execution; `fv_s2ut_file` WAV→WAV runner | ☐ |
 | 08 | [Real-time Mode B pipeline & governor](08_realtime_mode_b_pipeline.md) | §4 §5 §9 | `fluxvoice --s2ut` live; `kRead` bypass; `kFlush` gate override; telemetry | ☐ |

@@ -8,7 +8,7 @@
 | **Name** | *Prefix folders* — the draft directory is the half-typed voice name |
 | **Reported** | 2026-11-14 |
 | **Severity** | High (silent loss of a recording project's draft; writes outside the Studio directory) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-15 — native legs pending, see [Resolution](#resolution) |
 | **Component** | `frontend/imgui/ViewStudio.cpp`, `frontend/core/AppModel.cpp` (`studio_save_draft`), `frontend/core/VoiceStudio.cpp` (`project_dir`, `save_draft`) |
 | **Blocks** | [Milestone 4 / Stage 03](../Milestone%204/03_voice_studio_translate_catalogue_panels.md), [Stage 04](../Milestone%204/04_build_gate_frontend_hardening.md); [M2 / Stage 10](../Milestone%202/10_target_voice_finetune.md) uses the Studio's output |
 
@@ -76,3 +76,52 @@ defines the storage location, and the validation that exists
 
 Paste the complete name in one action, and keep a copy of
 `studio/<voice>/draft.json`.
+
+## Resolution
+
+**2026-11-15: fix in tree, native legs pending.**
+
+- **Name rule.** `is_safe_project_name()` (`VoiceStudio`) applies the
+  `voices.json` rule and also rejects the Windows device names (`con`, `prn`,
+  `aux`, `nul`, `com0-9`, `lpt0-9`).
+  - `project_dir()` never builds a path from an unsafe name; it falls back to
+    `untitled`.
+  - `save_draft()`, `write_job()` and `load_draft()` refuse an unsafe name.
+  - `name_problem()` and `can_advance()` report the reserved-name case.
+- **Save gate.** `AppModel::studio_save_draft()` returns early unless
+  `name_problem()` is empty. Only the format rule is checked here, not the
+  installed-voice collision, so the Install step can still save. The model
+  tracks the directory that owns the draft in `studio_project_`.
+- **Rename and prefix typing.** After the draft is written under the new
+  name, the old directory is removed if it held only `draft.json`. Typing
+  `a`, `al`, `ale`, `alex` leaves one directory. A directory with job or
+  status files is left intact.
+- **Overwrite.** When the typed name belongs to another existing project,
+  `studio_name_conflict()` is set and nothing is written. The same applies to
+  `studio_write_job()`, which now saves through this check first.
+  `studio_open_project()` loads that project instead.
+- **Startup.** The most recently modified `draft.json` is reopened (ties
+  broken by name), instead of requiring exactly one draft.
+- **`ViewStudio`.** The name field saves when focus leaves it
+  (`IsItemDeactivatedAfterEdit`), not on every keystroke. A name conflict
+  shows a notice with an "Open existing project" button and blocks Next.
+
+Regression test `test_studio_drafts`:
+- Typing the prefixes leaves one directory.
+- `../x`, `..\..\x`, an absolute path, `con`, `Alex` and `""` neither save nor
+  write a job, and nothing is created outside the root.
+- Raw `save_draft("../x")` fails, and `project_dir` falls back to `untitled`.
+- With two projects on disk, startup restores the newer one (`zed`).
+- Typing `alex` leaves `alex/draft.json` byte-identical and writes no job.
+- "Open" loads `alex`.
+- Renaming `alex` after its job is written keeps `alex/` and its job files.
+
+| Leg | Evidence |
+|---|---|
+| Windows / zig 0.15.2 (Clang 20), strict + `-Werror`, `FLUXVOICE_BUILD_GUI=OFF` | Build pass. CTest 82/82 incl. `frontend_model`. |
+| `frontend/imgui/ViewStudio.cpp` | **NOT COMPILED** locally (SDL3 / Dear ImGui not available offline). Needs a GUI CI leg. |
+| MSVC, Linux GCC/Clang, macOS | NOT RUN |
+
+Not done: the Studio still has no project list and no "New project" command.
+Only the newest draft is reopened. To reach another project, type its name and
+choose "Open existing project".

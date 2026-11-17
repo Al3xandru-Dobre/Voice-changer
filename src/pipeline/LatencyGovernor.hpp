@@ -39,12 +39,13 @@ public:
             throw std::invalid_argument("invalid latency governor configuration");
     }
 
-    // Master budget: framing/lookahead/OLA + 50%-hop compute + jitter margin
-    // (5 ms for 20/40 ms hops, 10 ms for >=80 ms hops). Device periods are separate.
-    static std::size_t default_target(std::size_t algorithmic_samples, std::size_t hop,
+    // Master budget queue occupancy: framing floor + 50%-hop compute + jitter
+    // margin (5 ms for 20/40 ms hops, 10 ms for >=80 ms hops). Model lookahead,
+    // OLA tail and device periods live outside the queues.
+    static std::size_t default_target(std::size_t queue_floor_samples, std::size_t hop,
                                       std::uint32_t rate) noexcept {
         const std::size_t margin_ms = std::uint64_t{hop} * 1000 >= 80 * rate ? 10 : 5;
-        return algorithmic_samples + (hop + 1) / 2 + (rate * margin_ms + 999) / 1000;
+        return queue_floor_samples + (hop + 1) / 2 + (rate * margin_ms + 999) / 1000;
     }
 
     std::size_t target_samples() const noexcept { return cfg_.target_samples; }

@@ -128,3 +128,4 @@ jobs:
           python -m pytest -q -p no:cacheprovider
           tests/test_contract.py tests/test_fixtures.py
           tests/test_prepare_s2ut_data.py tests/test_eval_s2ut.py
+          tests/test_waitk_policy.py

@@ -214,6 +214,211 @@ void test_percentiles() {
     CHECK(sum.min == 1.0 && sum.max == 20.0);
 }
 
+void test_speech_burst_shape() {
+    for (double rate : {48000.0, 16000.0}) {
+        const auto m = probe::make_speech_burst(rate, 0.5);
+        const std::size_t expected_len =
+            static_cast<std::size_t>(std::llround(rate * probe::kSpeechBurstSeconds));
+        CHECK(m.size() == expected_len);
+        CHECK(m.front() == 0.0f);
+        CHECK(m.back() == 0.0f);
+        float peak = 0.0f;
+        for (float v : m) {
+            CHECK(std::isfinite(v));
+            peak = std::max(peak, std::abs(v));
+        }
+        CHECK(peak > 0.45f && peak <= 0.5001f);
+
+        auto rms_slice = [&](double t0, double t1) {
+            const auto a = static_cast<std::size_t>(t0 * rate);
+            const auto b = std::min(m.size(), static_cast<std::size_t>(t1 * rate));
+            double s = 0.0;
+            for (std::size_t i = a; i < b; ++i) s += static_cast<double>(m[i]) * m[i];
+            return std::sqrt(s / static_cast<double>(b - a));
+        };
+        const double pre  = rms_slice(0.000, 0.018);
+        const double body = rms_slice(0.030, 0.115);
+        const double post = rms_slice(0.130, 0.150);
+        CHECK(body > 0.08);
+        CHECK(pre == 0.0 && post == 0.0);
+    }
+}
+
+/// Signal-driven causal VC simulator: replaces the input's pitch and timbre by
+/// tracking short-time low/high-band envelopes, re-exciting shifted vocal-tract
+/// formants with a target-pitch glottal carrier + unvoiced aspiration, applying
+/// soft limiting, delaying by `delays[k]` samples, and adding white noise.
+std::vector<float> simulate_vc_stream(const std::vector<float>& m,
+                                      const probe::MarkerSchedule& s,
+                                      const std::vector<std::size_t>& delays,
+                                      double rate, double target_f0_hz,
+                                      double formant_scale, float gain, float noise_amp) {
+    const auto clean = route(m, s, delays, 1.0f, 0.0f);
+    std::vector<float> out(clean.size(), 0.0f);
+
+    const double env_alpha = 1.0 - std::exp(-1.0 / (0.0012 * rate));
+    const double lp_alpha  = 1.0 - std::exp(-2.0 * probe::kPi * 900.0 / rate);
+    auto f1 = probe::detail::Resonator::make(rate, 650.0 * formant_scale, 100.0);
+    auto f2 = probe::detail::Resonator::make(rate, 1450.0 * formant_scale, 130.0);
+    auto f3 = probe::detail::Resonator::make(rate, 2550.0 * formant_scale, 180.0);
+    auto asp = probe::detail::Resonator::make(rate, 2300.0 * formant_scale, 900.0);
+
+    const double max_harm_hz = std::min(3800.0, 0.44 * rate);
+    double lp = 0.0, env_voicing = 0.0, env_fricative = 0.0;
+    double phase = 1.3;  // arbitrary carrier phase unrelated to source
+    Noise carrier_rng{987654321u};
+    Noise ch_noise{24681357u};
+
+    for (std::size_t n = 0; n < clean.size(); ++n) {
+        const double x = clean[n];
+        lp += lp_alpha * (x - lp);
+        const double hp = x - lp;
+        env_voicing   += env_alpha * (std::abs(lp) - env_voicing);
+        env_fricative += env_alpha * (std::abs(hp) - env_fricative);
+
+        const double f0 = target_f0_hz * (1.0 + 0.04 * std::sin(2.0 * probe::kPi * 5.5 * n / rate));
+        phase = std::fmod(phase + 2.0 * probe::kPi * f0 / rate, 2.0 * probe::kPi);
+        const int n_harm = std::min(22, std::max(1, static_cast<int>(max_harm_hz / f0)));
+        double glottal = 0.0;
+        for (int h = 1; h <= n_harm; ++h)
+            glottal += std::sin(static_cast<double>(h) * phase) / (1.0 + 0.09 * h * h);
+
+        const double voiced = 1.00 * f1.step(glottal) +
+                              0.75 * f2.step(glottal) +
+                              0.40 * f3.step(glottal);
+        const double unvoiced = asp.step(carrier_rng.next(1.0f));
+        const double y = 2.6 * env_voicing * voiced + 2.2 * env_fricative * unvoiced;
+        out[n] = gain * static_cast<float>(std::tanh(1.4 * y)) + ch_noise.next(noise_amp);
+    }
+    return out;
+}
+
+void test_speech_vc_simulated_route() {
+    // 1. Verify why Stage 11 needs the speech envelope marker: the waveform
+    //    chirp correlator fails completely once a VC model replaces pitch/timbre.
+    {
+        probe::MarkerSchedule s;
+        s.first = 4800;
+        s.interval = 24000;  // 500 ms
+        s.count = 6;
+        const auto c = marker();
+        const std::vector<std::size_t> delays(s.count, 3217);
+        const auto vc_chirp = simulate_vc_stream(c, s, delays, kRate, 215.0, 1.22, 0.4f, 0.01f);
+        probe::MarkerDetector chirp_det(c, s, 0.5, probe::MarkerKind::Chirp, kRate);
+        chirp_det.push(vc_chirp.data(), vc_chirp.size());
+        CHECK(probe::summarize(chirp_det.detections(), s, kRate).found == 0);
+    }
+
+    // 2. Stage 11 DoD: simulated VC routes (upward female-like +7 st & shifted
+    //    formants at 48 kHz, downward baritone -5 st & shifted formants at
+    //    48 kHz, and 16 kHz pipeline rate) recover known delays within +/- 2 ms.
+    struct Case {
+        double rate;
+        double target_f0;
+        double formant_scale;
+        std::size_t delay_samples;
+    };
+    const Case cases[] = {
+        {48000.0, 215.0, 1.22, 3217},  // +7.4 st, brighter formants, 67.02 ms
+        {48000.0,  98.0, 0.84, 4583},  // -5.9 st, darker formants,   95.48 ms
+        {16000.0, 195.0, 1.18, 1237},  // 16 kHz native VC rate,      77.31 ms
+    };
+
+    for (const Case& tc : cases) {
+        probe::MarkerSchedule s;
+        s.first    = static_cast<std::uint64_t>(tc.rate / 10);    // 100 ms
+        s.interval = static_cast<std::uint64_t>(tc.rate / 2);     // 500 ms
+        s.count    = 8;
+
+        const auto speech = probe::make_speech_burst(tc.rate, 0.5);
+        const std::vector<std::size_t> delays(s.count, tc.delay_samples);
+        const auto vc_rec = simulate_vc_stream(
+            speech, s, delays, tc.rate, tc.target_f0, tc.formant_scale, 0.35f, 0.015f);
+
+        probe::MarkerDetector det(speech, s, 0.65, probe::MarkerKind::Speech, tc.rate);
+        det.push(vc_rec.data(), vc_rec.size());
+        CHECK(det.done());
+
+        const double tol_samples = 0.002 * tc.rate;  // +/- 2.0 ms
+        for (const auto& d : det.detections()) {
+            CHECK(d.found);
+            CHECK(d.score >= 0.75);
+            CHECK(std::abs(d.lag - static_cast<double>(tc.delay_samples)) <= tol_samples);
+        }
+        const auto sum = probe::summarize(det.detections(), s, tc.rate);
+        CHECK(sum.found == s.count && sum.missed == 0);
+        CHECK(std::abs(sum.median - static_cast<double>(tc.delay_samples)) <= tol_samples);
+    }
+}
+
+void test_speech_rejects_noise_tone_and_click() {
+    probe::MarkerSchedule s;
+    s.first = 4800;
+    s.interval = 24000;
+    s.count = 4;
+    const auto speech = probe::make_speech_burst(kRate, 0.5);
+
+    // Stationary white noise must stay far below threshold.
+    std::vector<float> noisy(static_cast<std::size_t>(s.total()));
+    Noise rng;
+    for (float& v : noisy) v = rng.next(0.35f);
+    probe::MarkerDetector det_noise(speech, s, 0.65, probe::MarkerKind::Speech, kRate);
+    det_noise.push(noisy.data(), noisy.size());
+    for (const auto& d : det_noise.detections()) CHECK(!d.found && d.score < 0.25);
+
+    // Steady sine tone has flat envelope -> zero modulation correlation.
+    std::vector<float> tone(static_cast<std::size_t>(s.total()));
+    for (std::size_t i = 0; i < tone.size(); ++i)
+        tone[i] = static_cast<float>(0.4 * std::sin(2.0 * probe::kPi * 440.0 * i / kRate));
+    probe::MarkerDetector det_tone(speech, s, 0.65, probe::MarkerKind::Speech, kRate);
+    det_tone.push(tone.data(), tone.size());
+    for (const auto& d : det_tone.detections()) CHECK(!d.found && d.score < 0.1);
+
+    // Single 1 ms transient click lacks the two-syllable speech envelope.
+    std::vector<float> clicks(static_cast<std::size_t>(s.total()), 0.0f);
+    for (std::size_t k = 0; k < s.count; ++k)
+        for (std::size_t j = 0; j < 48; ++j)
+            clicks[static_cast<std::size_t>(s.start(k)) + 3000 + j] = 0.8f;
+    probe::MarkerDetector det_click(speech, s, 0.65, probe::MarkerKind::Speech, kRate);
+    det_click.push(clicks.data(), clicks.size());
+    for (const auto& d : det_click.detections()) CHECK(!d.found);
+}
+
+void test_speech_piecewise_and_zero_delay() {
+    probe::MarkerSchedule s;
+    s.first = 4800;
+    s.interval = 24000;
+    s.count = 4;
+    const auto speech = probe::make_speech_burst(kRate, 0.5);
+
+    const auto rec0 = route(speech, s, std::vector<std::size_t>(s.count, 0), 0.7f, 0.0f);
+    probe::MarkerDetector det0(speech, s, 0.65, probe::MarkerKind::Speech, kRate);
+    det0.push(rec0.data(), rec0.size());
+    for (const auto& d : det0.detections()) {
+        CHECK(d.found);
+        CHECK(std::abs(d.lag) < 1.0);
+    }
+
+    const auto rec = route(speech, s, std::vector<std::size_t>(s.count, 2765), 0.6f, 0.01f);
+    probe::MarkerDetector whole(speech, s, 0.65, probe::MarkerKind::Speech, kRate);
+    whole.push(rec.data(), rec.size());
+
+    probe::MarkerDetector piece(speech, s, 0.65, probe::MarkerKind::Speech, kRate);
+    const std::size_t sizes[] = {3, 257, 1024, 480, 19, 4096};
+    std::size_t at = 0, idx = 0;
+    while (at < rec.size()) {
+        const std::size_t n = std::min(sizes[idx++ % 6], rec.size() - at);
+        piece.push(rec.data() + at, n);
+        at += n;
+    }
+    CHECK(piece.done());
+    for (std::size_t k = 0; k < s.count; ++k) {
+        CHECK(piece.detections()[k].found == whole.detections()[k].found);
+        CHECK(piece.detections()[k].lag == whole.detections()[k].lag);
+        CHECK(std::abs(piece.detections()[k].lag - 2765.0) < 24.0);  // < 0.5 ms
+    }
+}
+
 } // namespace
 
 int main() {
@@ -226,5 +431,9 @@ int main() {
     test_drift_and_missing_markers();
     test_noise_only_is_not_a_marker();
     test_percentiles();
+    test_speech_burst_shape();
+    test_speech_vc_simulated_route();
+    test_speech_rejects_noise_tone_and_click();
+    test_speech_piecewise_and_zero_delay();
     return test::finish("latency_probe");
 }

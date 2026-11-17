@@ -8,6 +8,7 @@
 // Usage: test_frontend_model [repo-root]
 #include "core/AppModel.hpp"
 #include "core/DeviceSelectorModel.hpp"
+#include "core/JsonRead.hpp"
 #include "core/OutputChain.hpp"
 #include "core/Paths.hpp"
 #include "core/Settings.hpp"
@@ -22,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -348,6 +350,13 @@ void test_tray_model() {
     in.language_pairs = {"es -> en"};
     TraySpec idle = build_tray_spec(in);
     CHECK(idle.state == TrayState::Idle && contains(idle.tooltip, "Idle"));
+    {   // BUG-020: an unresolved remembered device puts the icon in the error state.
+        TrayInputs unresolved = in;
+        unresolved.device_unresolved = true;
+        unresolved.error_text = "DeviceNotFound: the remembered playback device 'CABLE Input' is not listed";
+        const TraySpec u = build_tray_spec(unresolved);
+        CHECK(u.state == TrayState::Error && contains(u.tooltip, "CABLE Input"));
+    }
     CHECK(find_item(idle.items, "show") && find_item(idle.items, "show")->label == "Hide panel");
     CHECK(find_item(idle.items, "engine") && !find_item(idle.items, "engine")->checked);
     CHECK(find_item(idle.items, "mute") && !find_item(idle.items, "mute")->enabled);
@@ -811,6 +820,50 @@ void test_app_model_restores_policy() {
     for (const Notice& n : app.notices()) asked = asked || contains(n.text, "Choose it again");
     CHECK(asked);
 
+    // BUG-020: the placeholder selection is never opened. Every Start path
+    // (Live / Devices / tray / Mini / hotkey) refuses and names the device.
+    CHECK(app.unresolved_capture() && *app.unresolved_capture() == "USB Mic" && !app.unresolved_playback());
+    CHECK(!app.start_engine() && fb.open_calls == 0 && !app.engine_on());
+    CHECK(contains(app.engine_message(), "USB Mic") && contains(app.engine_message(), "never substitutes"));
+    app.handle_tray_action(TrayAction{TrayAction::Type::ToggleEngine, {}});
+    CHECK(fb.open_calls == 0 && !app.engine_on());
+    CHECK(app.tray_spec().state == TrayState::Error && contains(app.tray_spec().tooltip, "USB Mic"));
+    CHECK(contains(app.capture_name(), "USB Mic") && contains(app.capture_name(), "not listed"));
+    CHECK(contains(app.status_summary().detail, "USB Mic"));
+    // Apply keeps the remembered policy instead of saving the substitution.
+    CHECK(!app.apply_devices() && fb.open_calls == 0);
+    CHECK(app.settings().capture_policy == "name:USB Mic");
+    // The device comes back: a refresh restores the explicit endpoint.
+    const auto usb = fb.make_ep(EndpointDirection::Capture, 3, "USB Mic");
+    fb.capture.push_back(usb);
+    app.refresh_devices();
+    CHECK(!app.device_unresolved());
+    CHECK(std::holds_alternative<ExplicitEndpoint>(app.capture_selection()) &&
+          std::get<ExplicitEndpoint>(app.capture_selection()).key == usb.key);
+    CHECK(app.start_engine() && fb.open_calls == 1 && !fb.last_capture_was_default);
+    app.stop_engine();
+
+    // Ambiguous name (two identical cables): refused with that reason until
+    // the user picks a row; "Follow system default" chosen explicitly clears it.
+    {
+        FakeAudioBackend fa;
+        fa.capture  = {fa.make_ep(EndpointDirection::Capture, 1, "Mic", true)};
+        fa.playback = {fa.make_ep(EndpointDirection::Playback, 10, "Speakers", true),
+                       fa.make_ep(EndpointDirection::Playback, 11, "CABLE Input"),
+                       fa.make_ep(EndpointDirection::Playback, 12, "CABLE Input")};
+        Settings sa;
+        sa.playback_policy = "name:CABLE Input";
+        sa.start_engine_on_launch = true;
+        AppModel amb(fa, test_paths(), sa);
+        amb.initialise();
+        CHECK(!amb.engine_on() && fa.open_calls == 0 && amb.unresolved_playback());
+        CHECK(!amb.start_engine() && contains(amb.engine_message(), "more than one"));
+        amb.select_playback_row(0);  // "Follow system default", explicitly
+        CHECK(!amb.device_unresolved() && std::holds_alternative<FollowSystemDefault>(amb.playback_selection()));
+        CHECK(amb.start_engine() && fa.open_calls == 1 && fa.last_playback_was_default);
+        amb.stop_engine();
+    }
+
     // Resolvable policy + start on launch -> running with the named device.
     FakeAudioBackend fb2;
     const auto mic = fb2.make_ep(EndpointDirection::Capture, 1, "USB Mic");
@@ -829,6 +882,283 @@ void test_app_model_restores_policy() {
     app3.initialise();
     CHECK(!app3.backend_usable() && !app3.start_engine() && contains(app3.engine_message(), "null backend"));
     CHECK(contains(app3.status_summary().detail, "offline"));
+}
+
+std::vector<std::string> dir_names(const fs::path& root) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(root, ec))
+        if (e.is_directory(ec)) out.push_back(e.path().filename().string());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void test_studio_drafts() {
+    // BUG-021: the draft directory is the voice name; it must be validated,
+    // unique per project and never written over another project.
+    AppPaths p = test_paths();
+    p.studio_dir = g_tmp / "studio21" / "root";
+    const fs::path outside = g_tmp / "studio21";
+    FakeAudioBackend fb;
+    fb.capture  = {fb.make_ep(EndpointDirection::Capture, 1, "Mic", true)};
+    fb.playback = {fb.make_ep(EndpointDirection::Playback, 10, "Speakers", true)};
+
+    {
+        AppModel app(fb, p, Settings{});
+        app.initialise();
+        CHECK(app.studio_project().empty());
+
+        // Simulated edits a, al, ale, alex (each saved) produce one directory.
+        app.studio().draft().display_name = "Alex";
+        for (const char* name : {"a", "al", "ale", "alex"}) {
+            app.studio().draft().voice_name = name;
+            CHECK(app.studio_save_draft());
+        }
+        CHECK(dir_names(p.studio_dir) == std::vector<std::string>{"alex"});
+        CHECK(app.studio_project() == "alex");
+
+        // Unsafe names never build a path, inside or outside the root.
+        const std::vector<std::string> before = dir_names(outside);
+        for (const std::string& bad : {std::string("../x"), std::string("..\\..\\x"), (outside / "abs").string(),
+                                       std::string("con"), std::string("Alex"), std::string("")}) {
+            app.studio().draft().voice_name = bad;
+            CHECK(!app.studio_save_draft());
+            std::string err;
+            CHECK(!app.studio_write_job(err) && !err.empty());
+        }
+        CHECK(dir_names(outside) == before && dir_names(p.studio_dir) == std::vector<std::string>{"alex"});
+        CHECK(!fs::exists(outside / "x") && !fs::exists(outside / "abs"));
+        VoiceStudioModel raw;
+        raw.draft().voice_name = "../x";
+        std::string err;
+        CHECK(!raw.save_draft(p.studio_dir, err) && !err.empty());
+        CHECK(raw.project_dir(p.studio_dir) == p.studio_dir / "untitled");
+        CHECK(!is_safe_project_name("com1") && !is_safe_project_name("nul") && is_safe_project_name("com10"));
+
+        // Reopening the project by name reloads its draft.
+        app.studio().draft() = StudioDraft{};
+        app.studio().draft().voice_name = "alex";
+        CHECK(app.studio_open_project("alex") && app.studio().draft().display_name == "Alex");
+    }
+    {   // A newer "zed" project on disk; "alex" is older.
+        VoiceStudioModel z;
+        z.draft().voice_name   = "zed";
+        z.draft().display_name = "Zed";
+        std::string err;
+        CHECK(z.save_draft(p.studio_dir, err));
+        std::error_code ec;
+        fs::last_write_time(p.studio_dir / "alex" / "draft.json", fs::file_time_type::clock::now() - std::chrono::hours(1), ec);
+        CHECK(!ec);
+    }
+    {
+        AppModel app(fb, p, Settings{});
+        app.initialise();
+        // Startup restores the newer of two projects (not "exactly one").
+        CHECK(app.studio_project() == "zed" && app.studio().draft().display_name == "Zed");
+
+        // Typing an existing project's name into a fresh wizard does not touch it.
+        const std::string alex_before = slurp(p.studio_dir / "alex" / "draft.json");
+        app.studio().draft() = StudioDraft{};
+        app.studio().draft().voice_name = "alex";
+        CHECK(app.studio_name_conflict().has_value());
+        CHECK(!app.studio_save_draft());
+        std::string err;
+        CHECK(!app.studio_write_job(err) && contains(err, "already exists"));
+        CHECK(slurp(p.studio_dir / "alex" / "draft.json") == alex_before);
+        CHECK(fs::is_regular_file(p.studio_dir / "zed" / "draft.json"));
+        CHECK(!fs::exists(p.studio_dir / "alex" / "job.json"));
+
+        // "Open existing project" loads it instead.
+        CHECK(app.studio_open_project("alex") && app.studio_project() == "alex");
+        CHECK(app.studio().draft().display_name == "Alex" && !app.studio_name_conflict());
+
+        // A project with job files keeps them (and its draft) when renamed.
+        CHECK(app.studio_write_job(err) && fs::is_regular_file(p.studio_dir / "alex" / "job.json"));
+        app.studio().draft().voice_name = "alex2";
+        CHECK(app.studio_save_draft() && app.studio_project() == "alex2");
+        CHECK(fs::is_regular_file(p.studio_dir / "alex" / "draft.json"));
+        CHECK(fs::is_regular_file(p.studio_dir / "alex" / "job.json"));
+        CHECK(dir_names(p.studio_dir) == (std::vector<std::string>{"alex", "alex2", "zed"}));
+    }
+}
+
+// --------------------------------------------------------------------------
+// BUG-022: wrong-typed JSON fields must keep defaults, never throw
+// --------------------------------------------------------------------------
+void test_json_wrong_types() {
+    // Typed readers: missing or wrong-typed keys keep the default.
+    const nlohmann::json j = nlohmann::json::parse(
+        R"({"s":"x","n":1.5,"i":3,"b":true,"nil":null})", nullptr, false);
+    CHECK(read_string(j, "s", "d") == "x" && read_string(j, "missing", "d") == "d");
+    CHECK(read_string(j, "nil", "d") == "d" && read_string(j, "n", "d") == "d");
+    CHECK(near(static_cast<float>(read_number(j, "n", 0.0)), 1.5f));
+    CHECK(read_number(j, "i", 0.0) == 3.0 && read_number(j, "s", 2.0) == 2.0 && read_number(j, "nil", 2.0) == 2.0);
+    CHECK(read_int(j, "i", 0) == 3 && read_int(j, "n", 0) == 0 && read_int(j, "s", 7) == 7);
+    CHECK(read_bool(j, "b", false) && !read_bool(j, "nil", false) && read_bool(j, "i", true));
+    std::vector<std::string> rw;
+    CHECK(read_string(j, "nil", "d", &rw) == "d" && rw.size() == 1);
+    CHECK(contains(rw.front(), "wrong type"));
+
+    // status.json written by a training script that does not know a value yet.
+    VoiceStudioModel m;
+    m.draft().voice_name = "bug022";
+    const fs::path studio = g_tmp / "studio-b22";
+    fs::create_directories(studio / "bug022");
+    struct BadStatus { const char* text; const char* stage; float progress; double eta; };
+    const BadStatus bad[] = {
+        {R"({"stage":"finetune","progress":0.4,"eta_s":null})", "finetune", 0.4f, -1.0},
+        {R"({"stage":"finetune","progress":"40%","eta_s":120})", "finetune", 0.0f, 120.0},
+        {R"({"stage":null,"progress":[1],"eta_s":"soon","message":7})", "unknown", 0.0f, -1.0},
+    };
+    for (const BadStatus& b : bad) {
+        { std::ofstream f(studio / "bug022" / "status.json", std::ios::trunc); f << b.text; }
+        const auto s = m.poll_status(studio);  // must not throw (BUG-022)
+        CHECK(s.has_value());
+        if (s) {
+            CHECK(s->stage == b.stage && near(s->progress, b.progress) && s->eta_s == b.eta && s->message.empty());
+        }
+    }
+
+    // draft.json: a wrong type keeps the default instead of terminating (BUG-022).
+    std::string err;
+    CHECK(!m.load_draft_json(R"({"schema":"1"})", &err));  // schema must be the integer 1
+    CHECK(m.load_draft_json(R"({"schema":1,"step":"2","schema_extra":0})"));
+    CHECK(m.step() == StudioStep::NameConsent);
+    CHECK(m.load_draft_json(R"({"schema":1,"voice_name":7,"display_name":false,"is_own_voice":"yes",)"
+                            R"("consent":"yes","consent_note":[],"base_bundle":{},"target_bundle":null})"));
+    CHECK(m.draft().voice_name.empty() && m.draft().display_name.empty());
+    CHECK(m.draft().is_own_voice && !m.draft().consent && m.draft().consent_note.empty());
+    CHECK(m.load_draft_json(R"({"schema":1,"takes":[{"path":1,"ok":"yes","seconds":"3","verdict":9,"clipped_samples":null}]})"));
+    CHECK(m.draft().takes.size() == 1);
+    if (!m.draft().takes.empty()) {
+        const Take& t = m.draft().takes.front();
+        CHECK(t.path.empty() && t.session.empty() && !t.stats.ok && t.stats.seconds == 0.0);
+        CHECK(t.stats.clipped_samples == 0 && t.verdict == TakeVerdict::Unreadable);
+    }
+
+    // The same table for Settings and the strict loaders (they reject, not throw).
+    std::vector<std::string> sw;
+    const Settings ns = Settings::from_json(
+        R"({"schema":null,"start_minimized":1,"theme":null,"ui_scale":"2","wait_k":null,)"
+        R"("translate":"yes","gain_db":null,"voice_a":[]})", &sw);
+    CHECK(!ns.start_minimized && ns.theme == Theme::Dark && near(ns.ui_scale, 1.0f));
+    CHECK(ns.wait_k == 3 && !ns.translate && near(ns.gain_db, 0.0f) && ns.voice_a.empty());
+    CHECK(!sw.empty());
+    CHECK(!parse_voices_json(R"({"schema":null,"voices":[]})").ok());
+    CHECK(!parse_langs_json(R"({"schema":1,"langs":[{"code":"en","id":null}]})").ok());
+    CHECK(!parse_catalogue_index(R"({"schema":1,"entries":[{"id":null,"display":"A"}]})").ok());
+}
+
+// --------------------------------------------------------------------------
+// BUG-023: the newest parameter snapshot must always reach the worker
+// --------------------------------------------------------------------------
+void test_param_queue_latest_wins() {
+    FakeAudioBackend fb;
+    const auto mic = fb.make_ep(EndpointDirection::Capture, 1, "USB Mic", true);
+    const auto cin = fb.make_ep(EndpointDirection::Playback, 11, "CABLE Input", true);
+    fb.capture  = {mic};
+    fb.playback = {cin};
+
+    AppModel app(fb, test_paths(), Settings{});
+    app.initialise();
+    CHECK(!app.engine_on());
+
+    // Engine stopped: nothing drains the channel. Push far past the queue
+    // capacity (64), then make the final gain the model's state too.
+    VoiceParams snap = app.params();
+    for (int i = 1; i <= 200; ++i) {
+        snap.set(ParamId::Gain, -0.2f * static_cast<float>(i));  // 0 dB .. -40 dB
+        static_cast<void>(app.engine().push_params(snap));
+    }
+    app.set_param(ParamId::Gain, -40.0f);  // the newest snapshot wins
+    CHECK(app.apply_devices());
+
+    bool caught_up = false;
+    for (int i = 0; i < 500 && !caught_up; ++i) {
+        app.tick();
+        std::this_thread::sleep_for(2ms);
+        const TelemetrySnapshot t = app.telemetry();
+        caught_up = t.params_applied == t.params_pushed && t.params_pushed > 200;
+    }
+    CHECK(caught_up);  // the parked newest snapshot was flushed and applied
+
+    // The audio level must match the newest gain, not the stale queued one
+    // (the 64th push held about -12.8 dB; 0.25 * 10^(-40/20) is about 0.0025).
+    std::vector<float> in(1600, 0.25f), out(1600, 0.0f);
+    for (int i = 0; i < 8; ++i) {
+        fb.pump_callback(in.data(), out.data(), in.size());
+        std::this_thread::sleep_for(25ms);  // worker hops + gain ramp settle
+    }
+    float peak = 0.0f;
+    for (float v : out) peak = std::max(peak, std::fabs(v));
+    CHECK(peak < 0.02f);
+    const TelemetrySnapshot t = app.telemetry();
+    CHECK(t.params_applied == t.params_pushed);
+}
+
+// --------------------------------------------------------------------------
+// BUG-024: the queued-latency figure rebaselines after queue discards
+// --------------------------------------------------------------------------
+void test_queued_latency_rebaselined() {
+    FakeAudioBackend fb;
+    const auto mic = fb.make_ep(EndpointDirection::Capture, 1, "USB Mic", true);
+    const auto cin = fb.make_ep(EndpointDirection::Playback, 11, "CABLE Input", true);
+    fb.capture  = {mic};
+    fb.playback = {cin};
+
+    AppModel app(fb, test_paths(), Settings{});
+    app.initialise();
+    CHECK(app.apply_devices());
+
+    std::vector<float> in(1600, 0.25f), out(1600, 0.0f);
+    auto wait_hop = [&app](std::uint64_t at_least) {
+        for (int i = 0; i < 400 && app.engine().worker_hops() < at_least; ++i) std::this_thread::sleep_for(2ms);
+    };
+    fb.pump_callback(in.data(), out.data(), in.size());
+    wait_hop(1);
+    const TelemetrySnapshot t1 = app.telemetry();
+    CHECK(t1.queued_samples == 1600 && t1.queued_valid);  // one empty-output callback = 80 ms queued
+    CHECK(t1.output_underruns == 1600 && t1.input_overruns == 0 && t1.output_drops == 0);
+
+    // Stop: the queues are discarded, so the readout starts from zero again.
+    app.stop_engine();
+    const TelemetrySnapshot t2 = app.telemetry();
+    CHECK(t2.queued_samples == 0 && t2.output_underruns == 0 && t2.output_drops == 0);
+    CHECK(t2.lifetime_output_underruns == 1600);  // lifetime totals survive
+
+    // Start: still zero before the first callback of the new stream.
+    CHECK(app.start_engine());
+    CHECK(app.telemetry().queued_samples == 0);
+
+    // Reconfigure ("Apply and restart" in Devices) rebaselines the same way.
+    fb.pump_callback(in.data(), out.data(), in.size());
+    wait_hop(2);
+    CHECK(app.telemetry().queued_samples == 1600);
+    CHECK(app.apply_devices());
+    CHECK(app.telemetry().queued_samples == 0);
+
+    // Device-loss recovery: an unexpected stop discards the queues too.
+    fb.pump_callback(in.data(), out.data(), in.size());
+    CHECK(app.telemetry().queued_samples == 1600);
+    fb.fire_notification(NotificationBits::kStopped);
+    bool recovered = false;
+    for (int i = 0; i < 2000 && !recovered; ++i) {
+        app.tick();
+        std::this_thread::sleep_for(5ms);
+        recovered = app.engine().status().state == StreamState::Running;
+    }
+    CHECK(recovered);
+    const TelemetrySnapshot t4 = app.telemetry();
+    CHECK(t4.queued_samples == 0);  // fresh stream baseline, not 1600 + 1600 + 1600
+    CHECK(t4.lifetime_output_underruns == 4800);
+
+    // Text form: loopback mode has independently clocked callbacks (n/a).
+    TelemetrySnapshot ts;
+    ts.sample_rate = 16000;
+    ts.queued_samples = 160;
+    CHECK(ts.queued_ms_text() == "10 ms");
+    ts.queued_valid = false;
+    CHECK(ts.queued_ms_text() == "n/a (independent clocks)");
 }
 
 void test_paths_helpers() {
@@ -858,6 +1188,10 @@ int main(int argc, char** argv) {
     test_voice_studio();
     test_app_model();
     test_app_model_restores_policy();
+    test_studio_drafts();
+    test_json_wrong_types();
+    test_param_queue_latest_wins();
+    test_queued_latency_rebaselined();
     test_paths_helpers();
 
     fs::remove_all(g_tmp, ec);

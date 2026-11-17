@@ -8,7 +8,7 @@
 | **Name** | *Null ETA* — `json::value()` throws and nothing catches |
 | **Reported** | 2026-11-14 |
 | **Severity** | High (process termination while audio is running; a bad `draft.json` terminates on every launch) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-15 — typed readers in `core/JsonRead.hpp`, no `value()` on external input under `frontend/core`, top-level guard in `GuiApp::run`; native build/test legs pending |
 | **Component** | `frontend/core/VoiceStudio.cpp` (`poll_status`, `load_draft_json`, `take_from_json`); the same pattern should be checked in `Settings.cpp`, `VoiceCatalog.cpp`, `TranslationModel.cpp` |
 | **Blocks** | [Milestone 4 / Stage 03](../Milestone%204/03_voice_studio_translate_catalogue_panels.md), [Stage 04](../Milestone%204/04_build_gate_frontend_hardening.md) |
 

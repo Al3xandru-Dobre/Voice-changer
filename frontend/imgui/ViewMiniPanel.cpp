@@ -35,9 +35,9 @@ void draw_mini_panel(ViewContext& ctx) {
     ImGui::SameLine();
     ImGui::TextUnformatted(app.status_summary().pill.c_str());
     ImGui::SameLine();
-    char q[32];
-    std::snprintf(q, sizeof q, "%.0f ms", app.telemetry().queued_ms());
-    widgets::dim_text(q);
+
+    const std::string q = app.telemetry().queued_ms_text();
+    widgets::dim_text(q.c_str());
     ImGui::SameLine(ImGui::GetContentRegionAvail().x + ImGui::GetCursorPosX() - 70.0f * ctx.scale);
     if (ImGui::SmallButton("Expand")) ctx.shell.toggle_mini_panel();
 

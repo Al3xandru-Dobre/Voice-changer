@@ -8,7 +8,7 @@
 | **Name** | *Two-arg QoS* — the macOS branch of `WorkerPriority` does not compile |
 | **Reported** | 2026-11-14 |
 | **Severity** | High for the build gate (macOS leg red on `master`); no effect on Windows or Linux binaries |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-15 — native legs pending, see [Resolution](#resolution) |
 | **Component** | `src/util/WorkerPriority.hpp:36` (M2 Stage 08) |
 | **Blocks** | [Milestone 2 / Stage 08](../Milestone%202/08_realtime_mode_a_pipeline.md) ("Worker priority … native Windows/macOS execution pending"), [Milestone 4 / Stage 04](../Milestone%204/04_build_gate_frontend_hardening.md) |
 
@@ -101,3 +101,23 @@ the destructor restores the QoS class that was read before elevation.
 ## Workaround
 
 None on macOS. Windows and Linux are unaffected.
+
+## Resolution
+
+**2026-11-15: fix in tree, macOS leg pending.**
+
+- `src/util/WorkerPriority.hpp`: the class is read through the out-parameter,
+  `pthread_get_qos_class_np(pthread_self(), &old_qos_, &old_relative_)`. On a
+  non-zero return `old_qos_` stays `QOS_CLASS_UNSPECIFIED`, so the destructor
+  skips the restore. `<pthread/qos.h>` is included by name (rule 6).
+- `tests/test_worker_priority.cpp` (`__APPLE__` only) runs on a scratch thread
+  set to `QOS_CLASS_UTILITY`. It checks that elevation reports
+  `QoS user-interactive`, that the class is `USER_INTERACTIVE` while the guard
+  lives, and that the destructor restores the previous class and relative
+  priority. The main thread's QoS is never changed.
+
+| Leg | Evidence |
+|---|---|
+| Windows / zig 0.15.2 (Clang 20), Ninja, strict warnings + `-Werror`, `FLUXVOICE_BUILD_GUI=OFF` | Full build incl. `fluxvoice_header_checks`: pass. CTest 82/82 pass (`build-zig-bug1921`). |
+| macOS / AppleClang | **NOT RUN** (no macOS host). Only the `macos-clang` CI job can verify the `__APPLE__` branch. |
+| Windows / MSVC, Linux / GCC, Linux / Clang | NOT RUN locally. The header's branches for these platforms are unchanged. |
