@@ -3,13 +3,16 @@
 #include "imgui/Views.hpp"
 
 #include "core/AppModel.hpp"
+#include "core/Paths.hpp"
 #include "core/Settings.hpp"
 #include "imgui/Theme.hpp"
 #include "imgui/Widgets.hpp"
 
 #include <imgui.h>
 
+#include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -22,6 +25,7 @@ struct DirField {
     std::string mirror;
 };
 DirField g_models, g_presets, g_studio, g_index;
+DirField g_stats_log;  // committed on Enter / focus loss, never per keystroke (a half-typed path must not create files)
 
 void dir_row(ViewContext& ctx, const char* label, std::string& value, DirField& f, bool& changed) {
     if (value != f.mirror) {
@@ -40,9 +44,9 @@ void dir_row(ViewContext& ctx, const char* label, std::string& value, DirField& 
     if (ImGui::SmallButton("Browse...")) {
         std::string* target = &value;
         AppModel* app = &ctx.app;
-        ctx.shell.pick_folder([target, app](const std::vector<std::string>& paths) {
+        ctx.shell.pick_folder([target, app](const std::vector<std::filesystem::path>& paths) {
             if (paths.empty()) return;
-            *target = paths.front();
+            *target = path_to_utf8(paths.front());  // Settings holds UTF-8 text
             static_cast<void>(app->save_settings());
         });
     }
@@ -89,13 +93,82 @@ void draw_settings(ViewContext& ctx) {
     }
     ImGui::Spacing();
 
+    if (widgets::begin_card("model", "Model engine")) {
+        // 0 is a value, not "off": say what it means next to the control.
+        static const int kFpsValues[] = {0, 1, 2, 4};
+        const std::vector<std::string> fps_labels = {"0 - bundle default", "1 - 20 ms hop", "2 - 40 ms hop", "4 - 80 ms hop"};
+        int fps = 0;
+        for (int i = 0; i < 4; ++i)
+            if (kFpsValues[i] == s.frames_per_step) fps = i;
+        ImGui::SetNextItemWidth(260.0f * ctx.scale);
+        if (widgets::combo_strings("Frames per step", fps, fps_labels)) {
+            s.frames_per_step = kFpsValues[fps];
+            changed = true;
+        }
+        widgets::dim_text_wrapped("0 loads the bundle's default variant (its gate-selected encoder and vocoder). 1, 2 and 4 "
+                                  "pick the 20, 40 or 80 ms step variant when the bundle ships it; a larger step costs "
+                                  "latency but lowers compute per second.");
+        int target = static_cast<int>(s.latency_target_ms);
+        ImGui::SetNextItemWidth(260.0f * ctx.scale);
+        if (ImGui::InputInt("Latency target (ms)", &target, 10, 50)) {
+            if (target < 0) target = 0;
+            if (target > static_cast<int>(kMaxLatencyTargetMs)) target = static_cast<int>(kMaxLatencyTargetMs);
+            s.latency_target_ms = static_cast<std::uint32_t>(target);
+        }
+        if (ImGui::IsItemDeactivatedAfterEdit()) changed = true;
+        widgets::dim_text_wrapped("0 uses the master-budget default of the latency governor. A positive value is the audio "
+                                  "the governor keeps queued ahead of playback: lower is faster but glitches sooner. Both "
+                                  "settings apply the next time a bundle loads.");
+        ImGui::BeginDisabled(app.bundle_loading() || app.active_bundle().empty());
+        if (ImGui::Button("Apply now (reload the bundle)")) {
+            static_cast<void>(app.save_settings());
+            static_cast<void>(app.reload_bundle());
+        }
+        ImGui::EndDisabled();
+        widgets::end_card();
+    }
+    ImGui::Spacing();
+
+    if (widgets::begin_card("statslog", "Stats log")) {
+        changed |= ImGui::Checkbox("Write stats log", &s.write_stats_log);
+        if (s.stats_log_path != g_stats_log.mirror) {
+            std::snprintf(g_stats_log.buf, sizeof g_stats_log.buf, "%s", s.stats_log_path.c_str());
+            g_stats_log.mirror = s.stats_log_path;
+        }
+        widgets::dim_text("File (empty = the default below)");
+        ImGui::SetNextItemWidth(-110.0f * ctx.scale);
+        ImGui::InputText("##statslogpath", g_stats_log.buf, sizeof g_stats_log.buf);
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            s.stats_log_path   = g_stats_log.buf;
+            g_stats_log.mirror = s.stats_log_path;
+            changed            = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Browse...")) {
+            AppModel* app = &ctx.app;
+            ctx.shell.pick_folder([app](const std::vector<std::filesystem::path>& paths) {
+                if (paths.empty()) return;
+                app->settings().stats_log_path = path_to_utf8(paths.front() / "stats.log");
+                static_cast<void>(app->save_settings());
+            });
+        }
+        widgets::dim_text_wrapped(("Appends one [stats] line per second while the engine runs, in the format tools/analyze_soak.py "
+                                   "reads; t restarts at 0 for every stream. Default file: " +
+                                   path_to_utf8(app.paths().default_stats_log()) + ". A write error turns the log off with a notice.")
+                                      .c_str());
+        if (app.stats_log_active())
+            widgets::pill(("Writing " + path_to_utf8(app.stats_log_file())).c_str(), t.success);
+        widgets::end_card();
+    }
+    ImGui::Spacing();
+
     if (widgets::begin_card("dirs", "Directories")) {
         dir_row(ctx, "Models (bundles)", s.models_dir, g_models, changed);
         dir_row(ctx, "User presets", s.user_preset_dir, g_presets, changed);
         dir_row(ctx, "Voice Studio projects", s.studio_dir, g_studio, changed);
         dir_row(ctx, "Extra catalogue index.json", s.catalogue_index, g_index, changed);
-        widgets::dim_text_wrapped(("Empty fields use the defaults: models " + app.paths().models_dir.string() + "; presets " +
-                                   app.paths().user_preset_dir.string() + "; studio " + app.paths().studio_dir.string() +
+        widgets::dim_text_wrapped(("Empty fields use the defaults: models " + path_to_utf8(app.paths().models_dir) + "; presets " +
+                                   path_to_utf8(app.paths().user_preset_dir) + "; studio " + path_to_utf8(app.paths().studio_dir) +
                                    ". Directory changes take effect after a restart.").c_str());
         widgets::end_card();
     }
@@ -118,7 +191,7 @@ void draw_settings(ViewContext& ctx) {
     if (widgets::begin_card("about", "About")) {
         ImGui::TextWrapped("%s", ctx.shell.about_text().c_str());
         if (widgets::kv_table_begin("about")) {
-            widgets::kv_row("Settings file", app.paths().settings_file().string());
+            widgets::kv_row("Settings file", path_to_utf8(app.paths().settings_file()));
             widgets::kv_row("Audio backend", app.backend_status().backend.empty() ? "-" : app.backend_status().backend);
             widgets::kv_table_end();
         }

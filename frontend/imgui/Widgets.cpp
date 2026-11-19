@@ -72,23 +72,32 @@ void pill(const char* text, const ImVec4& color) {
     ImGui::Dummy(box);
 }
 
-void level_meter(const char* id, float dbfs, float width, float height) {
+void level_meter(const char* id, float peak_dbfs, float rms_dbfs, float width, float height) {
     const ThemeColors& t = theme_colors();
     const ImVec2 p = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
+    const auto to_frac = [](float dbfs) {
+        const float f = (dbfs + 60.0f) / 60.0f;
+        return f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+    };
     dl->AddRectFilled(p, ImVec2(p.x + width, p.y + height), ImGui::GetColorU32(t.meter_bg), 3.0f);
-    float frac = (dbfs + 60.0f) / 60.0f;
-    frac = frac < 0.0f ? 0.0f : (frac > 1.0f ? 1.0f : frac);
-    const float fill_w = width * frac;
-    if (fill_w > 0.0f) {
-        dl->AddRectFilled(p, ImVec2(p.x + fill_w, p.y + height),
-                          ImGui::GetColorU32(dbfs > -3.0f ? t.meter_hot : t.meter_fill), 3.0f);
+    const float rms_w = width * to_frac(rms_dbfs);
+    if (rms_w > 0.0f) {
+        dl->AddRectFilled(p, ImVec2(p.x + rms_w, p.y + height),
+                          ImGui::GetColorU32(rms_dbfs > -3.0f ? t.meter_hot : t.meter_fill), 3.0f);
     }
     // -12 dBFS tick
     const float tick_x = p.x + width * (48.0f / 60.0f);
     dl->AddLine(ImVec2(tick_x, p.y), ImVec2(tick_x, p.y + height), ImGui::GetColorU32(t.card_border));
+    // Peak marker.
+    if (peak_dbfs > -60.0f) {
+        const float peak_x = p.x + width * to_frac(peak_dbfs);
+        dl->AddLine(ImVec2(peak_x, p.y), ImVec2(peak_x, p.y + height),
+                    (peak_dbfs > -3.0f ? ImGui::GetColorU32(t.meter_hot) : ImGui::GetColorU32(ImGuiCol_Text)), 2.0f);
+    }
     ImGui::InvisibleButton(id, ImVec2(width, height));
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%.1f dBFS", static_cast<double>(dbfs));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("RMS %.1f dBFS, peak %.1f dBFS", static_cast<double>(rms_dbfs), static_cast<double>(peak_dbfs));
 }
 
 bool toggle_button(const char* on_label, const char* off_label, bool on, const ImVec2& size,

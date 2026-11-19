@@ -39,6 +39,8 @@ void print_usage(const char* argv0) {
         "                           catalogue, telemetry, settings\n"
         "  --config-dir <dir>       Settings location (default: per-OS config dir / fluxvoice)\n"
         "  --models-dir <dir>       Voice bundle root (default: Settings, else ./models, else the fixture bundle)\n"
+        "  --bundle <dir>           Load this model bundle at startup (overrides the saved active bundle) and\n"
+        "                           print \"[bundle] loaded ...\" or \"[bundle] error: ...\" to stderr\n"
         "  --preset-dir <dir>       User preset directory (default: <config>/presets)\n"
         "  --studio-dir <dir>       Voice Studio projects (default: <config>/studio)\n"
         "  --assets-root <dir>      Repository root to find presets/ and frontend/assets/\n"
@@ -58,9 +60,9 @@ bool parse_int(std::string_view s, int lo, int hi, int& out) {
 
 fs::path exe_dir(const char* argv0) {
     const char* base = SDL_GetBasePath();
-    if (base && *base) return fs::path(base);
+    if (base && *base) return path_from_utf8(base);  // SDL returns UTF-8
     std::error_code ec;
-    const fs::path p = fs::absolute(fs::path(argv0 ? argv0 : "."), ec);
+    const fs::path p = fs::absolute(path_from_utf8(argv0 ? argv0 : "."), ec);
     return ec ? fs::current_path() : p.parent_path();
 }
 
@@ -77,7 +79,7 @@ bool has_bundle(const fs::path& root) {
 
 int main(int argc, char* argv[]) {
     GuiOptions opts;
-    std::string config_dir, models_dir, preset_dir, studio_dir, assets_root, section;
+    std::string config_dir, models_dir, preset_dir, studio_dir, assets_root, section, bundle_dir;
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a = argv[i];
@@ -95,6 +97,7 @@ int main(int argc, char* argv[]) {
         else if (a == "--section")     { if (!value(section)) return 1; }
         else if (a == "--config-dir")  { if (!value(config_dir)) return 1; }
         else if (a == "--models-dir")  { if (!value(models_dir)) return 1; }
+        else if (a == "--bundle")      { if (!value(bundle_dir)) return 1; opts.report_bundle = true; }
         else if (a == "--preset-dir")  { if (!value(preset_dir)) return 1; }
         else if (a == "--studio-dir")  { if (!value(studio_dir)) return 1; }
         else if (a == "--assets-root") { if (!value(assets_root)) return 1; }
@@ -123,20 +126,21 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Paths and settings.
+    // Paths and settings. argv (SDL_main) and Settings hold UTF-8: convert with
+    // path_from_utf8, never fs::path(std::string) (ANSI code page on Windows).
     AppPaths paths;
-    paths.config_dir = config_dir.empty() ? default_config_dir() : fs::path(config_dir);
+    paths.config_dir = config_dir.empty() ? default_config_dir() : path_from_utf8(config_dir);
     std::vector<std::string> warnings;
     Settings settings = Settings::load(paths.settings_file(), &warnings);
     for (const std::string& w : warnings) std::fprintf(stderr, "%s\n", w.c_str());
 
-    const std::vector<fs::path> roots = resource_search_roots(exe_dir(argv[0]), assets_root.empty() ? fs::path() : fs::path(assets_root));
+    const std::vector<fs::path> roots = resource_search_roots(exe_dir(argv[0]), assets_root.empty() ? fs::path() : path_from_utf8(assets_root));
     paths.builtin_preset_dir = find_resource(roots, "presets");
     paths.assets_dir         = find_resource(roots, fs::path("frontend") / "assets");
     paths.repo_root          = paths.assets_dir.empty() ? fs::path() : paths.assets_dir.parent_path().parent_path();
 
-    if (!models_dir.empty())              paths.models_dir = fs::path(models_dir);
-    else if (!settings.models_dir.empty()) paths.models_dir = fs::path(settings.models_dir);
+    if (!models_dir.empty())              paths.models_dir = path_from_utf8(models_dir);
+    else if (!settings.models_dir.empty()) paths.models_dir = path_from_utf8(settings.models_dir);
     else                                   paths.models_dir = find_resource(roots, "models");
     if (!has_bundle(paths.models_dir)) {
         // Development fallback: the generated identity bundle keeps the UI usable
@@ -144,11 +148,11 @@ int main(int argc, char* argv[]) {
         const fs::path fixtures = find_resource(roots, fs::path("tests") / "data" / "fixtures");
         if (has_bundle(fixtures)) paths.models_dir = fixtures;
     }
-    paths.user_preset_dir = !preset_dir.empty() ? fs::path(preset_dir)
-                            : !settings.user_preset_dir.empty() ? fs::path(settings.user_preset_dir)
+    paths.user_preset_dir = !preset_dir.empty() ? path_from_utf8(preset_dir)
+                            : !settings.user_preset_dir.empty() ? path_from_utf8(settings.user_preset_dir)
                                                                 : paths.config_dir / "presets";
-    paths.studio_dir = !studio_dir.empty() ? fs::path(studio_dir)
-                       : !settings.studio_dir.empty() ? fs::path(settings.studio_dir)
+    paths.studio_dir = !studio_dir.empty() ? path_from_utf8(studio_dir)
+                       : !settings.studio_dir.empty() ? path_from_utf8(settings.studio_dir)
                                                       : paths.config_dir / "studio";
 
     // Engine composition: the one miniaudio context, the controller inside
@@ -156,7 +160,9 @@ int main(int argc, char* argv[]) {
     // window, which then explains the failure instead of exiting silently.
     MiniaudioBackend backend;
     AppModel app(backend, paths, settings);
+    if (!bundle_dir.empty()) app.set_startup_bundle(path_from_utf8(bundle_dir));
     app.initialise();
+    for (const std::string& w : warnings) app.notify(fluxvoice::frontend::Notice::Level::Warning, w);
     if (app.catalog().bundles().empty())
         app.notify(fluxvoice::frontend::Notice::Level::Warning,
                    "No voice bundle found. Set the models directory in Settings or add a bundle folder in the Catalogue.");

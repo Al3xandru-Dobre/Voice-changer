@@ -2,6 +2,7 @@
 direction sampling, silence tails, the on-disk data join, and a CPU smoke run on
 a synthetic corpus (loss goes down, checkpoints resume, a checkpoint streams)."""
 import json
+import pathlib
 import random
 
 import numpy as np
@@ -124,6 +125,56 @@ def test_join_reports_missing_and_mismatched_inputs(corpus, tmp_path):
         ts.CtcTokenizer(tmp_path, ["en"])
     assert ts.main(["--manifest", "nope.jsonl", "--src-latents", str(tmp_path),
                     "--tgt-units", str(tmp_path), "--spm-dir", str(tmp_path)]) == 1
+
+
+def test_join_items_guards_and_propagates_noncommercial_taint(corpus):
+    """BUG-031: NC manifest rows / NC unit metas refuse without the flag, and
+    any taint lands in the labels_meta that train_s2ut.py stores in checkpoints."""
+    from fvml import teacher
+    from fvml import units
+
+    cfg, root, data = corpus
+    args = ts.parse_args(["--smoke", str(root / "unused"), "--steps", "1"])
+    args.manifest, args.src_latents, args.tgt_units = \
+        data["manifest"], data["src_latents"], data["tgt_units"]
+
+    _, clean = ts.join_items(args, cfg, "train", log=lambda *_: None)
+    assert clean == {"vocab": cfg.vocab, "label_space": "synthetic"}
+
+    # A non-commercial corpus manifest (VoxPopuli rows) is refused without the flag.
+    nc_rows = []
+    for mf in map(pathlib.Path, data["manifest"]):
+        rows = [json.loads(line) for line in mf.read_text(encoding="utf-8").splitlines()]
+        for r in rows:
+            r["noncommercial"] = True
+            r["license"] = "CC BY-NC 4.0"
+        nc_dir = mf.with_name(mf.stem + ".nc.jsonl")
+        with open(nc_dir, "w", encoding="utf-8") as f:
+            f.writelines(json.dumps(r) + "\n" for r in rows)
+        nc_rows.append(str(nc_dir))
+    args.manifest = nc_rows
+    with pytest.raises(teacher.LicenseError, match="non-commercial corpus"):
+        ts.join_items(args, cfg, "train", log=lambda *_: None)
+    args.include_noncommercial = True
+    _, tainted = ts.join_items(args, cfg, "train", log=lambda *_: None)
+    assert tainted["noncommercial"] is True and "CC BY-NC 4.0" in tainted["license"]
+
+    # An NC units meta taints the checkpoint even on a clean corpus (mHuBERT-147).
+    args.manifest = data["manifest"]
+    mp = pathlib.Path(data["tgt_units"][0]) / units.META_FILE
+    meta = json.loads(mp.read_text(encoding="utf-8"))
+    with mp.open("w", encoding="utf-8") as f:
+        json.dump({**meta, "noncommercial": True, "license": "CC-BY-NC-SA-4.0"}, f)
+    try:
+        args.include_noncommercial = False
+        with pytest.raises(teacher.LicenseError, match="units are non-commercial"):
+            ts.join_items(args, cfg, "train", log=lambda *_: None)
+        args.include_noncommercial = True
+        _, tainted = ts.join_items(args, cfg, "train", log=lambda *_: None)
+        assert tainted["noncommercial"] is True and "CC-BY-NC-SA-4.0" in tainted["license"]
+    finally:
+        with mp.open("w", encoding="utf-8") as f:
+            json.dump(meta, f)
 
 
 def test_smoke_training_learns_checkpoints_and_resumes(tmp_path):

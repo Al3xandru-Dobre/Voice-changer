@@ -39,8 +39,10 @@ struct DeviceRows {
 DeviceRows build_rows(const DeviceSnapshot& snap, EndpointDirection direction, bool stale,
                       CaptureMode capture_mode = CaptureMode::OrdinaryMicrophone);
 
-/// Row -> policy. Out-of-range rows fall back to FollowSystemDefault.
-DeviceSelection selection_for_row(const DeviceRows& rows, std::size_t row);
+/// Row -> policy. The "Follow system default" row (row 0) is the only row that
+/// yields FollowSystemDefault; an out-of-range row is an error (nullopt), never
+/// a quiet fallback to the default device (M4 Stage 02).
+std::optional<DeviceSelection> selection_for_row(const DeviceRows& rows, std::size_t row);
 
 /// Policy -> row index in `rows`, or nullopt when an explicit key is not listed
 /// (the UI then shows "device no longer listed" instead of picking another).

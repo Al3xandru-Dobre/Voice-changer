@@ -7,6 +7,9 @@ find_vc_file() resolves the binary from $FLUXVOICE_VC_FILE, else the newest
 fv_vc_file[.exe] under any build*/ directory of the repo. convert() runs one
 file; convert_list() runs an eval list into an output directory and writes
 timing.csv (seconds per conversion, for fvml.evaluate's RTF).
+
+find_tool() is the shared resolver; fvml/s2utfile.py uses it for the Mode B
+runner fv_s2ut_file ($FLUXVOICE_S2UT_FILE).
 """
 import os
 import pathlib
@@ -19,12 +22,12 @@ import soundfile as sf
 from . import audio, paths
 
 
-def find_vc_file(repo_root=None):
-    """Path to an ORT-enabled fv_vc_file, or None.
+def find_tool(name, env_var, repo_root=None):
+    """Path to a built tool binary, or None.
 
-    $FLUXVOICE_VC_FILE wins; otherwise the newest fv_vc_file[.exe] in any
-    build*/ tree under the repo root."""
-    env = os.environ.get("FLUXVOICE_VC_FILE")
+    $<env_var> wins when it names a file; otherwise the newest <name>[.exe]
+    in any build*/ tree under the repo root."""
+    env = os.environ.get(env_var)
     if env and pathlib.Path(env).is_file():
         return pathlib.Path(env)
     root = pathlib.Path(repo_root) if repo_root else paths.REPO_ROOT
@@ -32,13 +35,21 @@ def find_vc_file(repo_root=None):
     for build in root.glob("build*"):
         if not build.is_dir():
             continue
-        for p in build.rglob("fv_vc_file*"):
+        for p in build.rglob(f"{name}*"):
             if p.is_file() and p.suffix in ("", ".exe"):
                 cands.append(p)
     if not cands:
         return None
     cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return cands[0]
+
+
+def find_vc_file(repo_root=None):
+    """Path to an ORT-enabled fv_vc_file, or None.
+
+    $FLUXVOICE_VC_FILE wins; otherwise the newest fv_vc_file[.exe] in any
+    build*/ tree under the repo root."""
+    return find_tool("fv_vc_file", "FLUXVOICE_VC_FILE", repo_root)
 
 
 def convert(vc_file, bundle, in_wav, out_wav, voice=None, args=()):

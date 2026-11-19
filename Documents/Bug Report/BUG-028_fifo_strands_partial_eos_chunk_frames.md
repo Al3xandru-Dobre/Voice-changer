@@ -8,7 +8,7 @@
 | **Name** | *Stranded tail frames* — partial `<EOS>` chunks (`1..3` frames) never reach an `s2`/`s4` vocoder and corrupt the next utterance |
 | **Reported** | 2026-11-15 |
 | **Severity** | High (truncates the final 20–60 ms of ~75% of translated utterances in Mode B `s4` and prepends stale frames onto subsequent utterances) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in the C++ runtime and the Python FIFO twin |
 | **Component** | `python_training/gate_s2ut.py:519-537`, `src/pipeline/UnitProsodyFifo.hpp:65-120`, `python_training/fvml/waitk_policy.py:350-388` |
 | **Blocks** | [Milestone 3 / Stage 04](../Milestone%203/04_waitk_policy_streaming_state_machine.md), [Stage 05](../Milestone%203/05_causal_s2ut_translator_policy_gate.md) gate WAVs, [Stage 07](../Milestone%203/07_cpp_translator_runtime_offline_runner.md), [Stage 08](../Milestone%203/08_realtime_mode_b_pipeline.md) |
 
@@ -94,3 +94,10 @@ Frames `[5, 6]` (`40 ms`) are recorded in `trace.jsonl` as emitted, never synthe
 ## Workaround
 
 Running the vocoder at `s1` (`frames_per_step = 1`) drains 1 frame per hop without stranding frames, at higher per-frame ORT dispatch overhead (`gate_s2ut.py` currently hardcodes `vocoder_s4.onnx`).
+
+## Resolution (2026-11-18)
+
+- **C++ runtime (M3 Stage 08):** `UnitProsodyFifo::pad_to_multiple(n_frames)` runs after **every** push in `InferencePipeline`, so the FIFO stays hop-aligned. Pad frames repeat the last unit with voicing 0 and are flagged `Frame::pad`; their vocoder samples are rendered as silence, so a partial `<EOS>` chunk (1-3 frames) is vocoded in its own utterance and nothing leaks into the next one. A FIFO write that does not fit is deferred (back-pressure), never dropped, and an overflow counter records a failed pad.
+- **Python twin:** `python_training/fvml/waitk_policy.py` gained `pad_to_multiple` and `pop_hop_with_pads`; `s2ut_golden.py` uses them.
+- **Tests:** `tests/test_waitk_policy.cpp` (FIFO pad cases, shared golden trajectories), `tests/test_inference_pipeline.cpp` `test_s2ut_bug028_partial_eos` (two utterances, partial `<EOS>` chunks, no cross-utterance bleed), `python_training/tests/test_waitk_policy.py`, `test_s2ut_golden.py`.
+- **Still open:** `python_training/gate_s2ut.py::convert_utterance` (the Stage 05 runner) does not pad yet and pushes zero prosody rows, so the gate still strands tail frames; fix it with the same `pad_to_multiple` / `pop_hop_with_pads` calls.

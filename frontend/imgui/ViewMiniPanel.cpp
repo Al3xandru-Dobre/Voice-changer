@@ -3,6 +3,7 @@
 #include "imgui/Views.hpp"
 
 #include "core/AppModel.hpp"
+#include "core/Telemetry.hpp"
 #include "core/TrayModel.hpp"
 #include "imgui/Theme.hpp"
 #include "imgui/Widgets.hpp"
@@ -42,7 +43,7 @@ void draw_mini_panel(ViewContext& ctx) {
     if (ImGui::SmallButton("Expand")) ctx.shell.toggle_mini_panel();
 
     const ImVec2 size(96.0f * ctx.scale, 30.0f * ctx.scale);
-    ImGui::BeginDisabled(!app.backend_usable());
+    ImGui::BeginDisabled(!app.backend_usable() || app.bundle_loading());
     if (widgets::toggle_button("Stop", "Start", app.engine_on(), size, t.success)) app.toggle_engine();
     ImGui::EndDisabled();
     ImGui::SameLine();
@@ -50,7 +51,8 @@ void draw_mini_panel(ViewContext& ctx) {
     if (widgets::toggle_button("Muted", "Mute", app.muted(), size, t.warning)) app.toggle_mute();
     ImGui::EndDisabled();
     ImGui::SameLine();
-    widgets::level_meter("mini-in", app.telemetry().input_peak_dbfs, ImGui::GetContentRegionAvail().x, size.y * 0.5f);
+    const TelemetrySnapshot mini_tel = app.telemetry();
+    widgets::level_meter("mini-in", mini_tel.input_peak_dbfs, mini_tel.input_rms_dbfs, ImGui::GetContentRegionAvail().x, size.y * 0.5f);
 
     const std::vector<std::string> voices = app.voice_names();
     int vi = index_of(voices, app.voice_a());

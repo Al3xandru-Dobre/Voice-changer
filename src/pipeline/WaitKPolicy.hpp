@@ -143,7 +143,7 @@ public:
         if (phase_ == Phase::kFlushing) {
             ++flush_steps_;
             if (is_eos || t_tgt_ >= flush_target_ || flush_steps_ >= cfg_.max_flush_steps) {
-                complete();
+                complete(is_eos);
             }
             return;
         }
@@ -191,8 +191,11 @@ public:
     bool flush_pending() const { return flushing(); }
 
     /// Counts completed tail flushes; a change means the utterance was drained
-    /// and the caller must zero its translator state.
+    /// and the caller must zero its translator state. `flushes_without_eos()`
+    /// counts drains that ended on the flush bound / step cap instead of a
+    /// predicted <EOS> — a babbling decoder signal (BUG-030).
     std::uint64_t flushes_completed() const { return flushes_completed_; }
+    std::uint64_t flushes_without_eos() const { return flushes_without_eos_; }
     std::uint64_t flush_resumes() const { return flush_resumes_; }
     int flush_steps() const { return flush_steps_; }
     std::uint32_t silence_ms() const { return silence_ms_; }
@@ -214,6 +217,15 @@ public:
 
     int k() const { return k_; }
     void set_k(int k) { k_ = std::clamp(k, kMinK, kMaxK); }
+
+    /// Live Strict <-> CTC-adaptive switch (Stage 09 `adaptive_policy`): takes
+    /// effect on the next decide(); the banked readiness restarts from 0 so a
+    /// stale bank never releases a write in the new mode. t_src / t_tgt and the
+    /// phase are kept (no translator reset).
+    void set_adaptive_mode(bool on) {
+        cfg_.adaptive_mode = on;
+        readiness_ = 0.0f;
+    }
 
     const Config& config() const { return cfg_; }
     std::uint32_t chunk_ms() const {
@@ -248,22 +260,23 @@ private:
 
     void begin_flush() {
         if (eos_seen_ || t_src_ == 0) {
-            complete();
+            complete(eos_seen_);
             return;
         }
         flush_target_ = static_cast<std::int64_t>(
             std::ceil(static_cast<double>(cfg_.max_flush_ratio) * static_cast<double>(t_src_)));
         if (t_tgt_ >= flush_target_) {
-            complete();
+            complete(false);
             return;
         }
         phase_ = Phase::kFlushing;
         flush_steps_ = 0;
     }
 
-    void complete() {
+    void complete(bool by_eos) {
         reset();
         ++flushes_completed_;
+        if (!by_eos) ++flushes_without_eos_;
     }
 
     Config cfg_;
@@ -280,5 +293,6 @@ private:
     bool eos_seen_ = false;
     bool vad_seen_ = false;
     std::uint64_t flushes_completed_ = 0;
+    std::uint64_t flushes_without_eos_ = 0;
     std::uint64_t flush_resumes_ = 0;
 };

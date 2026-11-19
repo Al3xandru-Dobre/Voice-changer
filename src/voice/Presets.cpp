@@ -1,6 +1,7 @@
 // Presets — JSON preset loader/saver and the descriptor-table dump.
 #include "voice/Presets.hpp"
 
+#include "pipeline/LangCatalog.hpp"
 #include "voice/VoiceParams.hpp"
 
 #include <nlohmann/json.hpp>
@@ -414,9 +415,18 @@ const char* to_string(Smoothing s) {
     return "?";
 }
 
-std::string descriptor_table_json() {
+std::string descriptor_table_json(const LangCatalog* langs) {
     json doc;
     doc["schema"] = 1;
+    if (langs) {
+        json table = json::array();
+        for (const LangEntry& l : langs->langs)
+            table.push_back({{"code", l.code}, {"id", l.id}, {"name", l.name}});
+        json pairs = json::object();
+        for (const LangPairDefault& d : langs->default_wait_k) pairs[d.src + "->" + d.tgt] = d.wait_k;
+        doc["langs"] = std::move(table);
+        doc["default_wait_k"] = std::move(pairs);
+    }
     json arr = json::array();
     for (const ParamDesc& d : kParams) {
         json e;

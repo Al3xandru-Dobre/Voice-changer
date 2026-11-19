@@ -177,7 +177,13 @@ def build_silence_hallucination_rows(data_root, write_padded_audio=True):
     """Build the 20-clip `silence_hallucination_20.tsv` list:
       * 10 room-tone / noise-only clips (3-10 s) from `musan.jsonl` (`subset == "noise"`)
       * 10 speech utterances (3-8 s) from `librispeech-test-clean.jsonl` padded
-        with 5.0 s of trailing digital silence in `16k/s2ut_eval/`."""
+        with 5.0 s of trailing digital silence in `16k/s2ut_eval/`.
+
+    The `sil_tail_*` rows keep the English `src_text` but carry an empty
+    `tgt_text` (BUG-030): the LibriSpeech clips were never translated, so there
+    is no es/fr/de reference — scoring them as BLEU compared Whisper transcripts
+    of the wrong language. eval_s2ut audits these rows on their post-allowance
+    tail (`tail_hallucinated_words`) instead."""
     data_root = pathlib.Path(data_root)
     musan_mf = data_root / "manifests" / "musan.jsonl"
     ls_mf = data_root / "manifests" / "librispeech-test-clean.jsonl"
@@ -243,7 +249,7 @@ def build_silence_hallucination_rows(data_root, write_padded_audio=True):
             "speech_end_s": speech_dur,
             "src_path": rel_dst,
             "src_text": norm_txt,
-            "tgt_text": norm_txt,
+            "tgt_text": "",
         })
     return out_rows
 

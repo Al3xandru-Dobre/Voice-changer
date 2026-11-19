@@ -1,7 +1,8 @@
 # FluxVoice-S2UT — Project Memory (`MEMORY.md`)
 
-> Condensed, high-signal engineering memory for agents and developers.
-> Full post-mortems & rationale: [`Documents/BEST_PRACTICES.md`](Documents/BEST_PRACTICES.md) · Bug index: [`Documents/Bug Report/00_index.md`](Documents/Bug%20Report/00_index.md) · Specialist agents: [`AGENTS.md`](AGENTS.md)
+> Condensed, high-signal engineering memory for agents and developers — the cross-domain layer. Read the section you need; per-domain rules load from [`.claude/rules/`](.claude/rules/).
+> Full post-mortems & rationale: [`Documents/BEST_PRACTICES.md`](Documents/BEST_PRACTICES.md) · Bug index: [`Documents/Bug Report/00_index.md`](Documents/Bug%20Report/00_index.md) · Always-on rules & specialist roster: [`AGENTS.md`](AGENTS.md)
+> Section and rule numbers are cited from code and stage files (`MEMORY.md §2`, `MEMORY.md rule 11`): append, never renumber.
 
 ---
 
@@ -13,10 +14,18 @@
   - **Encoder (M2/M3):** Mimi's 12.5 Hz (80 ms) `q0` codebook uses >75% of the Mode A latency budget and loses content on its own (WER > 100%). M2 defaults to a **50 Hz (20 ms frame) StreamVC-style causal student** (`L in {0, 1, 2}` distilled from HuBERT km100; upgraded in M3 to emit both discrete `units` for Mode A and continuous `latents` f32 for Mode B).
   - **Pitch tracker (M2):** SwiftF0 (176 ms lookahead), RMVPE, and FCPE are **non-causal**. M2 uses a **causal YIN** tracker on past samples + EMA whitening.
   - **Simultaneous S2UT (M3):** Bidirectional `En<->{Es,Fr,De}` Conformer-Transformer trained with multi-task ASR/S2TT CTC supervision (dropped at export; `De->En` collapses without CTC). Split into `translator_enc.onnx` + `translator_dec.onnx` stepping on 80 ms chunks ($C = 4 \times 20\text{ ms}$ frames) with 128-chunk ring-KV caches. `kRead` skips decoder + vocoder; `translator_dec` predicts target prosody and overrides the output noise gate during `kFlush` so translated tails are never muted when the user stops speaking.
-  - **Wait-*k* policy twins (M3 Stage 04):** `src/pipeline/WaitKPolicy.hpp` + `UnitProsodyFifo.hpp` and `python_training/fvml/waitk_policy.py` are bit-exact twins (idle → active → flushing; float32 readiness arithmetic) pinned by `tests/data/waitk/golden_trajectories.txt` — change a rule in both files, then rerun `python_training/make_waitk_golden.py`. Per 80 ms chunk the caller runs `on_chunk_energy()` → (`source_wanted()` ? `translator_enc` + `notify_source_unit()` + `on_source_readiness()`) → `decide()` → `max_writes_this_step()` × `notify_target_unit(is_eos)`; a change in `flushes_completed()` means "utterance drained, zero the translator KV state". The encoder is skipped while idle (leading silence) and during `kFlush`.
+  - **Wait-*k* policy twins (M3 Stage 04):** `src/pipeline/WaitKPolicy.hpp` + `UnitProsodyFifo.hpp` and `python_training/fvml/waitk_policy.py` are bit-exact twins (idle → active → flushing; float32 readiness arithmetic) pinned by `tests/data/waitk/golden_trajectories.txt` — change a rule in both files, then rerun `python_training/make_waitk_golden.py`. Per 80 ms chunk the caller runs `on_chunk_energy()` → (`source_wanted()` ? `translator_enc` + `notify_source_unit()` + `on_source_readiness()`) → `decide()` → `max_writes_this_step()` × `notify_target_unit(is_eos)`; a change in `flushes_completed()` means "utterance drained, zero the translator KV state". The encoder is skipped while idle (leading silence) and during `kFlush`. In an adaptive double-write step every extra write **re-checks `decide()`** (nothing is decoded past an `<EOS>` heard in a pause).
+  - **Mode B runtime (M3 Stages 07-09, `InferencePipeline` `PipelineMode::kS2UT`; as-implemented notes in the stage files):**
+    - **Banks:** `translator_dec` has a 2 x 2 (`enc_bank x dec_parity`) prebuilt `IoBinding` table over `translator_enc`'s two banks (`OrtModel::bind_shared_inputs`, zero copy); a producer reload (generation counter) makes the consumer refuse to step. Mode B needs a stateful vocoder (`overlap_samples 0`) and conditioning frames == content frames.
+    - **Chunk step (80 ms):** VAD = any 20 ms frame RMS > -55 dBFS on raw input; `<EOS>` = `<EOS>` unit or `eos_prob > 0.5`; readiness enters as `sigmoid(logit)` via `readiness_from_logit()` — **twin gap (BUG-029):** `fvml/s2ut_stream.py` already maps `2 x sigmoid` (`expected_chunks_from_logit`) while the C++ runner and its twin `s2ut_golden.py` still use the plain sigmoid; move both together when the C++ side changes; `prosody_ctx` = mean (z_f0, z_energy) over voiced frames of the utterance (reset at utterance end and on switches); gate opens on every translated frame.
+    - **FIFO:** `UnitProsodyFifo::pad_to_multiple` after every push keeps it hop-aligned (BUG-028); pad samples render silence; a full FIFO defers a write, never drops it.
+    - **Governor:** burst cushion 3 chunks while translating; soft drops held while frames are queued/decoding; edge hops (final-frame hop, its ramp-down successor, a Stage 09 switch hop) are protected.
+    - **Stage 09:** `translate`/`src`/`tgt` change = translator-only reset + 20 ms raised-cosine crossfade from the last sample (encoder, vocoder, tracker keep state); `wait_k` and `adaptive_policy` change in place; `lang` resets `wait_k` to the pair default; `set_params()` refuses `translate=1` without translators and, while translating, unknown/equal languages — the control thread must pre-validate (the worker publishes the accepted generation and a rejected count; a UI shows acceptance, not delivery); `mode()` is a relaxed atomic.
+    - **Offline/golden:** `fv_s2ut_file` pads zero hops until idle (bounded by `tail_flush_ms + (max_flush_steps + k + 2) x chunk_ms`); `python_training/s2ut_golden.py` is the bit-exact Python ORT twin on the fixture quartet (real-bundle `golden_s2ut/` check pending Stage 06). `[stats]` adds `s2ut_r/w/f`, `lag_ms` (can be negative in a flush), `s2ut_utt`, `s2ut_cap` (BUG-030 visibility).
   - **Overlap-Add (OLA):** Default **OFF** for stateful causal HiFi-GAN (left-padded convs + right-trimmed transposed convs already emit continuous phase without lookahead). Kept for stateless fallback models.
   - **Worker priority:** Elevated (`MMCSS "Pro Audio"` on Windows, `SCHED_FIFO`/nice on Linux, `QOS_CLASS_USER_INTERACTIVE` on macOS) with ORT `intra_op_num_threads = 1` — not "Normal" priority.
   - **Desktop frontend (M4, `frontend/`, [`frontend/README.md`](frontend/README.md)):** SDL3 3.4.18 + Dear ImGui v1.92.9, pinned and fetched by CMake (`FLUXVOICE_BUILD_GUI`). `frontend/core` is toolkit-free and tested headless over `tests/FakeAudioBackend.hpp`; the UI thread is the control thread; the tray (`platform/SdlTray`) and the Mini panel drive the same `AppModel` commands; `src/voice/VoiceParams.hpp` (`kParams`) is the single source for every slider, preset key and console name. Linux builds need the X11 extension `-dev` headers (CI installs them); the tray needs `libayatana-appindicator3-1` at runtime and degrades to "close = quit" without it.
+  - **One live host (M4 Stage 05):** `src/pipeline/ModeAHost` is the only composition of the neural pipeline — `fluxvoice --vc/--s2ut` and `fluxvoice_gui` (`EngineHost` Mode A) both use it. It owns models → pipeline → `ParamChannel` → `ModeAWorker` (destroyed in reverse), installs the controller's prepare and worker hooks on `attach()`, and loads through a `HostModelLoader` seam (ORT bundles in the binaries, fakes in tests). Never add a second worker loop, parameter queue or output chain; the GUI's Bypass (no bundle) runs `VoiceOutputChain` on 20 ms blocks. `[stats]` lines and the end-to-end latency estimate come from `src/pipeline/HostStats.hpp` (`format_stats_line`, `estimate_latency` = model delay + queued + device periods, BUG-026) for the CLI and the GUI alike; per-stage timing is `InferencePipeline::stage_timings()` (enc, trans_enc, trans_dec, voc, feat, chain).
 
 ---
 
@@ -46,7 +55,9 @@
 
 ---
 
-## 4. Top 13 "Never / Always" Engineering Rules
+## 4. "Never / Always" Engineering Rules
+
+Cross-domain list; rule numbers are stable identifiers (cited as `MEMORY.md rule N`). The operational detail for each domain is in `.claude/rules/<handle>.md`.
 
 1. **NEVER** allocate, lock a mutex, log (`std::cout`/`stderr`), or block inside `AudioEngine::data_callback` or `DuplexRouter::process()`.
 2. **NEVER** assume callback `frame_count` equals `periodSizeInMilliseconds`; always assemble model hops by sample count via `ChunkAssembler`.
@@ -67,6 +78,18 @@
 
 ## 5. Canonical Commands
 
+Linux (presets in `CMakePresets.json`; one fixed tree per toolchain, `build-<preset>/`):
+
+```bash
+cmake --workflow --preset linux-gcc        # configure + build all + ctest (CI-equivalent); also linux-clang
+cmake --workflow --preset linux-gcc-ort    # same with ONNX Runtime; also linux-clang-ort
+cmake --build --preset linux-gcc --target test_duplex_router && ctest --preset linux-gcc -R duplex_router   # inner loop
+ctest --preset linux-gcc-training          # python_training_* pytest suites only (slow; need python_training/.venv)
+./build-linux-gcc-ort/fluxvoice --list-params --json
+```
+
+Windows (PowerShell; binaries under `build\Release\`). The tool invocations below are the same on Linux with `./build-<preset>/<tool>`:
+
 ```powershell
 # Configure, build & run hardware-free unit/CLI/self-tests
 cmake -S . -B build -DFLUXVOICE_STRICT_WARNINGS=ON -DFLUXVOICE_BUILD_TESTS=ON -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
@@ -85,6 +108,13 @@ python tools\vm_route.py --self-test
 .\build\Release\fluxvoice.exe --list-params --json        # descriptor table (schema 1) — the M4 slider spec
 .\build\Release\fluxvoice.exe --vc --model-dir <bundle> --preset deep --param gain=-3 --console
 .\build\Release\fv_vc_file.exe --model-dir <bundle> --preset robot --param pitch_shift=-3 --change 0.5:gain=-6 in.wav out.wav
+
+# Mode B (M3 Stages 07-09): live S2UT, language list, offline file runner, soak, golden twin
+.\build\Release\fluxvoice.exe --s2ut --model-dir <bundle> --src-lang es --tgt-lang en [--wait-k 3] --stats 10
+.\build\Release\fluxvoice.exe --list-langs --model-dir <bundle>
+.\build\Release\fv_s2ut_file.exe --model-dir <bundle> --src-lang es --tgt-lang de --raw --no-prosody-ctx --dump-trace t.jsonl in.wav out.wav
+python tools\analyze_soak.py --s2ut --latency-target-ms <ms> --hop-ms <ms> log.txt
+python python_training\s2ut_golden.py make    # then: check
 
 # Inspect devices, run loopback & measure route latency (prefer name selection in scripts)
 .\build\Release\fluxvoice.exe --list-devices

@@ -124,19 +124,10 @@ def log(msg):
 
 
 # -- models ------------------------------------------------------------------------
-NC_NOTE = " [trained on non-commercial units: research only, not for distribution]"
-
-
-def noncommercial_license(meta, license, include_noncommercial):
-    """Licence text for a model whose training units are non-commercial
-    (mHuBERT-147): refused without --include-noncommercial, tagged with it."""
-    if not (isinstance(meta, dict) and meta.get("noncommercial")):
-        return license
-    if not include_noncommercial:
-        raise fx.ExportError(
-            f"the checkpoint was trained on non-commercial units ({meta.get('license')}): it "
-            "must not ship in a default bundle; pass --include-noncommercial for a research export")
-    return (license or str(meta.get("license") or "non-commercial")) + NC_NOTE
+# NC_NOTE / noncommercial_license live in fvml.export (BUG-031: shared with
+# s2ut_stream.export_step_graphs); re-exported here for existing callers.
+NC_NOTE = fx.NC_NOTE
+noncommercial_license = fx.noncommercial_license
 
 
 def load_encoder(path, head, license, contract_version=fc.CONTRACT_VERSION,

@@ -27,7 +27,8 @@ namespace fluxvoice::frontend {
 struct GuiOptions {
     bool        start_minimized = false;  // overrides Settings when true
     bool        start_mini      = false;  // open directly as the Mini panel
-    int         smoke_frames    = 0;      // > 0: render this many frames, then exit
+    bool        report_bundle   = false;  // --bundle: print "[bundle] loaded ..." / "[bundle] error: ..." to stderr
+    int         smoke_frames    = 0;      // > 0: render this many frames, then exit (after the --bundle result, <= 10 s)
     std::string screenshot_path;          // with smoke_frames: dump the last frame (binary PPM)
 };
 
@@ -39,7 +40,8 @@ public:
     GuiApp(const GuiApp&)            = delete;
     GuiApp& operator=(const GuiApp&) = delete;
 
-    /// 0 on a clean exit, 1 when SDL/OpenGL initialisation failed.
+    /// 0 on a clean exit, 1 when SDL/OpenGL initialisation failed, 2 when the
+    /// frame loop gave up after repeated unexpected exceptions (BUG-022).
     int run();
 
     // ---- ShellServices ----
@@ -68,7 +70,7 @@ private:
     };
     struct DialogResult {
         FilesCallback            cb;
-        std::vector<std::string> paths;
+        std::vector<std::filesystem::path> paths;
     };
 
     static void SDLCALL dialog_callback(void* userdata, const char* const* filelist, int filter);
@@ -78,6 +80,7 @@ private:
     void shutdown();
     void load_fonts();
     void handle_event(const SDL_Event& e);
+    void report_bundle_result();
     void process_intents();
     void process_dialog_results();
     void update_tray(Clock::time_point now);
@@ -110,6 +113,8 @@ private:
     int   main_x_ = 0, main_y_ = 0, main_w_ = 0, main_h_ = 0;  // restored when leaving the Mini panel
     float scale_ = 1.0f;
     int   frames_ = 0;
+    bool  bundle_reported_ = false;  // the --bundle result line was printed
+    bool  frame_open_ = false;  // between ImGui::NewFrame and ImGui::Render
     Clock::time_point last_tray_update_{};
 
     std::vector<std::unique_ptr<PendingDialog>> pending_dialogs_;

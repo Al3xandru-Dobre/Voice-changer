@@ -8,6 +8,7 @@
 // langs.json), and verifies hand-computed latency formulas. No ONNX Runtime.
 //
 // Usage: test_model_contract [tests/data]
+#include "pipeline/LangCatalog.hpp"
 #include "pipeline/ModelContract.hpp"
 #include "TestSupport.hpp"
 
@@ -380,6 +381,95 @@ void test_contracts_built_in_code() {
     CHECK(!validate_contract(enc, error) && error == "key 'latent_dim' requires contract_version 2");
 }
 
+// Translator_enc contract whose `langs` is the given JSON object text.
+ModelContract translator_with_langs(const std::string& langs_json) {
+    ModelContract c;
+    std::string error;
+    const std::string text =
+        R"({"chunk_frames":4,"contract_version":2,"frame_samples":320,"has_readiness_output":true,"langs":)" +
+        langs_json +
+        R"(,"latent_dim":8,"license":"CC0-1.0","max_src_steps":4,"role":"translator_enc","sample_rate":16000,"shared_mem_states":["mem_k_0","mem_v_0"],"states":["src_pos","mem_k_0","mem_v_0"]})";
+    CHECK(parse_contract(text, c, error));
+    CHECK(validate_contract(c, error));
+    return c;
+}
+
+// LangCatalog (Milestone 3 / Stage 07-08): langs.json -> plain values.
+void test_lang_catalog() {
+    const fs::path file = g_data_dir / "fixtures" / "s2ut" / "langs.json";
+    std::string error;
+    LangCatalog cat;
+    const ModelContract matching = translator_with_langs(R"({"de":3,"en":0,"es":1,"fr":2})");
+    CHECK(read_lang_catalog(file, &matching, cat, error));
+    CHECK(error.empty());
+
+    // File order, not alphabetical: en, es, fr, de.
+    CHECK(cat.langs.size() == 4);
+    if (cat.langs.size() == 4) {
+        CHECK(cat.langs[0].code == "en" && cat.langs[0].id == 0 && cat.langs[0].name == "English");
+        CHECK(cat.langs[1].code == "es" && cat.langs[1].id == 1);
+        CHECK(cat.langs[2].code == "fr" && cat.langs[2].id == 2);
+        CHECK(cat.langs[3].code == "de" && cat.langs[3].id == 3);
+    }
+
+    // find(): by code, by decimal id, unknown, empty.
+    const LangEntry* es = cat.find("es");
+    CHECK(es && es->id == 1);
+    const LangEntry* three = cat.find("3");
+    CHECK(three && three->code == "de");
+    CHECK(cat.find("0") && cat.find("0")->code == "en");
+    CHECK(cat.find("xx") == nullptr);
+    CHECK(cat.find("") == nullptr);
+    CHECK(cat.find("9") == nullptr);                    // numeric but no such id
+    CHECK(cat.find("1x") == nullptr);                   // not purely decimal
+    CHECK(cat.find("123456") == nullptr);               // too long to be an id
+
+    // default_k(): per pair, direction matters, fallback otherwise.
+    CHECK(cat.default_wait_k.size() == 6);
+    CHECK(cat.default_k("es", "en") == 3);
+    CHECK(cat.default_k("fr", "en") == 3);
+    CHECK(cat.default_k("de", "en") == 4);
+    CHECK(cat.default_k("en", "de") == 4);
+    CHECK(cat.default_k("en", "en") == 3);              // absent pair -> fallback (3)
+    CHECK(cat.default_k("en", "en", 7) == 7);
+    CHECK(cat.default_k("es", "de", 9) == 9);
+    CHECK(cat.default_k("de", "en", 9) == 4);           // a present pair ignores the fallback
+
+    // The same document parses without a translator to check against.
+    LangCatalog no_check;
+    CHECK(read_lang_catalog(file, nullptr, no_check, error) && no_check.langs.size() == 4);
+
+    // A translator contract with different langs: rejected, out unchanged.
+    const ModelContract other = translator_with_langs(R"({"en":0,"es":1})");
+    LangCatalog kept;
+    kept.langs.push_back({"zz", 42, "Sentinel"});
+    CHECK(!read_lang_catalog(file, &other, kept, error));
+    CHECK(error == "langs.json does not match translator contract langs");
+    CHECK(kept.langs.size() == 1 && kept.langs[0].code == "zz" && kept.langs[0].id == 42);
+    CHECK(kept.default_wait_k.empty());
+
+    // Malformed JSON: false, error set, out unchanged.
+    error.clear();
+    CHECK(!parse_lang_catalog("{\"schema\": 1, \"langs\": [", nullptr, kept, error));
+    CHECK(!error.empty());
+    CHECK(kept.langs.size() == 1 && kept.langs[0].code == "zz");
+    CHECK(!parse_lang_catalog("not json", &matching, kept, error));
+    CHECK(kept.langs.size() == 1 && kept.langs[0].name == "Sentinel");
+
+    // A missing file reports the path and leaves out unchanged.
+    CHECK(!read_lang_catalog(g_data_dir / "fixtures" / "s2ut" / "no_such_langs.json", nullptr,
+                             kept, error));
+    CHECK(error.find("cannot read") != std::string::npos);
+    CHECK(kept.langs.size() == 1 && kept.langs[0].code == "zz");
+
+    // Without default_wait_k the table is empty and every pair falls back.
+    LangCatalog bare;
+    CHECK(parse_lang_catalog(
+        R"({"schema":1,"langs":[{"code":"en","id":0,"name":"English"},{"code":"es","id":1,"name":"Spanish"}]})",
+        nullptr, bare, error));
+    CHECK(bare.default_wait_k.empty() && bare.default_k("es", "en") == kDefaultWaitK);
+}
+
 void test_missing_metadata() {
     ModelContract c;
     std::string error;
@@ -398,6 +488,7 @@ int main(int argc, char** argv) {
     test_s2ut_onset_with_lookahead_and_overlap();
     test_geometry_accessors();
     test_contracts_built_in_code();
+    test_lang_catalog();
     test_missing_metadata();
     return test::finish("model_contract");
 }

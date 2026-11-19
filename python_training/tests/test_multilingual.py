@@ -332,6 +332,14 @@ def test_audio_rows_and_subsets():
     tuv.validate_speaker_name(tgt["speaker"])
     with pytest.raises(ValueError, match="--side"):
         units.audio_rows([pair])
+    # BUG-031: a non-commercial corpus flag survives the paired -> monolingual
+    # conversion, and rows-level guards see it without the opt-in flag.
+    nc_src, = units.audio_rows([{**pair, "noncommercial": True, "license": "CC BY-NC 4.0"}], "src")
+    assert nc_src["noncommercial"] is True and nc_src["license"] == "CC BY-NC 4.0"
+    assert units.check_rows_license([mono]) is None
+    assert units.check_rows_license([nc_src], include_noncommercial=True) == "CC BY-NC 4.0"
+    with pytest.raises(teacher.LicenseError, match="non-commercial corpus"):
+        units.check_rows_license([nc_src])
     rows = [mono, {**mono, "utt_id": "b", "subset": "test"}]
     assert [r["utt_id"] for r in units.filter_subsets(rows, "test")] == ["b"]
     assert len(units.filter_subsets(rows, None)) == 2 and len(units.filter_subsets(rows, "x")) == 0

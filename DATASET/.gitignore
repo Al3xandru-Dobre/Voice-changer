@@ -1,0 +1,27 @@
+# DATASET/ is a tracked catalog (docs + TSV only). Audio and archives must
+# never land here — bulk data lives in $FLUXVOICE_DATA (default /data/, ignored).
+*.wav
+*.flac
+*.mp3
+*.ogg
+*.opus
+*.m4a
+*.aac
+*.wma
+*.aif*
+*.tar
+*.tar.*
+*.tgz
+*.zip
+*.bz2
+*.7z
+*.rar
+*.ckpt
+*.pt
+*.onnx
+*.onnx.data
+raw/
+16k/
+archives/
+nc/
+private/*/

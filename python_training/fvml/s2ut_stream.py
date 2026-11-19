@@ -24,7 +24,9 @@ Writes. One policy write is one 80 ms target chunk:
                (chunk_frames more frames per write; any surplus carries over).
 Unit frames from the first special unit (<BOS>/<EOS>/<PAD>) onwards are dropped,
 like UnitProsodyFifo::push_chunk. <EOS> is the unit itself or eos_prob >
-eos_threshold.
+eos_threshold. Of max_writes_this_step() writes, each after the first runs only
+while decide() still wants one: an <EOS> during a pause marks the utterance
+caught up (READ), so an adaptive double write stops there (as the C++ worker).
 """
 from dataclasses import dataclass, field
 import math
@@ -167,19 +169,24 @@ class OrtRuntime:
 
 
 # -- export ---------------------------------------------------------------------
-def export_step_graphs(model, out_dir, exporter="auto", license=tr.LICENSE):
+def export_step_graphs(model, out_dir, exporter="auto", license=tr.LICENSE, labels_meta=None,
+                       include_noncommercial=False):
     """Write translator_enc.onnx and translator_dec.onnx (fixed-shape, batch 1,
     stateful) into `out_dir` and return a record: the two paths, the exporter
     each graph went through and any dynamo fallback reason (BUG-016), and the
     contracts. stacked_4 files are contract v2 (embedded, checked by
     fvml.export.finalize). reduced_dur files carry no contract: their decoder
-    signature (prev_dur in, duration out) is outside contract v2."""
+    signature (prev_dur in, duration out) is outside contract v2. `labels_meta`
+    (a train_s2ut.py checkpoint's label-space dict) taints the licence
+    (BUG-031): a non-commercial translator refuses to export without
+    `include_noncommercial` and is tagged with the NC note when opted in."""
     from . import contract as fc
     from . import export as fx
     from .contract import TensorSpec
     out_dir = pathlib.Path(out_dir)
     cfg = model.cfg
     model = model.eval()
+    license = fx.noncommercial_license(labels_meta or {}, license, include_noncommercial)
     enc_path, dec_path = out_dir / "translator_enc.onnx", out_dir / "translator_dec.onnx"
     enc_graph, enc_c = tr.translator_enc_graph(model.encoder, license)
     enc_rec = fx.export_graph(enc_graph, enc_path, exporter=exporter)
@@ -254,6 +261,14 @@ class ChunkResult:
     first_write_t_src: int = 0      # policy t_src at this utterance's first write (0 = none yet)
     enc_ms: float = 0.0
     dec_ms: float = 0.0
+
+
+def expected_chunks_from_logit(readiness):
+    """translator_enc's readiness logit -> expected target chunks in [0, 2]
+    (Stage 04's on_source_readiness contract). A plain sigmoid would cap at
+    1.0 and the policy could never bank a catch-up (2-write) step (BUG-029);
+    a logit of 0 means exactly one expected target chunk."""
+    return 2.0 / (1.0 + math.exp(-readiness))
 
 
 class StreamingTranslator:
@@ -359,9 +374,14 @@ class StreamingTranslator:
             res.encoded = True
             policy.notify_source_unit()
             if policy.config.adaptive_mode:
-                policy.on_source_readiness(1.0 / (1.0 + math.exp(-readiness)))
+                policy.on_source_readiness(expected_chunks_from_logit(readiness))
         res.decision = policy.decide()
-        for _ in range(policy.max_writes_this_step()):
+        for w in range(policy.max_writes_this_step()):
+            # An adaptive double write must still be wanted after the first one:
+            # an <EOS> during a pause marks the utterance caught up (decide() ->
+            # READ). Twin of the C++ InferencePipeline chunk_step().
+            if w > 0 and policy.decide() == Decision.READ:
+                break
             if not self.first_write_t_src:
                 self.first_write_t_src = policy.t_src
             frames, eos, steps, ms = self._write()

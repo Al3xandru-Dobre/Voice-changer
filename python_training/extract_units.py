@@ -141,7 +141,8 @@ def fit_kmeans(args, rows, manifests, log=print):
     from fvml import teacher
     from fvml.content_encoder import pad_to_frames
     spec = teacher.get_teacher(args.teacher or teacher.DEFAULT_TEACHER, args.include_noncommercial)
-    require_nc_dir(args.out_dir, spec.noncommercial)
+    corpus_nc = units.check_rows_license(rows, args.include_noncommercial)
+    require_nc_dir(args.out_dir, spec.noncommercial or corpus_nc is not None)
     k = args.k or spec.k
     rng = random.Random(args.seed)
     langs = [s.strip() for s in (args.balance_langs or "").split(",") if s.strip()]
@@ -281,8 +282,13 @@ def extract(args, rows, manifests, log=print):
                                include_noncommercial=args.include_noncommercial,
                                teacher_checkpoint=args.teacher_checkpoint)
     units.check_license(tok.meta, args.include_noncommercial)   # a student of an NC teacher
-    require_nc_dir(out_dir, tok.meta.get("noncommercial"))
+    corpus_nc = units.check_rows_license(rows, args.include_noncommercial)
+    require_nc_dir(out_dir, tok.meta.get("noncommercial") or corpus_nc is not None)
     meta = {**tok.meta, "manifests": [str(m) for m in manifests], "created": units.now()}
+    if corpus_nc:                    # BUG-031: the corpus taint survives a clean teacher
+        meta["noncommercial"] = True
+        meta["license"] = " + ".join(dict.fromkeys(l for l in (
+            tok.meta.get("license") if tok.meta.get("noncommercial") else None, corpus_nc) if l))
     perturb_cfg = None
     if args.perturb_fraction > 0.0:
         lo, hi = (float(v) for v in args.perturb_formant.split(","))

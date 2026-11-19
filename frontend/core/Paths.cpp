@@ -17,27 +17,48 @@ namespace fs = std::filesystem;
 
 namespace {
 
-std::string env_or_empty(const char* name) {
-    const char* v = std::getenv(name);
-    return v ? std::string(v) : std::string();
-}
+std::string from_u8(const std::u8string& u) { return std::string(u.begin(), u.end()); }
 
 } // namespace
 
+fs::path path_from_utf8(std::string_view utf8) {
+    return fs::path(std::u8string(utf8.begin(), utf8.end()));
+}
+
+std::string path_to_utf8(const fs::path& p) { return from_u8(p.u8string()); }
+
+std::string path_to_utf8_generic(const fs::path& p) { return from_u8(p.generic_u8string()); }
+
+fs::path env_path(const char* name) {
+#if defined(_WIN32)
+    std::wstring wname;
+    for (const char* c = name; *c != '\0'; ++c) wname.push_back(static_cast<wchar_t>(static_cast<unsigned char>(*c)));
+    wchar_t*    buffer = nullptr;
+    std::size_t len    = 0;
+    if (_wdupenv_s(&buffer, &len, wname.c_str()) != 0 || buffer == nullptr) return {};
+    fs::path result(buffer);   // wide string: non-ASCII values stay intact
+    std::free(buffer);
+    return result;
+#else
+    const char* v = std::getenv(name);
+    return v != nullptr ? fs::path(v) : fs::path();
+#endif
+}
+
 fs::path default_config_dir() {
 #if defined(_WIN32)
-    const std::string appdata = env_or_empty("APPDATA");
-    if (!appdata.empty()) return fs::path(appdata) / "fluxvoice";
-    const std::string profile = env_or_empty("USERPROFILE");
-    if (!profile.empty()) return fs::path(profile) / "AppData" / "Roaming" / "fluxvoice";
+    const fs::path appdata = env_path("APPDATA");
+    if (!appdata.empty()) return appdata / "fluxvoice";
+    const fs::path profile = env_path("USERPROFILE");
+    if (!profile.empty()) return profile / "AppData" / "Roaming" / "fluxvoice";
 #elif defined(__APPLE__)
-    const std::string home = env_or_empty("HOME");
-    if (!home.empty()) return fs::path(home) / "Library" / "Application Support" / "fluxvoice";
+    const fs::path home = env_path("HOME");
+    if (!home.empty()) return home / "Library" / "Application Support" / "fluxvoice";
 #else
-    const std::string xdg = env_or_empty("XDG_CONFIG_HOME");
-    if (!xdg.empty()) return fs::path(xdg) / "fluxvoice";
-    const std::string home = env_or_empty("HOME");
-    if (!home.empty()) return fs::path(home) / ".config" / "fluxvoice";
+    const fs::path xdg = env_path("XDG_CONFIG_HOME");
+    if (!xdg.empty()) return xdg / "fluxvoice";
+    const fs::path home = env_path("HOME");
+    if (!home.empty()) return home / ".config" / "fluxvoice";
 #endif
     return fs::current_path() / ".fluxvoice";
 }
@@ -72,11 +93,11 @@ fs::path find_resource(const std::vector<fs::path>& roots, const fs::path& relat
 std::vector<fs::path> system_font_candidates() {
     std::vector<fs::path> c;
 #if defined(_WIN32)
-    std::string windir = env_or_empty("WINDIR");
+    fs::path windir = env_path("WINDIR");
     if (windir.empty()) windir = "C:\\Windows";
-    c.emplace_back(fs::path(windir) / "Fonts" / "segoeui.ttf");
-    c.emplace_back(fs::path(windir) / "Fonts" / "tahoma.ttf");
-    c.emplace_back(fs::path(windir) / "Fonts" / "arial.ttf");
+    c.emplace_back(windir / "Fonts" / "segoeui.ttf");
+    c.emplace_back(windir / "Fonts" / "tahoma.ttf");
+    c.emplace_back(windir / "Fonts" / "arial.ttf");
 #elif defined(__APPLE__)
     c.emplace_back("/System/Library/Fonts/SFNS.ttf");
     c.emplace_back("/System/Library/Fonts/Supplemental/Arial.ttf");

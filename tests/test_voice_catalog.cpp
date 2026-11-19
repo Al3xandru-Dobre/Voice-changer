@@ -68,6 +68,35 @@ int main(int argc, char** argv) {
     bad = good;
     bad["voices"][0]["name"] = "Bad Voice";
     check(bad, false);
+    // BUG-032: optional per-voice "lang" (twin: fvml.contract.validate_voices).
+    check(good, true);
+    CHECK(voices.size() == 1 && voices[0].lang.empty() && voices[0].attribution.empty());
+    bad = good;
+    bad["voices"][0]["lang"] = "en";
+    bad["voices"][0]["attribution"] = "CC0 by me";
+    check(bad, true);
+    CHECK(voices.size() == 1 && voices[0].lang == "en" && voices[0].attribution == "CC0 by me");
+    bad["voices"][0]["lang"] = "zh-hans";
+    check(bad, true);
+    CHECK(voices.size() == 1 && voices[0].lang == "zh-hans");
+    for (const auto& value : {json("EN"), json("e"), json("abcdefghi"), json("en_US"), json("e1")}) {
+        bad = good;
+        bad["voices"][0]["lang"] = value;
+        check(bad, false);
+        CHECK(error == "voice 'test': invalid language code '" + value.get<std::string>() +
+                       "' (expected lowercase [a-z-]{2,8})");
+    }
+    for (const auto& value : {json(""), json(5), json(true), json(nullptr)}) {
+        bad = good;
+        bad["voices"][0]["lang"] = value;
+        check(bad, false);
+        CHECK(error == "voice 'test': lang must be a non-empty string");
+    }
+    // BUG-032: unknown per-voice keys are rejected like the frontend parser.
+    bad = good;
+    bad["voices"][0]["colour"] = "red";
+    check(bad, false);
+    CHECK(error == "voices.json: unknown voice key 'colour'");
     std::filesystem::remove(path);
     return test::finish("voice_catalog");
 }

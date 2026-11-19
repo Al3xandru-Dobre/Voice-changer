@@ -94,6 +94,22 @@ def check_license(meta, include_noncommercial=False):
             "--include-noncommercial for research runs; never ship what is trained on them")
 
 
+def check_rows_license(rows, include_noncommercial=False):
+    """Refuse manifest rows from a non-commercial corpus (VoxPopuli CC BY-NC)
+    unless the caller opted in — the corpus taint is independent of the
+    teacher's licence (BUG-031). Returns the distinct NC licence text(s) joined
+    with ' + ', or None when every row is commercial-clean."""
+    nc = sorted({str(r.get("license") or "non-commercial")
+                 for r in rows if r.get("noncommercial")})
+    if nc and not include_noncommercial:
+        from .teacher import LicenseError
+        raise LicenseError(
+            "the manifest mixes in non-commercial corpus audio ("
+            + ", ".join(nc) + "): pass --include-noncommercial for research runs; never "
+            "ship what is trained on them")
+    return " + ".join(nc) if nc else None
+
+
 def is_paired(row):
     return "src_audio_path" in row and "tgt_audio_path" in row
 
@@ -123,6 +139,8 @@ def audio_rows(rows, side=None, default_lang=None):
         for src_key, key in ((f"{side}_text", "text"), ("license", "license")):
             if r.get(src_key):
                 row[key] = r[src_key]
+        if r.get("noncommercial"):            # BUG-031: the corpus taint follows the audio
+            row["noncommercial"] = True
         if side == "src" and r.get("gender"):
             row["gender"] = r["gender"]
         out.append({k: v for k, v in row.items() if v is not None})

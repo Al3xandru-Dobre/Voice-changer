@@ -768,13 +768,14 @@ LOSS_WEIGHTS = {"unit": 1.0, "asr_ctc": 0.3, "s2tt_ctc": 0.3, "eos": 0.1, "readi
 
 
 def readiness_targets(nonblank_mass, src_mask, target_chunks):
-    """Expected new target chunks per source chunk, in [0, 1]: the S2TT CTC
-    non-blank mass of each chunk, rescaled so an utterance's chunks sum to the
-    number of target chunks it must emit (before clamping).
+    """Expected new target chunks per source chunk, in [0, 2] (WaitKPolicy's
+    on_source_readiness cap): the S2TT CTC non-blank mass of each chunk,
+    rescaled so an utterance's chunks sum to the number of target chunks it
+    must emit (before clamping).
     nonblank_mass [B, S] >= 0, src_mask [B, S] bool, target_chunks [B]."""
     mass = nonblank_mass * src_mask
     total = mass.sum(dim=1, keepdim=True).clamp_min(1e-6)
-    return (target_chunks[:, None] * mass / total).clamp(0.0, 1.0)
+    return (target_chunks[:, None] * mass / total).clamp(0.0, 2.0)
 
 
 def _ctc_term(model, head, hidden, lang, tokens, src_chunks, blank):
@@ -841,8 +842,12 @@ def s2ut_loss(model, out, batch, weights=None, label_smoothing=0.0):
     terms["asr_ctc"] = asr / max(n_asr, 1)
     terms["s2tt_ctc"] = s2tt / max(n_s2tt, 1)
     ready = readiness_targets(mass, src_mask, batch["target_chunks"])
+    # BUG-029: targets are [0, 2] expected chunks. Supervise the halved value
+    # with BCE and map back with 2 * sigmoid at inference (s2ut_stream), so a
+    # logit of 0 means "one target chunk" and dense chunks can bank a 2-write
+    # catch-up step.
     terms["readiness"] = F.binary_cross_entropy_with_logits(
-        out["readiness_logit"].float()[src_mask], ready[src_mask])
+        out["readiness_logit"].float()[src_mask], ready[src_mask] / 2.0)
 
     terms["total"] = (w["unit"] * (terms["unit"] + terms.get("dur", 0.0))
                       + w["asr_ctc"] * terms["asr_ctc"] + w["s2tt_ctc"] * terms["s2tt_ctc"]

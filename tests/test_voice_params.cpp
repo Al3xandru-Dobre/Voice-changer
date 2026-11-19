@@ -8,6 +8,7 @@
 #include "voice/VoiceOutputChain.hpp"
 #include "voice/VoiceParams.hpp"
 #include "pipeline/InferencePipeline.hpp"
+#include "pipeline/LangCatalog.hpp"
 #include "AllocationCounter.hpp"
 #include "FakeModelStep.hpp"
 #include "TestSupport.hpp"
@@ -288,6 +289,27 @@ void test_descriptor_json() {
         CHECK(e.at("default").get<float>() == kParams[i].def);
         CHECK(e.contains("kind") && e.contains("tier") && e.contains("group") && e.contains("unit"));
     }
+    CHECK(!doc.contains("langs") && !doc.contains("default_wait_k"));
+
+    // With a language catalogue the dump adds "langs" and "default_wait_k"
+    // (Stage 09) and leaves the params array untouched.
+    LangCatalog langs;
+    std::string error;
+    const fs::path langs_path = fs::path(FLUXVOICE_SOURCE_DIR) / "tests" / "data" / "fixtures" / "s2ut" / "langs.json";
+    CHECK(read_lang_catalog(langs_path, nullptr, langs, error));
+    const nlohmann::json with = nlohmann::json::parse(descriptor_table_json(&langs), nullptr, false);
+    CHECK(!with.is_discarded());
+    if (with.is_discarded()) return;
+    CHECK(with.at("params") == doc.at("params"));
+    CHECK(with.contains("langs") && with.at("langs").size() == 4);
+    const char* codes[] = {"en", "es", "fr", "de"};
+    for (std::size_t i = 0; i < 4 && with.contains("langs") && with.at("langs").size() == 4; ++i) {
+        CHECK(with.at("langs").at(i).at("code") == codes[i]);
+        CHECK(with.at("langs").at(i).at("id") == static_cast<int>(i));
+        CHECK(with.at("langs").at(i).contains("name"));
+    }
+    CHECK(with.contains("default_wait_k") && with.at("default_wait_k").at("de->en") == 4);
+    CHECK(with.at("default_wait_k").at("es->en") == 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,10 +1022,17 @@ void test_param_channel() {
     CHECK(ch.pushed_generation() == g3);
     // Newest snapshot wins; older ones are still enqueued but the drain keeps
     // the last dequeued value.
-    CHECK(ch.drain(out));
+    std::uint64_t drained_gen = 0;
+    CHECK(ch.drain(out, drained_gen));
     CHECK(out.get(ParamId::PitchShift) == 3.0f);
+    CHECK(drained_gen == g3);  // the overload reports the generation it delivered
     CHECK(ch.applied_generation() == g3);
+    CHECK(!ch.drain(out, drained_gen));
+    CHECK(drained_gen == g3);  // untouched when nothing was queued
     CHECK(!ch.drain(out));
+    const auto g4 = ch.push(a);
+    CHECK(ch.drain(out));      // the one-argument form keeps working
+    CHECK(ch.applied_generation() == g4);
 
     // Fill the queue (capacity 64), then confirm pending + flush delivery.
     ParamChannel full;
@@ -1018,6 +1047,96 @@ void test_param_channel() {
     CHECK(drained > 0);
     CHECK(got.get(ParamId::PitchShift) == 3.0f);
     CHECK(full.applied_generation() == gp || full.pushed_generation() == gp);
+}
+
+// -- ramped mute --------------------------------------------------------------
+
+double max_step_of(std::span<const float> v, float prev) {
+    double m = 0.0;
+    for (float x : v) {
+        m = std::max(m, static_cast<double>(std::fabs(x - prev)));
+        prev = x;
+    }
+    return m;
+}
+
+void test_chain_mute_ramp() {
+    VoiceOutputChain c;
+    c.configure(16000);
+    c.set_targets(0.0f, -80.0f, false, 0.0f);
+    c.reset();
+    const std::vector<float> open{0.0f};
+    std::vector<float> warm(320, 1.0f);
+    c.process(warm, open, 320);          // gate opened, identity
+    CHECK(warm.back() == 1.0f);
+    CHECK(!c.muted());
+    c.set_muted(true);
+    CHECK(c.muted());
+    std::vector<float> buf(320, 1.0f);
+    c.process(buf, open, 320);
+    // 5 ms = 80 samples at 16 kHz: linear 1 -> 0, then exact zeros.
+    CHECK(buf[0] > 0.98f && buf[0] < 1.0f);
+    CHECK(buf[39] > 0.4f && buf[39] < 0.6f);
+    CHECK(buf[79] < 1e-5f);
+    CHECK(std::all_of(buf.begin() + 81, buf.end(), [](float x) { return x == 0.0f; }));
+    for (std::size_t i = 1; i < 79; ++i) CHECK(buf[i] < buf[i - 1]);  // monotonic, no overshoot
+    c.set_muted(false);
+    std::fill(buf.begin(), buf.end(), 1.0f);
+    c.process(buf, open, 320);
+    CHECK(buf[0] > 0.0f && buf[0] < 0.05f);
+    CHECK(buf[81] == 1.0f && buf[319] == 1.0f);
+    // reset() keeps the level: a muted chain restarts silent, not ramping up.
+    c.set_muted(true);
+    c.reset();
+    std::fill(buf.begin(), buf.end(), 1.0f);
+    c.process(buf, open, 320);
+    CHECK(std::all_of(buf.begin() + 40, buf.end(), [](float x) { return x == 0.0f; }));
+    CHECK(buf[0] == 0.0f);
+}
+
+void test_pipeline_mute() {
+    const TargetVoiceStats stats{4.8, 0.25, -4.0, 1.5};
+    const std::array<float, 4> emb{};
+    constexpr double kAmp = 0.3;
+    const auto in = make_sine(440.0, kAmp, 320 * 40);
+    PipelineOptions o;
+    o.params.set(ParamId::GateThreshold, -80.0f);
+    test::FakeModelStep enc(test::fake_contract(ModelRole::kEncoder));
+    test::FakeModelStep voc(test::fake_contract(ModelRole::kVocoder));
+    InferencePipeline p(enc, voc, stats, emb, o);
+    std::vector<std::vector<float>> outs(40, std::vector<float>(320));
+    float prev = 0.0f;
+    double max_step_ramp = 0.0;
+    for (int k = 0; k < 40; ++k) {
+        if (k == 10) p.set_muted(true);
+        if (k == 24) p.set_muted(false);
+        CHECK(p.process(std::span(in).subspan(k * 320, 320), outs[k]).ok);
+        // Hops 10 and 24 contain a 5 ms ramp.
+        if (k == 10 || k == 24) max_step_ramp = std::max(max_step_ramp, max_step_of(outs[k], prev));
+        prev = outs[k].back();
+    }
+    const double steady_rms = rms_of(outs[5]);
+    CHECK(steady_rms > 0.15);
+    // Muted: every sample of every hop after the ramp is below -60 dBFS.
+    for (int k = 11; k < 24; ++k)
+        for (float x : outs[k]) CHECK(std::fabs(x) < 0.001f);
+    // Unmuted: the signal is back at its original level.
+    CHECK(std::fabs(rms_of(outs[35]) / steady_rms - 1.0) < 0.01);
+    // No click: the largest adjacent-sample step across either ramp stays within
+    // the sine's own slope plus the ramp's 1/80 per-sample amplitude change.
+    const double natural = kAmp * kTwoPi * 440.0 / 16000.0;
+    CHECK(max_step_ramp <= natural + kAmp / 80.0 + 1e-3);
+
+    // output_chain = false is raw PCM: mute is documented as ignored.
+    PipelineOptions raw;
+    raw.output_chain = false;
+    test::FakeModelStep enc2(test::fake_contract(ModelRole::kEncoder));
+    test::FakeModelStep voc2(test::fake_contract(ModelRole::kVocoder));
+    InferencePipeline p2(enc2, voc2, stats, emb, raw);
+    p2.set_muted(true);
+    std::vector<float> out(320);
+    for (int k = 0; k < 4; ++k) CHECK(p2.process(std::span(in).subspan(k * 320, 320), out).ok);
+    CHECK(rms_of(out) > 0.15);
 }
 
 // -- allocation-free hop path -------------------------------------------------
@@ -1079,6 +1198,8 @@ int main(int argc, char** argv) {
     test_pipeline_brightness_identity();
     test_reset_equals_fresh();
     test_param_channel();
+    test_chain_mute_ramp();
+    test_pipeline_mute();
     test_zero_allocations();
     return test::finish("voice_params");
 }

@@ -39,6 +39,24 @@ def test_simuleval_average_lagging_waitk_closed_form():
         assert al_ca == pytest.approx(k * 80.0 + 25.0)
 
 
+def test_simuleval_al_clamps_tail_beyond_source():
+    """An offline runner that keeps counting the zero tail it feeds after EOF
+    (fv_s2ut_file --dump-trace) must score exactly like a producer that caps
+    t_src_ms at T_src: the reader cannot have read past the source."""
+    # T_src = 760 ms is not a whole number of 80 ms chunks, so the first delay
+    # reaching T_src is 800 ms uncapped vs 760 ms capped: without the clamp the
+    # cutoff term inflates AL by 40 / tau ms.
+    t_src_total = 760.0
+    for k in (1, 3, 5):
+        capped, uncapped = [], []
+        for i in range(10):
+            t = float((k + i) * 80)
+            capped.append({"step": i, "t_src_ms": min(t_src_total, t), "t_tgt_frames_emitted": 1})
+            uncapped.append({"step": i, "t_src_ms": t, "t_tgt_frames_emitted": 1})
+        want = s2ut_eval.average_lagging_ms(t_src_total, capped)[0]
+        assert s2ut_eval.average_lagging_ms(t_src_total, uncapped)[0] == pytest.approx(want)
+
+
 def test_simuleval_al_ca_uses_algorithmic_tau_not_wallclock_tau():
     """Ma et al. (EMNLP 2020 §2.2): AL_CA must use the algorithmic cutoff `tau`
     defined by `d_j >= T_src`, NOT `d_j_ca >= T_src`. Otherwise a slow first

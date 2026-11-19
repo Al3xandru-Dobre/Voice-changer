@@ -4,7 +4,7 @@
 > [Documents index](../README.md) ·
 > Research basis: [Simultaneous S2UT research](../Research_documents/M3_WAITK_S2UT_RESEARCH.md)
 
-**Status:** ◐ in progress — Stage 02 done; Stages 01, 03, 04 and 05 implemented and unit-tested (2026-11-15). Open: external corpus downloads (01), multilingual k-means / student / vocoder training (03), native MSVC / GCC / AppleClang CI legs (04), S2UT training and the decision gate (05)
+**Status:** ◐ in progress — Stage 02 done; Stages 01, 03, 04 and 05 implemented and unit-tested (2026-11-15); Stages 07, 08 and 09 implemented and fixture-verified (2026-11-18). Real-bundle checks (Stage 06 golden, live Mode B runs) are pending. Open: external corpus downloads (01), multilingual k-means / student / vocoder training (03), native MSVC / GCC / AppleClang CI legs (04), S2UT training and the decision gate (05)
 **Goal from README:** *Train/fine-tune causal S2UT transformer on discrete
 units. Implement `WaitKPolicy` in C++ and connect between encoder and
 vocoder.*
@@ -120,9 +120,9 @@ C++ track:  02 (contract v2) ─► 04 (WaitKPolicy & FIFO) ─► 07 (C++ S2UT 
 | 04 | [`WaitKPolicy` & streaming unit/prosody FIFO](04_waitk_policy_streaming_state_machine.md) | §4 §9 | Upgraded `WaitKPolicy.hpp` + `UnitProsodyFifo.hpp`; `test_waitk_policy` | ◐ |
 | 05 | [Causal S2UT translator & policy decision gate](05_causal_s2ut_translator_policy_gate.md) | §2 §4 | Multi-task CTC Conformer-Transformer; Wait-*k* vs. Adaptive gate table | ◐ |
 | 06 | [Translated prosody & stateful ONNX export](06_translated_prosody_stateful_onnx_export.md) | §5 §8 | Prosody head; `translator_enc.onnx` + `translator_dec.onnx` + `langs.json`; parity | ☐ |
-| 07 | [C++ translator runtime & `fv_s2ut_file`](07_cpp_translator_runtime_offline_runner.md) | §8 §9 | Shared `mem_kv` `OrtModel` execution; `fv_s2ut_file` WAV→WAV runner | ☐ |
-| 08 | [Real-time Mode B pipeline & governor](08_realtime_mode_b_pipeline.md) | §4 §5 §9 | `fluxvoice --s2ut` live; `kRead` bypass; `kFlush` gate override; telemetry | ☐ |
-| 09 | [S2UT controls, language switching & Mode A↔B toggle](09_s2ut_controls_language_switching.md) | §9 | `VoiceParams` S2UT extensions; live `mode`/`lang`/`waitk` console commands | ☐ |
+| 07 | [C++ translator runtime & `fv_s2ut_file`](07_cpp_translator_runtime_offline_runner.md) | §8 §9 | Shared `mem_kv` `OrtModel` execution; `fv_s2ut_file` WAV→WAV runner | ◐ implemented, fixture-verified (Python golden twin bit-exact); real-bundle golden pending |
+| 08 | [Real-time Mode B pipeline & governor](08_realtime_mode_b_pipeline.md) | §4 §5 §9 | `fluxvoice --s2ut` live; `kRead` bypass; `kFlush` gate override; telemetry | ◐ implemented, fixture-verified; live runs pending |
+| 09 | [S2UT controls, language switching & Mode A↔B toggle](09_s2ut_controls_language_switching.md) | §9 | `VoiceParams` S2UT extensions; live `mode`/`lang`/`waitk` console commands | ◐ implemented, unit-tested; live console DoD pending |
 | 10 | [Cross-lingual target-voice transfer ("Me" voice)](10_cross_lingual_target_voice.md) | §3 §5 | `--voice me` speaking `Es/Fr/De` and `En` across all 6 directions | ☐ |
 | 11 | [Verification & exit report](11_verification_exit.md) | §4 §7 | Measured onset $T-B$, AL, 6-pair ASR-BLEU, 30-min soak; README updates | ☐ |
 

@@ -8,7 +8,7 @@
 | **Name** | *Dropped voice language* — C++ accepts ill-typed `"lang"` in `voices.json` and discards per-voice language metadata |
 | **Reported** | 2026-11-15 |
 | **Severity** | Medium (breaks Python/C++ `voices.json` validation parity and loses per-voice language tags in Stage 03 multilingual bundles) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree (uncommitted; CI legs pending) — [fix plan](FIX-PLAN-BUG-029-032_2026-11-18.md) |
 | **Component** | `frontend/core/VoiceCatalog.cpp:58, 135-160, 380`, `frontend/core/VoiceCatalog.hpp:29-42`, `src/pipeline/VoiceCatalog.hpp:59-91` |
 | **Blocks** | [Milestone 3 / Stage 02](../Milestone%203/02_translator_contract_v2_fixtures.md) & [Stage 03](../Milestone%203/03_multilingual_encoder_vocoder_upgrade.md) C++ `voices.json` parity; Milestone 4 multilingual voice filtering |
 
@@ -68,3 +68,9 @@ When Stage 02 added `"lang"` to `kVoiceOptionalKeys` in `frontend/core/VoiceCata
 ## Workaround
 
 Validate `voices.json` through `fvml.contract.validate_voices` (or `export_stateful_onnx.py`) before loading bundles in C++.
+
+## Resolution
+
+- `src/pipeline/VoiceCatalog.hpp`: `VoiceEntry` gains `lang` and `attribution`; `read_voice_catalog` validates both optional keys like `fvml.contract.validate_voices` (non-empty string, then `lang` must be lowercase `[a-z-]{2,8}`) with the twin's wording: `voice 'X': lang must be a non-empty string` and `voice 'X': invalid language code 'Y' (expected lowercase [a-z-]{2,8})`.
+- `frontend/core/VoiceCatalog.{hpp,cpp}`: `VoiceEntry::lang` added; `parse_voices_json` reads and validates it with the same rule and messages. Unknown-key handling is unchanged (the src reader still ignores unknown per-voice keys; the frontend reader and the twin reject them).
+- Tests: `tests/test_voice_catalog.cpp` (lang round-trip, `zh-hans`, absent stays empty, invalid codes and non-string values rejected with the exact messages) and `test_voice_catalog` in `tests/test_frontend_model.cpp` (same cases through `parse_voices_json`). Built GCC Release with warnings-as-errors and the GUI; MSVC / Clang / macOS legs not run.

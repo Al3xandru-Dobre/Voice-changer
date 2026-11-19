@@ -16,6 +16,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <csignal>
 #include <cstdint>
@@ -28,6 +29,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <stdexcept>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -41,16 +43,18 @@
 #include "audio/ChunkAssembler.hpp"
 #include "audio/MiniaudioBackend.hpp"
 #include "audio/RouteGuard.hpp"
+#include "pipeline/HostStats.hpp"
 #include "pipeline/InferencePipeline.hpp"
+#include "pipeline/LangCatalog.hpp"
 #include "pipeline/LatencyGovernor.hpp"
-#include "pipeline/ModeAWorker.hpp"
-#include "pipeline/ModelBundle.hpp"
+#include "pipeline/ModeAHost.hpp"
+#include "pipeline/ModelBundle.hpp"  // kNoTranslatorModelsMessage
+#include "pipeline/ModelContract.hpp"
 #include "pipeline/OrtModel.hpp"
 #include "pipeline/PipelineGeometry.hpp"
 #include "pipeline/PipelineTiming.hpp"
 #include "util/ProcessMemory.hpp"
 #include "util/WorkerPriority.hpp"
-#include "voice/ParamChannel.hpp"
 #include "voice/Presets.hpp"
 #include "voice/VoiceParams.hpp"
 
@@ -58,7 +62,7 @@
 
 namespace {
 
-enum class Mode { Passthrough, Queue, Chunked, VC };
+enum class Mode { Passthrough, Queue, Chunked, VC, S2UT };
 
 // Set by SIGINT/SIGTERM, Enter on stdin, or --duration expiry. A lock-free
 // atomic is async-signal-safe to store to from a signal handler.
@@ -72,7 +76,7 @@ extern "C" void on_stop_signal(int sig) {
 
 void print_usage(const char* argv0) {
     std::cout <<
-        "FluxVoice-S2UT — real-time textless voice changer (Mode A)\n"
+        "FluxVoice-S2UT — real-time textless voice changer / speech translator (Mode A / B)\n"
         "\n"
         "Usage: " << argv0 << " [options]\n"
         "\n"
@@ -84,23 +88,42 @@ void print_usage(const char* argv0) {
         "  --chunked                     Queue loopback, but the worker regroups audio into\n"
         "                                80 ms model frames first (adds one hop of latency)\n"
         "  --vc                          Voice-conversion mode (Mode A; requires ONNX Runtime)\n"
-        "  --model-dir <bundle>          Encoder/vocoder bundle and voices.json (requires --vc)\n"
-        "  --voice <name>                Target voice (requires --vc; default: first bundle voice)\n"
-        "  --voice-b <name>              Blend endpoint voice B (requires --vc; follows --voice)\n"
+        "  --s2ut                        Simultaneous speech-to-unit translation (Mode B; requires\n"
+        "                                ONNX Runtime and a bundle with translator models + langs.json)\n"
+        "  --src-lang <code|id>          Source language from langs.json (requires --s2ut)\n"
+        "  --tgt-lang <code|id>          Target language from langs.json (requires --s2ut; must differ\n"
+        "                                from --src-lang: use --vc for same-language conversion)\n"
+        "  --wait-k <1..10>              Wait-k in 80 ms chunks (requires --s2ut; default: the\n"
+        "                                pair's default_wait_k in langs.json, else 3)\n"
+        "  --list-langs                  With --model-dir <bundle>: print the bundle languages and\n"
+        "                                default Wait-k per pair, then exit (no audio/ORT needed)\n"
+        "  --model-dir <bundle>          Encoder/vocoder bundle and voices.json (requires --vc/--s2ut;\n"
+        "                                with --list-params --json also reports langs.json)\n"
+        "                                A --vc bundle that also holds translator models + langs.json\n"
+        "                                starts as Mode A and can switch to Mode B from the console\n"
+        "  --voice <name>                Target voice (requires --vc/--s2ut; default: first bundle voice)\n"
+        "  --voice-b <name>              Blend endpoint voice B (requires --vc/--s2ut; follows --voice)\n"
         "  --preset <name|path>          Voice preset: name searched in --preset-dir, exe/presets,\n"
-        "                                source presets/ and cwd/presets, or a .json path (requires --vc)\n"
-        "  --param <name=value>          Set a voice parameter, repeatable (requires --vc;\n"
+        "                                source presets/ and cwd/presets, or a .json path\n"
+        "                                (requires --vc/--s2ut)\n"
+        "  --param <name=value>          Set a voice parameter, repeatable (requires --vc/--s2ut;\n"
         "                                names in --list-params)\n"
         "  --preset-dir <dir>            User preset directory; also where console 'save' writes\n"
         "  --list-params [--json]        Print the voice-parameter table and exit\n"
         "  --list-presets                List the presets found in the search dirs and exit\n"
-        "  --console                     Read console commands (set/get/preset/save/voices/help)\n"
-        "                                from stdin even under --duration; with --duration,\n"
-        "                                stdin EOF stops reading commands but does not end\n"
-        "                                the run (without it, EOF still stops)\n"
-        "  --frames-per-step <1|2|4>      Hop variant (default: smallest available)\n"
+        "  --console                     Read console commands from stdin even under --duration;\n"
+        "                                with --duration, stdin EOF stops reading commands but\n"
+        "                                does not end the run (without it, EOF still stops).\n"
+        "                                Commands: set <param> <value> | get [param] | voices |\n"
+        "                                preset <name> | save <name> | mode vc|s2ut |\n"
+        "                                lang <src> <tgt> | waitk <1..10> | langs | help\n"
+        "  --frames-per-step <1|2|4>      Hop variant (default: smallest available for --vc, even for\n"
+        "                                bundles with translator models (Mode A latency first); 4 for\n"
+        "                                --s2ut. Pass --frames-per-step 4 with --vc when planning to\n"
+        "                                switch to Mode B: at s1 every model runs in one 20 ms hop)\n"
         "  --latency-target-ms <ms>       Queued-audio target (default: model budget)\n"
-        "  --list-voices                 Validate/list bundle voices and exit (no audio/ORT needed)\n"
+        "  --list-voices                 Validate/list bundle voices and exit (no audio/ORT needed;\n"
+        "                                requires --vc or --s2ut)\n"
         "  --input  <index|default>      Capture device: index from --list-devices, or\n"
         "                                \"default\" to follow the OS default endpoint\n"
         "  --output <index|default>      Playback device: index or \"default\" (same rules)\n"
@@ -201,72 +224,20 @@ void print_stream_info(const StreamInfo& si, const fluxvoice::StreamStatus& stat
               << " (resolved against snapshot generation " << status.selection_generation << ")\n";
 }
 
-/// Glitch counters and derived values at one instant (control thread only).
-struct Snapshot {
-    uint64_t frames, overruns, underruns, drops;
-    // Reserved for the VC worker's output skips and startup silence. The
-    // diagnostic modes insert neither; do not fabricate inference telemetry.
-    std::uint64_t skipped = 0, prefilled = 0;
-    // Samples held between capture and playback (queues + worker). Every
-    // callback enqueues and dequeues the same count, so this is exact by
-    // conservation: prefilled + underruns - overruns - drops - skipped.
-    int64_t queued;
-    size_t  rss;
-    bool vc = false;
-    fluxvoice::TimingSnapshot timing{};
-    std::uint64_t errors = 0;
-    double lat_ms = 0.0;
-};
-
-Snapshot snapshot(const DuplexRouter& router, const std::atomic<uint64_t>& drops,
-                  const fluxvoice::ModeAWorker* worker = nullptr,
-                  const fluxvoice::InferencePipeline* pipeline = nullptr,
-                  const StreamInfo* stream = nullptr) {
-    Snapshot s{};
+/// The diagnostic modes' counters (passthrough / queue / chunked): the router's
+/// and the application's, with no inference telemetry (`vc` stays false). The
+/// neural modes use ModeAHost::stats() instead.
+fluxvoice::HostStats legacy_stats(const DuplexRouter& router, const std::atomic<uint64_t>& drops) {
+    fluxvoice::HostStats s;
     s.frames    = router.frames_processed();
     s.overruns  = router.input_overruns();
     s.underruns = router.output_underruns();
     s.drops     = drops.load(std::memory_order_relaxed);
+    // These modes insert no startup silence and skip nothing (skipped = prefilled = 0).
     s.queued    = fluxvoice::queued_samples(s.underruns, s.overruns, s.drops,
                                            s.skipped, s.prefilled);
     s.rss       = fluxvoice::resident_bytes();
-    if (worker && pipeline && stream) {
-        const auto w = worker->snapshot();
-        s.vc = true;
-        s.overruns = w.overruns;
-        s.underruns = w.underruns;
-        s.drops = w.drops;
-        s.skipped = w.skipped;
-        s.prefilled = w.prefilled;
-        s.queued = w.queued;
-        s.timing = pipeline->timing();
-        s.errors = pipeline->errors();
-        const auto period_ms = [](std::uint32_t frames, std::uint32_t rate) {
-            return rate ? 1000.0 * frames / rate : 0.0;
-        };
-        s.lat_ms = 1000.0 * (static_cast<double>(pipeline->geometry().model_delay_samples()) +
-                            static_cast<double>(std::max<std::int64_t>(s.queued, 0))) /
-                            pipeline->geometry().sample_rate +
-                   period_ms(stream->capture_internal_period, stream->capture_internal_rate) +
-                   period_ms(stream->playback_internal_period, stream->playback_internal_rate);
-    }
     return s;
-}
-
-/// One machine-readable line; tools/analyze_soak.py parses these.
-std::string stats_line(double t, const Snapshot& s) {
-    std::ostringstream o;
-    o.setf(std::ios::fixed);
-    o.precision(1);
-    o << "[stats] t=" << t << " frames=" << s.frames << " overruns=" << s.overruns
-      << " underruns=" << s.underruns << " drops=" << s.drops << " queued=" << s.queued
-      << " skipped=" << s.skipped << " prefilled=" << s.prefilled
-      << " rss_kb=" << s.rss / 1024;
-    if (s.vc)
-        o << " inf_p50_us=" << s.timing.p50_us << " inf_p95_us=" << s.timing.p95_us
-          << " inf_max_us=" << s.timing.max_us << " misses=" << s.timing.misses
-          << " errors=" << s.errors << " lat_ms=" << s.lat_ms;
-    return o.str();
 }
 
 const char* mode_name(Mode m) {
@@ -275,8 +246,133 @@ const char* mode_name(Mode m) {
         case Mode::Queue:       return "SPSC queue loopback";
         case Mode::Chunked:     return "SPSC queue loopback, 80 ms chunked";
         case Mode::VC:          return "Mode A voice conversion";
+        case Mode::S2UT:        return "Mode B simultaneous translation (s2ut)";
     }
     return "?";
+}
+
+// ---- Voice setup shared by --vc and --s2ut ---------------------------------
+
+/// Index of `name` in `voices` (diagnostic on stderr when unknown).
+bool voice_index_of(const std::vector<fluxvoice::VoiceEntry>& voices, std::string_view name,
+                    std::uint16_t& out) {
+    std::string err;
+    const fluxvoice::VoiceEntry* v = fluxvoice::find_voice(voices, name, err);
+    if (!v) {
+        std::cerr << err << '\n';
+        return false;
+    }
+    out = static_cast<std::uint16_t>(v - voices.data());
+    return true;
+}
+
+/// Order: descriptor defaults (or the caller's pre-seeded `params`) -> preset
+/// params + voice names -> --voice / --voice-b -> --param assignments in
+/// command-line order.
+bool build_initial_params(const std::vector<fluxvoice::VoiceEntry>& voices,
+                          const fluxvoice::PresetLoadResult& preset_res,
+                          const std::string& voice_name, const std::string& voice_b_name,
+                          const std::vector<std::pair<const fluxvoice::ParamDesc*, float>>& assignments,
+                          fluxvoice::VoiceParams& params, bool& voice_b_follows_a) {
+    if (preset_res.ok()) {
+        fluxvoice::apply_preset_params(*preset_res.preset, params);
+        if (preset_res.preset->voice_a &&
+            !voice_index_of(voices, *preset_res.preset->voice_a, params.voice_a))
+            return false;
+        if (preset_res.preset->voice_b &&
+            !voice_index_of(voices, *preset_res.preset->voice_b, params.voice_b))
+            return false;
+        if (preset_res.preset->voice_b) voice_b_follows_a = false;
+    }
+    if (!voice_name.empty() && !voice_index_of(voices, voice_name, params.voice_a)) return false;
+    if (!voice_b_name.empty()) {
+        if (!voice_index_of(voices, voice_b_name, params.voice_b)) return false;
+        voice_b_follows_a = false;
+    }
+    for (const auto& [d, v] : assignments) params.set(d->id, v);
+    if (voice_b_follows_a) params.voice_b = params.voice_a;
+    return true;
+}
+
+// ---- Translation controls (M3 Stage 08 CLI / Stage 09 console) -------------
+
+/// "en es fr de"
+std::string lang_codes(const fluxvoice::LangCatalog& c) {
+    std::string out;
+    for (const auto& l : c.langs) out += (out.empty() ? "" : " ") + l.code;
+    return out;
+}
+
+int wait_k_of(const fluxvoice::VoiceParams& p) {
+    return static_cast<int>(std::lround(p.get(fluxvoice::ParamId::WaitK)));
+}
+
+/// "es -> en (k=3, mode s2ut)"
+std::string pair_status(const fluxvoice::LangCatalog& c, const fluxvoice::VoiceParams& p) {
+    const auto* s = c.find(std::to_string(p.src_lang_id));
+    const auto* t = c.find(std::to_string(p.tgt_lang_id));
+    return (s ? s->code : std::string("?")) + " -> " + (t ? t->code : std::string("?")) +
+           " (k=" + std::to_string(wait_k_of(p)) + ", mode " +
+           (p.enabled(fluxvoice::ParamId::Translate) ? "s2ut" : "vc") + ")";
+}
+
+/// Parse a Wait-k console/CLI argument: an integer in [1, 10].
+bool parse_wait_k(std::string_view text, int& out) {
+    std::uint32_t v = 0;
+    if (!parse_uint(text, 1, 10, v)) return false;
+    out = static_cast<int>(v);
+    return true;
+}
+
+enum class PairChange { Applied, UnknownLanguage, SameLanguage };
+
+/// `lang <src> <tgt>`: validate against the catalog and, when valid, set the
+/// ids and reset wait_k to the pair default (AppModel::set_language_pair
+/// behaviour). Nothing is modified unless Applied; `message` is always set.
+PairChange change_language_pair(const fluxvoice::LangCatalog& c, fluxvoice::VoiceParams& p,
+                                std::string_view src, std::string_view tgt, std::string& message) {
+    const fluxvoice::LangEntry* s = c.find(src);
+    const fluxvoice::LangEntry* t = c.find(tgt);
+    if (!s || !t) {
+        message = "unknown language '" + std::string(!s ? src : tgt) +
+                  "' (bundle languages: " + lang_codes(c) + ")";
+        return PairChange::UnknownLanguage;
+    }
+    if (s->id == t->id) {
+        message = "source and target are both '" + s->code +
+                  "': use 'mode vc' for same-language voice conversion "
+                  "(Mode A gives ~60-100 ms instead of ~330 ms); language pair unchanged";
+        return PairChange::SameLanguage;
+    }
+    p.src_lang_id = static_cast<std::uint16_t>(s->id);
+    p.tgt_lang_id = static_cast<std::uint16_t>(t->id);
+    p.set(fluxvoice::ParamId::WaitK, static_cast<float>(c.default_k(s->code, t->code)));
+    message = pair_status(c, p);
+    return PairChange::Applied;
+}
+
+void print_langs(std::ostream& os, const fluxvoice::LangCatalog& c) {
+    for (const auto& l : c.langs) os << "  " << l.code << "  " << l.id << "  " << l.name << '\n';
+}
+
+void print_default_wait_k(std::ostream& os, const fluxvoice::LangCatalog& c) {
+    os << "Default wait-k (80 ms chunks) per pair (others: " << fluxvoice::kDefaultWaitK << "):\n";
+    for (const auto& d : c.default_wait_k) os << "  " << d.src << "->" << d.tgt << "  " << d.wait_k << '\n';
+}
+
+void print_s2ut_summary(const fluxvoice::HostStats& s) {
+    std::cout << "S2UT: decisions read=" << s.tel.reads << " write=" << s.tel.writes
+              << " flush=" << s.tel.flushes << ", utterances=" << s.tel.utterances
+              << " (eos=" << s.tel.eos_ends << ", cap=" << s.tel.cap_ends << ")"
+              << ", decoder steps=" << s.tel.dec_steps << ", vocoder steps=" << s.tel.voc_steps
+              << ", pad frames=" << s.tel.pad_frames << ", fifo stalls=" << s.tel.fifo_stalls
+              << ", lag=" << s.tel.lag_ms() << " ms\n";
+    for (std::size_t i = 0; i < s.stages.size(); ++i) {
+        const auto& t = s.stages[i];
+        std::cout << "  " << fluxvoice::to_string(static_cast<fluxvoice::PipelineStage>(i))
+                  << ": n=" << t.samples << " p50/p95/max = " << t.p50_us << "/" << t.p95_us << "/"
+                  << t.max_us << " us\n";
+    }
 }
 
 } // namespace
@@ -285,8 +381,11 @@ int main(int argc, char** argv) {
     bool opt_list = false;
     bool list_voices = false, vc_options = false, explicit_rate = false, selected_mode = false;
     bool list_params = false, list_presets = false, opt_json = false, opt_console = false;
+    bool list_langs = false, s2ut_options = false;
     Mode mode = Mode::Queue;
     std::string model_dir, voice_name, voice_b_name, preset_arg, preset_dir;
+    std::string src_lang_arg, tgt_lang_arg;
+    std::uint32_t wait_k_arg = 0;  // 0 = pair default
     std::vector<std::string> param_args;
     std::uint32_t frames_per_step = 0, latency_target_ms = 0;
     int opt_input = -1, opt_output = -1, opt_loopback = -1;
@@ -356,6 +455,11 @@ int main(int argc, char** argv) {
         else if (a == "--queue-loopback")   { if (!select_mode(Mode::Queue)) return 1; }
         else if (a == "--chunked")          { if (!select_mode(Mode::Chunked)) return 1; }
         else if (a == "--vc")               { if (!select_mode(Mode::VC)) return 1; }
+        else if (a == "--s2ut")             { if (!select_mode(Mode::S2UT)) return 1; }
+        else if (a == "--src-lang")         { s2ut_options = true; if (!text(src_lang_arg)) return 1; }
+        else if (a == "--tgt-lang")         { s2ut_options = true; if (!text(tgt_lang_arg)) return 1; }
+        else if (a == "--wait-k")           { s2ut_options = true; if (!value(1, 10, wait_k_arg)) return 1; }
+        else if (a == "--list-langs")       { list_langs = true; }
         else if (a == "--model-dir")        { if (!text(model_dir)) return 1; }
         else if (a == "--voice")            { if (!text(voice_name)) return 1; }
         else if (a == "--voice-b")          { if (!text(voice_b_name)) return 1; }
@@ -415,8 +519,37 @@ int main(int argc, char** argv) {
         std::filesystem::weakly_canonical(std::filesystem::path(argv[0]), exe_ec).parent_path();
     const auto preset_dirs = fluxvoice::preset_search_dirs(preset_dir, exe_dir);
     if (list_params) {
+        if (opt_json && !model_dir.empty() &&
+            std::filesystem::is_regular_file(std::filesystem::path(model_dir) / "langs.json", exe_ec)) {
+            fluxvoice::LangCatalog catalog;
+            std::string error;
+            if (!fluxvoice::read_lang_catalog(std::filesystem::path(model_dir) / "langs.json",
+                                              nullptr, catalog, error)) {
+                std::cerr << error << '\n';
+                return 1;
+            }
+            std::cout << fluxvoice::descriptor_table_json(&catalog);
+            return 0;
+        }
         std::cout << (opt_json ? fluxvoice::descriptor_table_json()
                                : fluxvoice::params_table_text());
+        return 0;
+    }
+    if (list_langs) {
+        if (model_dir.empty()) {
+            std::cerr << "--list-langs requires --model-dir <bundle>\n";
+            return 1;
+        }
+        fluxvoice::LangCatalog catalog;
+        std::string error;
+        if (!fluxvoice::read_lang_catalog(std::filesystem::path(model_dir) / "langs.json", nullptr,
+                                          catalog, error)) {
+            std::cerr << error << '\n';
+            return 1;
+        }
+        std::cout << "Languages (code  id  name):\n";
+        print_langs(std::cout, catalog);
+        print_default_wait_k(std::cout, catalog);
         return 0;
     }
     if (list_presets) {
@@ -435,19 +568,26 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (vc_options && mode != Mode::VC) {
-        std::cerr << "Voice-conversion options require --vc\n";
+    const bool neural = mode == Mode::VC || mode == Mode::S2UT;
+    const char* const mode_flag = mode == Mode::S2UT ? "--s2ut" : "--vc";
+    if (s2ut_options && mode != Mode::S2UT) {
+        std::cerr << "--src-lang, --tgt-lang and --wait-k require --s2ut\n";
         return 1;
     }
-    if (mode == Mode::VC && (has_loopback_arg || opt_list)) {
-        std::cerr << "--vc requires ordinary duplex capture, not --loopback-input/--list-devices\n";
+    if (vc_options && !neural) {
+        std::cerr << "Voice-conversion options require --vc or --s2ut\n";
+        return 1;
+    }
+    if (neural && (has_loopback_arg || opt_list)) {
+        std::cerr << mode_flag
+                  << " requires ordinary duplex capture, not --loopback-input/--list-devices\n";
         return 1;
     }
     // Validate --preset and every --param BEFORE the ORT-availability check so
     // ORT-less builds exercise the same rejections.
     fluxvoice::PresetLoadResult preset_res;
     std::vector<std::pair<const fluxvoice::ParamDesc*, float>> cli_assignments;
-    if (mode == Mode::VC) {
+    if (neural) {
         if (!preset_arg.empty()) {
             preset_res = fluxvoice::resolve_preset(preset_arg, preset_dirs);
             if (!preset_res.ok()) {
@@ -468,25 +608,73 @@ int main(int argc, char** argv) {
             cli_assignments.push_back({d, v});
         }
     }
-    if (mode == Mode::VC && !list_voices && !fluxvoice::ort_available()) {
-        std::cerr << "--vc: " << fluxvoice::kBuiltWithoutOrtMessage << '\n';
+    // --s2ut: every language/wait-k rejection happens here, before the ORT
+    // guard, any model session or any audio device (M3 Stage 08).
+    fluxvoice::LangCatalog langs;
+    const fluxvoice::LangEntry* src_entry = nullptr;
+    const fluxvoice::LangEntry* tgt_entry = nullptr;
+    int wait_k = fluxvoice::kDefaultWaitK;
+    if (mode == Mode::S2UT && !list_voices) {
+        if (model_dir.empty()) {
+            std::cerr << "--s2ut requires --model-dir <bundle>\n";
+            return 1;
+        }
+        if (src_lang_arg.empty() || tgt_lang_arg.empty()) {
+            std::cerr << "--s2ut requires --src-lang <code|id> and --tgt-lang <code|id>"
+                      << " (see --list-langs --model-dir <bundle>)\n";
+            return 1;
+        }
+        std::string error;
+        if (!fluxvoice::read_lang_catalog(std::filesystem::path(model_dir) / "langs.json", nullptr,
+                                          langs, error)) {
+            std::cerr << error << '\n';
+            return 1;
+        }
+        src_entry = langs.find(src_lang_arg);
+        if (!src_entry) {
+            std::cerr << "unknown --src-lang '" << src_lang_arg << "' (bundle languages: "
+                      << lang_codes(langs) << ")\n";
+            return 1;
+        }
+        tgt_entry = langs.find(tgt_lang_arg);
+        if (!tgt_entry) {
+            std::cerr << "unknown --tgt-lang '" << tgt_lang_arg << "' (bundle languages: "
+                      << lang_codes(langs) << ")\n";
+            return 1;
+        }
+        if (src_entry->id == tgt_entry->id) {
+            std::cerr << "--src-lang and --tgt-lang are both '" << src_entry->code
+                      << "': translating a language into itself is voice conversion; use --vc\n";
+            return 1;
+        }
+        wait_k = wait_k_arg != 0 ? static_cast<int>(wait_k_arg)
+                                 : langs.default_k(src_entry->code, tgt_entry->code);
+    }
+    if (neural && !list_voices && !fluxvoice::ort_available()) {
+        std::cerr << mode_flag << ": " << fluxvoice::kBuiltWithoutOrtMessage << '\n';
         return 1;
     }
-    if (mode == Mode::VC && model_dir.empty()) {
-        std::cerr << "--vc requires --model-dir <bundle>\n";
+    if (neural && model_dir.empty()) {
+        std::cerr << mode_flag << " requires --model-dir <bundle>\n";
         return 1;
     }
-    std::unique_ptr<fluxvoice::ModelBundle> bundle;
-    std::unique_ptr<fluxvoice::InferencePipeline> vc_pipeline;
+    // The one live composition (models, pipeline, param channel, worker); the
+    // GUI's EngineHost uses the same class. Declared before the controller and
+    // detached (DetachGuard below) before the controller is destroyed.
+    fluxvoice::ModeAHost host;
     // Control-side snapshot mirrored by the console (Stage 09). `voice_b`
     // follows `voice_a` until chosen explicitly by preset or --voice-b.
     fluxvoice::VoiceParams console_params;
     const std::vector<fluxvoice::VoiceEntry>* console_voices = nullptr;
+    // Non-null exactly when translator models are loaded (Mode B capable).
+    const fluxvoice::LangCatalog* console_langs = nullptr;
     bool voice_b_follows_a = true;
-    if (mode == Mode::VC) {
-        try {
-            std::string error;
-            if (list_voices) {
+    // Console text for translation commands when no Mode B quartet is loaded.
+    std::string translation_msg = fluxvoice::kNoTranslatorModelsMessage;
+    if (neural) {
+        if (list_voices) {
+            try {
+                std::string error;
                 std::vector<fluxvoice::VoiceEntry> voices;
                 if (!fluxvoice::read_voice_catalog(
                         std::filesystem::path(model_dir) / "voices.json", std::nullopt, voices, error)) {
@@ -496,73 +684,129 @@ int main(int argc, char** argv) {
                 for (const auto& voice : voices)
                     std::cout << voice.name << "  " << voice.display << "  [" << voice.license << "]\n";
                 return 0;
-            }
-            bundle = std::make_unique<fluxvoice::ModelBundle>();
-            if (!bundle->load(model_dir, static_cast<int>(frames_per_step), error)) {
-                std::cerr << error << '\n';
+            } catch (const std::exception& e) {
+                std::cerr << "Cannot prepare " << (mode == Mode::S2UT ? "Mode B" : "Mode A") << ": "
+                          << e.what() << '\n';
                 return 1;
             }
-            const auto voice_index = [&](std::string_view name, std::uint16_t& out) -> bool {
-                std::string err;
-                const fluxvoice::VoiceEntry* v = fluxvoice::find_voice(bundle->voices, name, err);
-                if (!v) {
-                    std::cerr << err << '\n';
-                    return false;
+        }
+
+        // The CLI's preset / language / --param logic. ModeAHost calls this once
+        // per composition attempt (twice when a --vc translator quartet is
+        // unusable and the host retries as plain Mode A), after the models are
+        // in and before the pipeline is built. Diagnostics go to stderr here, in
+        // the order the pre-host main() printed them; returning false aborts the
+        // load (the message was already printed, so the error text stays empty).
+        const auto seed_params = [&](const fluxvoice::HostBundleInfo& info,
+                                     fluxvoice::VoiceParams& params,
+                                     fluxvoice::S2utOptions& s2ut_opts, std::string&) -> bool {
+            if (!info.translator_fallback.empty()) {
+                // Mode A must not depend on a valid Mode B quartet: the host
+                // retries with two models; forget everything the first try set.
+                std::cerr << "translator models present but unusable for live switching: "
+                          << info.translator_fallback << "; running Mode A only\n";
+                src_entry = tgt_entry = nullptr;
+                wait_k = fluxvoice::kDefaultWaitK;
+                voice_b_follows_a = true;
+                translation_msg = "translator models are unusable for live switching (see the startup warning)";
+            }
+            if (!info.translator_unavailable.empty()) {
+                // One language cannot be translated: plain Mode A bundle.
+                translation_msg = std::string(info.translator_unavailable);
+                std::cerr << "Note: " << translation_msg << "; running Mode A only\n";
+            }
+            const std::vector<fluxvoice::VoiceEntry>& voices = *info.voices;
+            if (info.langs) {
+                if (mode == Mode::VC) {
+                    // Start as Mode A on en -> es (else the first two languages);
+                    // a valid --preset src_lang/tgt_lang pair wins.
+                    const auto& l = *info.langs;
+                    const fluxvoice::LangEntry* en = l.find("en");
+                    const fluxvoice::LangEntry* es = l.find("es");
+                    src_entry = en && es ? en : &l.langs[0];
+                    tgt_entry = en && es ? es : &l.langs[1];
+                    if (preset_res.ok() && (preset_res.preset->src_lang || preset_res.preset->tgt_lang)) {
+                        fluxvoice::VoiceParams probe;
+                        std::string message;
+                        const std::string s_code = preset_res.preset->src_lang ? *preset_res.preset->src_lang
+                                                                               : src_entry->code;
+                        const std::string t_code = preset_res.preset->tgt_lang ? *preset_res.preset->tgt_lang
+                                                                               : tgt_entry->code;
+                        if (change_language_pair(l, probe, s_code, t_code, message) == PairChange::Applied) {
+                            src_entry = l.find(s_code);
+                            tgt_entry = l.find(t_code);
+                        } else {
+                            std::cerr << "preset: languages skipped: " << message << '\n';
+                        }
+                    }
+                    wait_k = l.default_k(src_entry->code, tgt_entry->code);
+                } else if (preset_res.ok()) {
+                    // CLI --src-lang/--tgt-lang win over the preset's pair.
+                    for (const auto* pl : {&preset_res.preset->src_lang, &preset_res.preset->tgt_lang}) {
+                        if (!*pl) continue;
+                        const fluxvoice::LangEntry* e = info.langs->find(**pl);
+                        if (!e || (e->id != src_entry->id && e->id != tgt_entry->id)) {
+                            std::cerr << "preset: src_lang/tgt_lang ignored under --s2ut; using --src-lang "
+                                      << src_entry->code << " --tgt-lang " << tgt_entry->code << '\n';
+                            break;
+                        }
+                    }
                 }
-                out = static_cast<std::uint16_t>(v - bundle->voices.data());
-                return true;
-            };
-            // Order: descriptor defaults -> preset params + voice names ->
-            // --voice / --voice-b -> --param assignments in command-line order.
-            fluxvoice::VoiceParams params;
-            if (preset_res.ok()) {
-                fluxvoice::apply_preset_params(*preset_res.preset, params);
-                if (preset_res.preset->voice_a &&
-                    !voice_index(*preset_res.preset->voice_a, params.voice_a))
-                    return 1;
-                if (preset_res.preset->voice_b &&
-                    !voice_index(*preset_res.preset->voice_b, params.voice_b))
-                    return 1;
-                if (preset_res.preset->voice_b) voice_b_follows_a = false;
             }
-            if (!voice_name.empty() && !voice_index(voice_name, params.voice_a)) return 1;
-            if (!voice_b_name.empty()) {
-                if (!voice_index(voice_b_name, params.voice_b)) return 1;
-                voice_b_follows_a = false;
+            if (src_entry && tgt_entry) {
+                // Seeded before presets/--param so those may override wait_k;
+                // --wait-k below wins over everything.
+                params.src_lang_id = static_cast<std::uint16_t>(src_entry->id);
+                params.tgt_lang_id = static_cast<std::uint16_t>(tgt_entry->id);
+                params.set(fluxvoice::ParamId::WaitK, static_cast<float>(wait_k));
             }
-            for (const auto& [d, v] : cli_assignments) params.set(d->id, v);
-            if (voice_b_follows_a) params.voice_b = params.voice_a;
+            if (!build_initial_params(voices, preset_res, voice_name, voice_b_name, cli_assignments,
+                                      params, voice_b_follows_a))
+                return false;
+            if (wait_k_arg != 0) params.set(fluxvoice::ParamId::WaitK, static_cast<float>(wait_k_arg));
+            if (mode == Mode::VC && params.enabled(fluxvoice::ParamId::Translate)) {
+                std::cerr << "preset/--param: translate ignored under --vc (use --s2ut or the "
+                             "console 'mode s2ut')\n";
+                params.set(fluxvoice::ParamId::Translate, 0.0f);
+            }
+            if (mode == Mode::S2UT) params.set(fluxvoice::ParamId::Translate, 1.0f);
             console_params = params;
-            console_voices = &bundle->voices;
-            const auto contract_rate = static_cast<std::uint32_t>(bundle->encoder.contract().sample_rate);
-            if (explicit_rate && sample_rate != contract_rate) {
-                std::cerr << "--sample-rate must equal the model contract rate (" << contract_rate << ")\n";
-                return 1;
+            if (explicit_rate && sample_rate != info.contract_rate) {
+                std::cerr << "--sample-rate must equal the model contract rate (" << info.contract_rate << ")\n";
+                return false;
             }
-            sample_rate = contract_rate;
-            std::vector<fluxvoice::PipelineVoice> pipeline_voices;
-            pipeline_voices.reserve(bundle->voices.size());
-            for (const fluxvoice::VoiceEntry& v : bundle->voices)
-                pipeline_voices.push_back(
-                    {v.stats, std::span<const float>(v.embedding.data(), v.embedding.size())});
-            fluxvoice::PipelineOptions options;
-            options.latency_target_samples = std::size_t{sample_rate} * latency_target_ms / 1000;
-            options.params = params;
-            vc_pipeline = std::make_unique<fluxvoice::InferencePipeline>(
-                bundle->encoder, bundle->vocoder, pipeline_voices, options);
-            if (!vc_pipeline->warm_up(20)) {
-                std::cerr << "Warm-up failed: " << vc_pipeline->last_error() << '\n';
-                return 1;
+            sample_rate = info.contract_rate;
+            if (info.langs) {
+                s2ut_opts.policy.k = wait_k_of(params);
+                s2ut_opts.policy.adaptive_mode = params.enabled(fluxvoice::ParamId::AdaptivePolicy);
+                s2ut_opts.src_lang_id = params.src_lang_id;
+                s2ut_opts.tgt_lang_id = params.tgt_lang_id;
+                s2ut_opts.translate = (mode == Mode::S2UT);
             }
-            if (vc_pipeline->governor().target_samples() + vc_pipeline->geometry().hop >
-                DuplexRouter::kQueueCapacity) {
-                std::cerr << "Latency target plus one hop exceeds the audio queue capacity\n";
-                return 1;
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Cannot prepare Mode A: " << e.what() << '\n';
+            return true;
+        };
+
+        // Mode B runs Stage 1 + 3 at s4 by default (the host applies that for
+        // kRequired). A --vc run keeps the M2 default (smallest available
+        // variant: Mode A latency comes first; pass --frames-per-step 4 when
+        // planning to switch to Mode B) and also loads the translator models
+        // when the bundle has them (kIfPresent), so the console can switch to
+        // Mode B live at that same hop.
+        fluxvoice::HostLoadRequest request;
+        request.model_dir = model_dir;
+        request.frames_per_step = static_cast<int>(frames_per_step);
+        request.latency_target_ms = latency_target_ms;
+        request.translator = mode == Mode::S2UT ? fluxvoice::TranslatorPolicy::kRequired
+                                                : fluxvoice::TranslatorPolicy::kIfPresent;
+        request.warm_up_steps = 20;
+        fluxvoice::HostError load_error;
+        if (!host.load(request, seed_params, load_error)) {
+            if (!load_error.message.empty()) std::cerr << load_error.message << '\n';
             return 1;
         }
+        console_voices = &host.voices();
+        console_langs = host.langs();
+        sample_rate = host.contract_rate();
     }
 
     MiniaudioBackend backend;
@@ -570,8 +814,8 @@ int main(int argc, char** argv) {
     ctrl_cfg.sample_rate = sample_rate;
     ctrl_cfg.period_ms   = period_ms;
     ctrl_cfg.passthrough = (mode == Mode::Passthrough && !has_loopback_arg);
-    ctrl_cfg.fade_underruns = (mode == Mode::VC);
-    if (mode == Mode::VC) ctrl_cfg.max_queued_samples = 0; // governor owns intentional skips
+    ctrl_cfg.fade_underruns = neural;
+    if (neural) host.configure(ctrl_cfg);  // contract rate, fade_underruns, governor owns skips
 
     ChunkAssembler chunks(fluxvoice::PipelineTiming::kChunkSamples,
                           fluxvoice::PipelineTiming::kContextSamples);
@@ -580,17 +824,28 @@ int main(int argc, char** argv) {
     std::atomic<bool> worker_run{false};
     std::atomic<uint64_t> output_drops{0};
     std::array<float, 4096> buf{};
-    std::thread worker;
-    std::unique_ptr<fluxvoice::ModeAWorker> vc_worker;
-    fluxvoice::ParamChannel param_channel;
+    std::thread worker;  // diagnostic modes only; the neural worker belongs to the host
 
     fluxvoice::AudioController controller(backend, ctrl_cfg);
-    if (vc_pipeline) {
-        vc_worker = std::make_unique<fluxvoice::ModeAWorker>(controller.router(), *vc_pipeline,
-                                                           &param_channel);
-        controller.set_prepare_hook([&] {
-            return controller.stream_info().client_sample_rate == sample_rate && vc_worker->prepare();
-        });
+    // Declared after the controller so it runs first on every exit path: the
+    // host's hooks must be cleared while the controller is still alive.
+    struct DetachGuard {
+        fluxvoice::ModeAHost& host;
+        ~DetachGuard() { host.detach(); }
+    } detach_guard{host};
+    if (neural) {
+        // Creates the worker, the prepare hook (client rate == contract rate,
+        // then prepare()) and the quiesce / reset / resume hooks.
+        fluxvoice::HostError attach_error;
+        if (!host.attach(controller, attach_error,
+                         [](const char* method, bool elevated, int result) {
+                             std::cerr << "[worker] priority=" << method
+                                       << " elevated=" << (elevated ? "yes" : "no")
+                                       << " result=" << result << '\n';
+                         })) {
+            std::cerr << attach_error.message << '\n';
+            return 1;
+        }
     }
     fluxvoice::AudioDeviceRegistry& registry = controller.registry();
 
@@ -654,7 +909,6 @@ int main(int argc, char** argv) {
     auto reset_dsp = [&] {
         chunks.reset();
         pipeline.reset();
-        if (vc_worker) vc_worker->reset();
     };
     auto start_worker = [&] {
         if (!use_worker || worker.joinable()) return;
@@ -669,12 +923,6 @@ int main(int argc, char** argv) {
                                        std::memory_order_relaxed);
             };
             while (worker_run.load(std::memory_order_relaxed)) {
-                if (vc_worker) {
-                    if (!vc_worker->pump()) break;
-                    if (controller.router().input_queued_approx() == 0)
-                        std::this_thread::sleep_for(std::chrono::microseconds(500));
-                    continue;
-                }
                 size_t n = controller.read_input(buf.data(), buf.size());
                 if (n == 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -699,7 +947,8 @@ int main(int argc, char** argv) {
         });
     };
 
-    controller.set_worker_hooks(stop_worker, reset_dsp, start_worker);
+    // The neural worker's hooks were installed by host.attach().
+    if (!neural) controller.set_worker_hooks(stop_worker, reset_dsp, start_worker);
 
     auto start_res = controller.open_and_start(in_sel, out_sel, capture_mode);
     if (!fluxvoice::is_ok(start_res)) {
@@ -711,17 +960,28 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_stop_signal);
 
     print_stream_info(controller.stream_info(), controller.status(), period_ms);
-    if (vc_pipeline)
-        std::cout << "Pipeline: s" << vc_pipeline->geometry().frames_per_step
-                  << ", hop=" << vc_pipeline->geometry().hop
-                  << " samples, algorithmic=" << vc_pipeline->geometry().algorithmic_samples()
-                  << " samples, target=" << vc_pipeline->governor().target_samples()
+    if (neural)
+        std::cout << "Pipeline: s" << host.geometry().frames_per_step
+                  << ", hop=" << host.geometry().hop
+                  << " samples, algorithmic=" << host.geometry().algorithmic_samples()
+                  << " samples, target=" << host.governor_target_samples()
                   << " samples, voice="
                   << console_voices->at(console_params.voice_a).name
                   << (console_params.voice_b != console_params.voice_a
                           ? ", voice_b=" + console_voices->at(console_params.voice_b).name
                           : "")
                   << '\n';
+    if (console_langs) {
+        const fluxvoice::VoiceParams& p0 = console_params;
+        const std::int64_t onset = host.onset_latency_samples(wait_k_of(p0));
+        std::cout << (mode == Mode::S2UT ? "Mode B: " : "Translator models loaded (starting as Mode A): ")
+                  << pair_status(*console_langs, p0)
+                  << ", wait-k=" << wait_k_of(p0)
+                  << ", frames_per_step=" << host.geometry().frames_per_step
+                  << ", algorithmic onset latency="
+                  << 1000.0 * static_cast<double>(onset) / static_cast<double>(sample_rate)
+                  << " ms\n";
+    }
     std::cout << "FluxVoice running (" << mode_name(mode) << "). ";
     if (duration_s > 0) std::cout << "Stopping after " << duration_s << " s; Ctrl+C to stop early.\n";
     else                std::cout << "Press Enter or Ctrl+C to stop.\n";
@@ -778,15 +1038,20 @@ int main(int argc, char** argv) {
         if (cmd == "help") {
             std::cout << "Commands: set <param> <value> | set voice_a|voice_b <name>\n"
                          "          get [param] | preset <name> | save <name> | voices | help\n"
+                         "          mode vc|s2ut         switch Mode A / Mode B (translator bundle)\n"
+                         "          lang <src> <tgt>     language pair (codes or ids; resets wait_k)\n"
+                         "          waitk <1..10>        shortcut for 'set wait_k'\n"
+                         "          langs                list languages and the current pair\n"
                          "          (empty line stops)\n";
             return;
         }
-        if (cmd != "set" && cmd != "get" && cmd != "preset" && cmd != "save" && cmd != "voices") {
+        if (cmd != "set" && cmd != "get" && cmd != "preset" && cmd != "save" && cmd != "voices" &&
+            cmd != "mode" && cmd != "lang" && cmd != "waitk" && cmd != "langs") {
             std::cout << "unknown command '" << cmd << "' (try 'help')\n";
             return;
         }
         if (!vc) {
-            std::cout << cmd << ": voice controls need --vc\n";
+            std::cout << cmd << ": voice controls need --vc or --s2ut\n";
             return;
         }
         if (cmd == "set") {
@@ -811,7 +1076,7 @@ int main(int argc, char** argv) {
                     console_params.voice_b = idx;
                     voice_b_follows_a = false;
                 }
-                param_channel.push(console_params);
+                host.push_params(console_params);
                 std::cout << key << " = " << v->name << '\n';
                 return;
             }
@@ -823,18 +1088,89 @@ int main(int argc, char** argv) {
                 return;
             }
             if (!warning.empty()) std::cout << "set: " << warning << '\n';
+            if (d->group == fluxvoice::ParamGroup::Translation && !console_langs) {
+                std::cout << "set: " << translation_msg << '\n';
+                return;
+            }
             console_params.set(d->id, v);
-            param_channel.push(console_params);
+            host.push_params(console_params);
             print_param(*d);
+            return;
+        }
+        if (cmd == "mode") {
+            std::string arg;
+            ss >> arg;
+            if (arg != "vc" && arg != "s2ut") {
+                std::cout << "usage: mode vc|s2ut\n";
+                return;
+            }
+            if (!console_langs) {
+                std::cout << "mode: " << translation_msg << '\n';
+                return;
+            }
+            console_params.set(fluxvoice::ParamId::Translate, arg == "s2ut" ? 1.0f : 0.0f);
+            host.push_params(console_params);
+            std::cout << "mode: " << pair_status(*console_langs, console_params) << '\n';
+            return;
+        }
+        if (cmd == "lang") {
+            std::string src, tgt, extra;
+            ss >> src >> tgt >> extra;
+            if (src.empty() || tgt.empty() || !extra.empty()) {
+                std::cout << "usage: lang <src> <tgt>\n";
+                return;
+            }
+            if (!console_langs) {
+                std::cout << "lang: " << translation_msg << '\n';
+                return;
+            }
+            fluxvoice::VoiceParams next = console_params;
+            std::string message;
+            const PairChange r = change_language_pair(*console_langs, next, src, tgt, message);
+            if (r != PairChange::Applied) {
+                std::cout << "lang: " << message << '\n';
+                return;
+            }
+            console_params = next;
+            host.push_params(console_params);
+            std::cout << "lang: " << message << '\n';
+            return;
+        }
+        if (cmd == "waitk") {
+            std::string arg, extra;
+            ss >> arg >> extra;
+            int k = 0;
+            if (arg.empty() || !extra.empty() || !parse_wait_k(arg, k)) {
+                std::cout << "waitk: expected an integer in [1, 10]\n";
+                return;
+            }
+            if (!console_langs) {
+                std::cout << "waitk: " << translation_msg << '\n';
+                return;
+            }
+            console_params.set(fluxvoice::ParamId::WaitK, static_cast<float>(k));
+            host.push_params(console_params);
+            print_param(fluxvoice::param_desc(fluxvoice::ParamId::WaitK));
+            return;
+        }
+        if (cmd == "langs") {
+            if (!console_langs) {
+                std::cout << "langs: " << translation_msg << '\n';
+                return;
+            }
+            print_langs(std::cout, *console_langs);
+            std::cout << pair_status(*console_langs, console_params) << '\n';
             return;
         }
         if (cmd == "get") {
             std::string arg;
             ss >> arg;
             if (arg.empty()) {
-                // Mode A has no translation controls; don't list them.
+                // Translation controls only exist with translator models loaded.
                 for (const fluxvoice::ParamDesc& d : fluxvoice::kParams)
-                    if (d.group != fluxvoice::ParamGroup::Translation) print_param(d);
+                    if (d.group != fluxvoice::ParamGroup::Translation || console_langs) print_param(d);
+                if (console_langs)
+                    std::cout << "translation = " << pair_status(*console_langs, console_params) << '\n';
                 std::cout << "voice_a = " << voice_name_of(console_params.voice_a) << '\n'
                           << "voice_b = " << voice_name_of(console_params.voice_b) << '\n';
                 return;
@@ -867,9 +1203,12 @@ int main(int argc, char** argv) {
                 return;
             }
             for (const std::string& w : r.warnings) std::cout << "preset: " << w << '\n';
-            // Resolve the voice names first: an unknown name must not leave the
-            // params half-applied.
-            std::uint16_t va = console_params.voice_a, vb = console_params.voice_b;
+            // Work on a copy and commit at the end: an unknown voice or an
+            // invalid language pair must not leave the params half-applied,
+            // and the pipeline only ever sees snapshots already validated here.
+            fluxvoice::Preset preset = *r.preset;
+            fluxvoice::VoiceParams next = console_params;
+            std::uint16_t va = next.voice_a, vb = next.voice_b;
             bool vb_follows = voice_b_follows_a;
             const auto resolve = [&](const std::optional<std::string>& name_opt,
                                      std::uint16_t& out) -> bool {
@@ -883,13 +1222,50 @@ int main(int argc, char** argv) {
                 out = static_cast<std::uint16_t>(v - console_voices->data());
                 return true;
             };
-            if (!resolve(r.preset->voice_a, va) || !resolve(r.preset->voice_b, vb)) return;
-            if (r.preset->voice_b) vb_follows = false;
-            fluxvoice::apply_preset_params(*r.preset, console_params);
-            console_params.voice_a = va;
-            console_params.voice_b = vb_follows && r.preset->voice_a ? va : vb;
+            if (!resolve(preset.voice_a, va) || !resolve(preset.voice_b, vb)) return;
+            if (preset.voice_b) vb_follows = false;
+            // The translation mode switch goes through the same availability
+            // check as 'mode'; the language pair through the same validation
+            // as 'lang'. Omitted keys leave mode, languages and wait_k alone.
+            const auto translate_req = preset.params[fluxvoice::param_index(fluxvoice::ParamId::Translate)];
+            const auto wait_k_req = preset.params[fluxvoice::param_index(fluxvoice::ParamId::WaitK)];
+            preset.params[fluxvoice::param_index(fluxvoice::ParamId::Translate)].reset();
+            if (!console_langs) {
+                // Nothing translation-related can be accepted without translator models.
+                for (const fluxvoice::ParamDesc& d : fluxvoice::kParams)
+                    if (d.group == fluxvoice::ParamGroup::Translation)
+                        preset.params[fluxvoice::param_index(d.id)].reset();
+                if (translate_req || preset.src_lang || preset.tgt_lang)
+                    std::cout << "preset: translation settings ignored: "
+                              << translation_msg << '\n';
+            }
+            fluxvoice::apply_preset_params(preset, next);
+            next.voice_a = va;
+            next.voice_b = vb_follows && preset.voice_a ? va : vb;
+            if (console_langs && (preset.src_lang || preset.tgt_lang)) {
+                const auto* cur_s = console_langs->find(std::to_string(next.src_lang_id));
+                const auto* cur_t = console_langs->find(std::to_string(next.tgt_lang_id));
+                const std::string s_code = preset.src_lang ? *preset.src_lang : (cur_s ? cur_s->code : "");
+                const std::string t_code = preset.tgt_lang ? *preset.tgt_lang : (cur_t ? cur_t->code : "");
+                fluxvoice::VoiceParams paired = next;
+                std::string message;
+                if (change_language_pair(*console_langs, paired, s_code, t_code, message) ==
+                    PairChange::Applied) {
+                    // An unchanged pair keeps wait_k; a preset that carries wait_k
+                    // keeps it over the new pair's default.
+                    if (paired.src_lang_id == next.src_lang_id && paired.tgt_lang_id == next.tgt_lang_id)
+                        paired.set(fluxvoice::ParamId::WaitK, next.get(fluxvoice::ParamId::WaitK));
+                    if (wait_k_req) paired.set(fluxvoice::ParamId::WaitK, *wait_k_req);
+                    next = paired;
+                } else {
+                    std::cout << "preset: languages skipped: " << message << '\n';
+                }
+            }
+            if (translate_req && console_langs)
+                next.set(fluxvoice::ParamId::Translate, *translate_req);
+            console_params = next;
             voice_b_follows_a = vb_follows;
-            param_channel.push(console_params);
+            host.push_params(console_params);
             std::cout << "preset '" << r.preset->name << "' applied\n";
             return;
         }
@@ -937,13 +1313,12 @@ int main(int argc, char** argv) {
     auto next_stats = t0 + std::chrono::seconds(stats_s);
     int exit_code = 0;
     const auto take_snapshot = [&] {
-        return snapshot(controller.router(), output_drops, vc_worker.get(), vc_pipeline.get(),
-                        &controller.stream_info());
+        return neural ? host.stats() : legacy_stats(controller.router(), output_drops);
     };
     while (!g_stop.load()) {
         const auto now = std::chrono::steady_clock::now();
-        if (vc_worker && vc_worker->failed()) {
-            std::cerr << "Inference stopped after repeated failures: " << vc_worker->error() << '\n';
+        if (host.failed()) {
+            std::cerr << "Inference stopped after repeated failures: " << host.error() << '\n';
             exit_code = 1;
             break;
         }
@@ -957,12 +1332,12 @@ int main(int argc, char** argv) {
             break;
         }
         if (duration_s > 0 && now >= deadline) break;
-        param_channel.flush();
+        host.flush_params();
         std::string line;
         while (console_lines->try_dequeue(line)) handle_line(line);
         if (stats_s > 0 && now >= next_stats) {
             const double t = std::chrono::duration<double>(now - t0).count();
-            std::cout << stats_line(t, take_snapshot()) << std::endl;
+            std::cout << fluxvoice::format_stats_line(t, take_snapshot()) << std::endl;
             next_stats += std::chrono::seconds(stats_s);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -971,7 +1346,7 @@ int main(int argc, char** argv) {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     // Before teardown: callbacks that run after the worker stops would count
     // as underruns that are not the stream's fault (BEST_PRACTICES §3.5).
-    const Snapshot end = take_snapshot();
+    const fluxvoice::HostStats end = take_snapshot();
     const uint32_t active_rate =
         controller.stream_info().client_sample_rate > 0
             ? controller.stream_info().client_sample_rate
@@ -979,7 +1354,7 @@ int main(int argc, char** argv) {
 
     controller.stop();
 
-    if (stats_s > 0) std::cout << stats_line(elapsed, end) << '\n';
+    if (stats_s > 0) std::cout << fluxvoice::format_stats_line(elapsed, end) << '\n';
     std::cout << "Stopped after " << elapsed << " s.\n"
               << "Stats: frames processed = " << end.frames
               << ", input overruns = " << end.overruns
@@ -989,5 +1364,6 @@ int main(int argc, char** argv) {
               << "Queued audio: " << end.queued << " samples ("
               << 1000.0 * static_cast<double>(end.queued) / static_cast<double>(active_rate)
               << " ms); RSS " << end.rss / 1024 << " KB\n";
+    if (end.s2ut) print_s2ut_summary(end);
     return exit_code;
 }

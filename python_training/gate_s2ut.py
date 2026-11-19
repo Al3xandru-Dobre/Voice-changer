@@ -72,7 +72,7 @@ MIN_UTMOS = 3.0
 MAX_ONSET_MS = 500.0
 MAX_COMPUTE_P95_MS = 40.0           # 50 % of an 80 ms chunk
 MAX_HALLUCINATED_WORDS = 0
-MAX_FLUSH_TAIL_CHUNKS = 3           # Definition of done (audited, reported)
+MAX_FLUSH_TAIL_CHUNKS = 3           # Definition of done (gating: BUG-030)
 
 IO_FLOOR_MS = 25.0                  # master latency budget (00_master.md)
 GOVERNOR_MARGIN_MS = 10.0
@@ -84,7 +84,7 @@ TEST_LISTS = {pair: f"test_{pair.replace('->', '_')}_200.tsv" for pair in PAIRS}
 TORTURE_LIST = "reordering_torture_60.tsv"
 SILENCE_LIST = "silence_hallucination_20.tsv"
 UNIT_MODES = ("stacked_4", "reduced_dur")
-CHECKS = ("bleu", "utmos", "onset", "al", "compute", "silence")
+CHECKS = ("bleu", "utmos", "onset", "al", "compute", "silence", "flush")
 PAIR_HEADERS = {"es->en": "`Es→En` BLEU", "fr->en": "`Fr→En` BLEU", "de->en": "`De→En` BLEU",
                 "en->es": "`En→Es` BLEU", "en->fr": "`En→Fr` BLEU", "en->de": "`En→De` BLEU"}
 
@@ -232,14 +232,46 @@ def check_row(row):
         ok = words <= MAX_HALLUCINATED_WORDS
         checks["silence"] = {"ok": ok, "detail": "" if ok else
                              f"{int(words)} hallucinated word(s) on silence/noise"}
+
+    # BUG-030: the flush audit gates. A decoder that keeps writing past the
+    # last unit frame, hits the flush bound / step cap without <EOS>, speaks
+    # past the tail allowance, or leaves non-silent audio after it cannot be
+    # eligible — before, a babbling decoder scored flush_tail_chunks = 0 PASS.
+    tail = _num(row.get("flush_tail_chunks_max"))
+    capped = _num(row.get("flush_capped"))
+    tail_words = _num(row.get("tail_hallucinated_words"))
+    trailing = _num(row.get("trailing_non_silent_ms"))
+    bad = []
+    if tail is None and words is None:
+        bad.append("silence_hallucination_20 not scored")
+    else:
+        if tail is None:
+            bad.append("flush tail not measured")
+        elif tail > MAX_FLUSH_TAIL_CHUNKS:
+            bad.append(f"flush tail {tail:.0f} chunk(s) after the last unit frame "
+                       f"(max {MAX_FLUSH_TAIL_CHUNKS})")
+        if capped is None:
+            bad.append("flush termination not measured")
+        elif capped > 0:
+            bad.append(f"{capped:.0f} utterance(s) hit the flush bound without <EOS>")
+        if tail_words is None:
+            bad.append("tail hallucinations not measured")
+        elif tail_words > MAX_HALLUCINATED_WORDS:
+            bad.append(f"{int(tail_words)} word(s) spoken past the tail allowance")
+        if trailing is None:
+            bad.append("trailing non-silence not measured")
+        elif trailing > MAX_FLUSH_TAIL_CHUNKS * CHUNK_MS:
+            bad.append(f"trailing non-silence {trailing:.0f} ms "
+                       f"(max {MAX_FLUSH_TAIL_CHUNKS * CHUNK_MS:.0f} ms)")
+    checks["flush"] = {"ok": not bad, "detail": "; ".join(bad)}
     return {name: checks[name] for name in CHECKS}
 
 
 def _pair_ok(checks, pair):
     """Rules that hold for one direction: its BLEU floor, AL limit and target
-    UTMOS, plus the pair-independent rules (onset, compute, silence)."""
+    UTMOS, plus the pair-independent rules (onset, compute, silence, flush)."""
     return all(checks[c]["pairs"][pair] for c in ("bleu", "utmos", "al")) and \
-        all(checks[c]["ok"] for c in ("onset", "compute", "silence"))
+        all(checks[c]["ok"] for c in ("onset", "compute", "silence", "flush"))
 
 
 def apply_gate_rules(rows):
@@ -397,6 +429,7 @@ def summarize_candidate(cand, results, stats, encoder_lookahead_frames=ENCODER_L
     if silence:
         row["hallucinated_words"] = silence.get("hallucinated_words")
         row["noise_hallucination_rate"] = silence.get("noise_hallucination_rate")
+        row["tail_hallucinated_words"] = silence.get("tail_hallucinated_words")
         row["trailing_non_silent_ms"] = silence.get("trailing_non_silent_ms")
     write_ms = stats.get("write_ms") or []
     row.update(
@@ -407,6 +440,7 @@ def summarize_candidate(cand, results, stats, encoder_lookahead_frames=ENCODER_L
         first_write_chunks=_mean(stats.get("first_write_chunks") or []),
         flush_tail_chunks_max=max(stats["flush_tail_chunks"]) if stats.get("flush_tail_chunks")
         else None,
+        flush_capped=stats.get("flush_capped", 0),
         exporter=stats.get("exporter"), fallback_reason=stats.get("fallback_reason"),
         fifo_overflows=stats.get("fifo_overflows", 0))
     row["projected_onset_ms"] = projected_onset_ms(row["first_write_chunks"], row["compute_p95_ms"],
@@ -504,6 +538,7 @@ def convert_utterance(wav, translator, frontend, vocoder, vad_dbfs=-55.0, max_ta
     padded = np.zeros((n_src + max_tail_chunks) * hop, np.float32)
     padded[:len(wav)] = wav
     src_ms = 1000.0 * len(wav) / cfg.sample_rate
+    capped_before = translator.policy.flushes_without_eos
     translator.reset()
     frontend.reset()
     vocoder.reset()
@@ -537,6 +572,7 @@ def convert_utterance(wav, translator, frontend, vocoder, vad_dbfs=-55.0, max_ta
             break
     stats = {"first_write_chunks": first_write, "fifo_overflows": fifo.overflows,
              "flush_tail_chunks": flush_tail_chunks(steps),
+             "flushes_without_eos": translator.policy.flushes_without_eos - capped_before,
              "write_ms": [s["elapsed_ms"] for s in steps if s["writes"] and s["encoded"]
                           and s["vocoded"]],
              "read_ms": [s["elapsed_ms"] for s in steps if s["encoded"] and not s["writes"]]}
@@ -553,7 +589,7 @@ def convert_list(list_path, make_translator, frontend, vocoder, out_dir, limit=N
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     merged = {"write_ms": [], "read_ms": [], "first_write_chunks": [], "flush_tail_chunks": [],
-              "fifo_overflows": 0}
+              "flush_capped": 0, "fifo_overflows": 0}
     with open(out_dir / "trace.jsonl", "w", encoding="utf-8", newline="\n") as trace, \
             open(out_dir / "timing.csv", "w", encoding="utf-8", newline="") as timing:
         tw = csv.writer(timing, lineterminator="\n")
@@ -569,18 +605,21 @@ def convert_list(list_path, make_translator, frontend, vocoder, out_dir, limit=N
                 merged[key] += stats[key]
             if r.get("kind", "paired") != "noise_only":
                 merged["flush_tail_chunks"].append(stats["flush_tail_chunks"])
+                merged["flush_capped"] += stats["flushes_without_eos"] > 0
             merged["fifo_overflows"] += stats["fifo_overflows"]
             if (n + 1) % 50 == 0:
                 log(f"    {n + 1}/{len(rows)}")
     return merged
 
 
-def make_runtime_factory(model, runtime, onnx_dir, exporter="auto"):
+def make_runtime_factory(model, runtime, onnx_dir, exporter="auto", labels_meta=None,
+                         include_noncommercial=False):
     """(factory(src, tgt) -> translator runtime, clock, export record)."""
     from fvml import s2ut_stream as ss
     if runtime == "torch":
         return (lambda src, tgt: ss.TorchRuntime(model, src, tgt)), "torch", None
-    rec = ss.export_step_graphs(model, onnx_dir, exporter=exporter)
+    rec = ss.export_step_graphs(model, onnx_dir, exporter=exporter, labels_meta=labels_meta,
+                                include_noncommercial=include_noncommercial)
     return (lambda src, tgt: ss.OrtRuntime(rec["encoder"], rec["decoder"], model.cfg, src, tgt)), \
         "ort", rec
 
@@ -619,7 +658,7 @@ def run_candidate(cand, runtime, frontend, vocoder, lists, out_dir, *, scorer=No
 
     clocks = {clock, getattr(frontend, "clock", "unknown"), getattr(vocoder, "clock", "unknown")}
     stats = {"write_ms": [], "read_ms": [], "first_write_chunks": [], "flush_tail_chunks": [],
-             "fifo_overflows": 0, "clock": "ort" if clocks == {"ort"} else "+".join(sorted(clocks)),
+             "flush_capped": 0, "fifo_overflows": 0, "clock": "ort" if clocks == {"ort"} else "+".join(sorted(clocks)),
              "exporter": rec and f"{rec['encoder_exporter']}/{rec['decoder_exporter']}",
              "fallback_reason": rec and rec["fallback_reason"]}
     results = {}
@@ -632,12 +671,14 @@ def run_candidate(cand, runtime, frontend, vocoder, lists, out_dir, *, scorer=No
                 stats[key] += merged[key]
         if name == SILENCE_LIST:
             stats["flush_tail_chunks"] += merged["flush_tail_chunks"]
+            stats["flush_capped"] += merged["flush_capped"]
         stats["fifo_overflows"] += merged["fifo_overflows"]
         cfg = s2ut_eval.S2utEvalConfig(
             eval_list=path, converted=conv, trace=conv / "trace.jsonl",
             targets=targets if voice else None, voice=voice,
             metrics=list_metrics(name, bool(voice and targets)), device=device,
-            batch_size=batch_size, timing=conv / "timing.csv", limit=limit)
+            batch_size=batch_size, timing=conv / "timing.csv", limit=limit,
+            wait_ms=cand.k * CHUNK_MS)
         results[name] = scorer(cfg, out_dir / "eval" / cand.slug / pathlib.Path(name).stem)
     row = summarize_candidate(cand, results, stats, encoder_lookahead_frames)
     row["lists"] = sorted(results)
@@ -683,6 +724,7 @@ def write_report(out_dir, rows, decision, meta, notes, langs_json=None):
 def run_gate(args, log=print):
     import numpy as np
     from fvml import contract as fc
+    from fvml import export as fx
     from fvml import paths
     from fvml import translator as tr
     cands = ([parse_candidate(s) for s in args.candidates.split(",") if s.strip()]
@@ -715,7 +757,12 @@ def run_gate(args, log=print):
                  + " (the translator prosody head is Stage 06)")
     models = {}
     for mode in {c.unit_mode for c in cands}:
-        model, _ = tr.S2utTranslator.from_checkpoint(checkpoints[mode], runtime_only=True)
+        model, ck = tr.S2utTranslator.from_checkpoint(checkpoints[mode], runtime_only=True)
+        labels_meta = json.loads(ck.get("labels_meta") or "{}")
+        fx.noncommercial_license(labels_meta, tr.LICENSE, args.include_noncommercial)  # BUG-031
+        if labels_meta.get("noncommercial"):
+            notes.append(f"{mode}: trained on non-commercial units "
+                         f"({labels_meta.get('license')}); research only, not for distribution")
         if model.cfg.unit_mode != mode:
             raise ValueError(f"{checkpoints[mode]} is a {model.cfg.unit_mode} checkpoint, "
                              f"expected {mode}")
@@ -725,7 +772,9 @@ def run_gate(args, log=print):
         log(f"[gate] {mode}: {model.param_counts()['runtime'] / 1e6:.2f}M run-time parameters, "
             f"translator runtime {args.runtime}")
         models[mode] = make_runtime_factory(model, args.runtime,
-                                            pathlib.Path(args.out) / "onnx" / mode, args.exporter)
+                                            pathlib.Path(args.out) / "onnx" / mode, args.exporter,
+                                            labels_meta=labels_meta,
+                                            include_noncommercial=args.include_noncommercial)
     rows = []
     for cand in cands:
         rows.append(run_candidate(
@@ -807,7 +856,8 @@ def fake_row(cand, **overrides):
            "al_ms": {p: MAX_AL_MS[p] - 200.0 for p in PAIRS},
            "utmos": {lang: 3.4 for lang in TARGET_LANGS},
            "compute_clock": "ort", "compute_p95_ms": 30.0, "first_write_chunks": float(cand.k),
-           "hallucinated_words": 0, "flush_tail_chunks_max": 1}
+           "hallucinated_words": 0, "flush_tail_chunks_max": 1, "flush_capped": 0,
+           "tail_hallucinated_words": 0, "trailing_non_silent_ms": 100.0}
     row.update(overrides)
     row.setdefault("projected_onset_ms",
                    projected_onset_ms(row["first_write_chunks"], row["compute_p95_ms"]))
@@ -868,6 +918,17 @@ def self_test():
     check(not r["eligible"] and r["reasons"][0].startswith("onset:"), "onset over 500 ms")
     r = verdict(hallucinated_words=1)[0]
     check(not r["eligible"] and r["reasons"][0].startswith("silence:"), "one hallucinated word")
+    # BUG-030: the flush audit gates - babble, a flush bound without <EOS>,
+    # words past the tail allowance and excess trailing audio each disqualify.
+    r = verdict(flush_tail_chunks_max=4)[0]
+    check(not r["eligible"] and r["reasons"][0].startswith("flush:")
+          and "after the last unit frame" in r["reasons"][0], "flush tail chunks gate")
+    r = verdict(flush_capped=2)[0]
+    check(not r["eligible"] and "without <EOS>" in r["reasons"][0], "flush bound gates")
+    r = verdict(tail_hallucinated_words=3)[0]
+    check(not r["eligible"] and "past the tail allowance" in r["reasons"][0], "tail babble gates")
+    r = verdict(trailing_non_silent_ms=500.0)[0]
+    check(not r["eligible"] and "trailing non-silence" in r["reasons"][0], "trailing audio gates")
 
     # BUG-015: a PyTorch-clock p95 never makes a candidate eligible, however small.
     r, d = verdict(compute_clock="torch", compute_p95_ms=5.0)
@@ -960,7 +1021,8 @@ def self_test():
              ((0, 0), (4, 1), (4, 1), (2, 1), (0, 1), (0, 1), (0, 0))]
     check(flush_tail_chunks(steps) == 2 and flush_tail_chunks(steps[:1]) == 0, "flush tail")
     r = apply_gate_rules([fake_row(Candidate("waitk", 3), flush_tail_chunks_max=4)])[0][0]
-    check(r["dod_flush_tail_ok"] is False and r["eligible"], "flush tail is audited, not gating")
+    check(r["dod_flush_tail_ok"] is False and not r["eligible"]
+          and r["reasons"][0].startswith("flush:"), "flush tail gates eligibility (BUG-030)")
     summary = summarize_candidate(
         Candidate("waitk", 3),
         {TEST_LISTS["es->en"]: {"asr_bleu": 25.0, "al_ms": 900.0, "utmos": 3.2, "n": 100},
@@ -999,6 +1061,8 @@ def parse_args(argv=None):
     p.add_argument("--langs-json", help="langs.json to merge default_wait_k into "
                                         "(default <bundle>/langs.json)")
     p.add_argument("--vad-dbfs", type=float, default=-55.0)
+    p.add_argument("--include-noncommercial", action="store_true",
+                   help="allow checkpoints trained on non-commercial units (research only)")
     p.add_argument("--limit", type=int, help="first N utterances per list (smoke runs)")
     p.add_argument("--device", default="cuda", help="scoring device (Whisper, ECAPA, UTMOS)")
     p.add_argument("--batch-size", type=int, default=8)

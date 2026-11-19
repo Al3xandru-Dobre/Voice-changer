@@ -53,8 +53,13 @@ _U32_MAX = 0xFFFFFFFF
 
 
 def _f32(x: float) -> float:
-    """Round a Python float to the nearest IEEE-754 binary32 (C++ `float`)."""
-    return struct.unpack("<f", struct.pack("<f", x))[0]
+    """Round a Python float to the nearest IEEE-754 binary32 (C++ `float`).
+    Out-of-range values become +-inf, like a C++ double -> float conversion
+    (struct.pack raises instead)."""
+    try:
+        return struct.unpack("<f", struct.pack("<f", x))[0]
+    except OverflowError:
+        return math.copysign(math.inf, x)
 
 
 def _clamp(v, lo, hi):
@@ -117,6 +122,7 @@ class WaitKPolicy:
         self._vad_seen = False
         self.flushes_completed = 0
         self.flush_resumes = 0
+        self.flushes_without_eos = 0
         self.reset()
 
     # ---- configuration -------------------------------------------------
@@ -130,6 +136,14 @@ class WaitKPolicy:
 
     def set_k(self, k: int) -> None:
         self._k = _clamp(int(k), K_MIN, K_MAX)
+
+    def set_adaptive_mode(self, on: bool) -> None:
+        """Live strict <-> CTC-adaptive switch (M3 Stage 09 `adaptive_policy`):
+        takes effect on the next decide(); the banked readiness restarts from 0
+        so a stale bank never releases a write in the new mode. t_src, t_tgt
+        and the phase are kept (no translator reset)."""
+        self._cfg.adaptive_mode = bool(on)
+        self._readiness = 0.0
 
     @property
     def chunk_ms(self) -> int:
@@ -245,7 +259,7 @@ class WaitKPolicy:
             self._flush_steps += 1
             if (is_eos or self._t_tgt >= self._flush_target
                     or self._flush_steps >= self._cfg.max_flush_steps):
-                self._complete()
+                self._complete(is_eos)
             return
         if is_eos and self._silence_ms > 0:
             # <EOS> while the user is already silent: caught up, so the pending
@@ -296,18 +310,20 @@ class WaitKPolicy:
     # ---- internals -----------------------------------------------------
     def _begin_flush(self) -> None:
         if self._eos_seen or self._t_src == 0:
-            self._complete()
+            self._complete(self._eos_seen)
             return
         self._flush_target = math.ceil(self._cfg.max_flush_ratio * self._t_src)
         if self._t_tgt >= self._flush_target:
-            self._complete()
+            self._complete(False)
             return
         self._phase = Phase.FLUSHING
         self._flush_steps = 0
 
-    def _complete(self) -> None:
+    def _complete(self, by_eos: bool) -> None:
         self.reset()
         self.flushes_completed += 1
+        if not by_eos:
+            self.flushes_without_eos += 1
 
 
 # ---------------------------------------------------------------------------
@@ -323,8 +339,15 @@ class PushResult:
 class UnitProsodyFifo:
     """Fixed-capacity frame ring between translator_dec (chunk_frames frames per
     step) and the vocoder (1, 2 or 4 frames per hop). A frame is
-    (unit, z_logf0, voicing, aperiodicity, z_energy) - the contract's `prosody`
-    column order."""
+    (unit, z_logf0, voicing, aperiodicity, z_energy, pad): the contract's
+    `prosody` column order (stored as float32, like the C++ Frame) plus the
+    pad flag of pad_to_multiple().
+
+    BUG-028 (stranded tail frames): push_chunk() drops everything from the
+    first special unit, so an <EOS> chunk queues 1..3 frames that an s2/s4
+    vocoder could never pop. After each push the Mode B pipeline calls
+    pad_to_multiple(hop frames); the pad frames keep the queue hop-aligned and
+    the pipeline renders them as silence."""
 
     PROSODY_DIMS = 4
 
@@ -343,6 +366,9 @@ class UnitProsodyFifo:
     def free(self) -> int:
         return self.capacity - self._size
 
+    def empty(self) -> bool:
+        return self._size == 0
+
     def clear(self) -> None:
         self._head = 0
         self._size = 0
@@ -352,7 +378,7 @@ class UnitProsodyFifo:
         unit (< 0 or >= vocab: <PAD>/<EOS>/<BOS>) onwards are dropped. All valid
         frames are queued, or none (overflow)."""
         units = [int(u) for u in units]
-        prosody = [float(p) for p in prosody]
+        prosody = [_f32(float(p)) for p in prosody]
         n = min(len(units), len(prosody) // self.PROSODY_DIMS)
         valid = n
         eos = False
@@ -367,24 +393,58 @@ class UnitProsodyFifo:
             return PushResult(0, eos, True)
         tail = (self._head + self._size) % self.capacity
         for i in range(valid):
-            self._buf[tail] = (units[i], *prosody[4 * i:4 * i + 4])
+            self._buf[tail] = (units[i], *prosody[4 * i:4 * i + 4], False)
             tail = (tail + 1) % self.capacity
         self._size += valid
         return PushResult(valid, eos, False)
 
-    def pop_hop(self, n_frames: int):
-        """Returns (units, prosody rows) for exactly n_frames, or None when
-        fewer are queued (the caller emits silence)."""
+    def pad_to_multiple(self, n_frames: int) -> int:
+        """Complete the queue to a multiple of `n_frames` (the vocoder hop) with
+        pad frames: the newest frame's unit, z_logf0 and z_energy, voicing 0,
+        aperiodicity 1, pad = True. Returns the number of pad frames appended:
+        0 when already aligned, when empty or when n_frames <= 1. Needs room
+        for them (keep capacity a multiple of n_frames); without it nothing is
+        padded and an overflow is counted."""
+        n_frames = int(n_frames)
+        if n_frames <= 1 or self._size == 0:
+            return 0
+        rem = self._size % n_frames
+        if rem == 0:
+            return 0
+        pads = n_frames - rem
+        if pads > self.free():
+            self.overflows += 1
+            return 0
+        last = self._buf[(self._head + self._size - 1) % self.capacity]
+        filler = (last[0], last[1], 0.0, 1.0, last[4], True)
+        tail = (self._head + self._size) % self.capacity
+        for _ in range(pads):
+            self._buf[tail] = filler
+            tail = (tail + 1) % self.capacity
+        self._size += pads
+        return pads
+
+    def pop_hop_with_pads(self, n_frames: int):
+        """Returns (units, prosody rows, pad flags) for exactly n_frames, or
+        None when fewer are queued (the caller emits silence). Rows are
+        (z_logf0, voicing, aperiodicity, z_energy)."""
         if n_frames > self._size:
             return None
-        units, rows = [], []
+        units, rows, pads = [], [], []
         for _ in range(n_frames):
             f = self._buf[self._head]
             units.append(f[0])
-            rows.append(f[1:])
+            rows.append(f[1:5])
+            pads.append(f[5])
             self._head = (self._head + 1) % self.capacity
         self._size -= n_frames
-        return units, rows
+        return units, rows, pads
+
+    def pop_hop(self, n_frames: int):
+        """Returns (units, prosody rows) for exactly n_frames, or None when
+        fewer are queued (the caller emits silence)."""
+        popped = self.pop_hop_with_pads(n_frames)
+        return None if popped is None else popped[:2]
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@
 #include "core/AppModel.hpp"
 #include "core/Paths.hpp"
 #include "core/Settings.hpp"
+#include "core/UrlPolicy.hpp"
 #include "core/TrayModel.hpp"
 #include "imgui/Theme.hpp"
 #include "imgui/Views.hpp"
@@ -25,6 +26,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -190,7 +192,7 @@ void GuiApp::load_fonts() {
     ImGuiIO& io = ImGui::GetIO();
     const std::filesystem::path font = find_system_font();
     ImFont* f = nullptr;
-    if (!font.empty()) f = io.Fonts->AddFontFromFileTTF(font.string().c_str(), tokens::kBaseFont);
+    if (!font.empty()) f = io.Fonts->AddFontFromFileTTF(path_to_utf8(font).c_str(), tokens::kBaseFont);
     if (!f) f = io.Fonts->AddFontDefaultVector();
     io.FontDefault = f;
 }
@@ -216,14 +218,31 @@ int GuiApp::run() {
         return 1;
     }
     auto last = Clock::now();
+    const auto run_started = last;
     // Last line of defence (BUG-022): the typed JSON readers make malformed
     // external files non-fatal, but anything else unexpected must not
-    // terminate the process with the stream still open — report it, then
-    // leave through the orderly shutdown path below.
-    auto fatal = [this](std::string what) {
-        std::fprintf(stderr, "FluxVoice: %s\n", what.c_str());
-        app_.notify(Notice::Level::Error, std::move(what));
-        running_ = false;
+    // terminate the process with the stream still open. One failing frame
+    // stops the stream in order, shows the error and keeps the loop going; a
+    // deterministic per-frame failure would otherwise spin forever, so after
+    // kMaxConsecutiveFrameErrors failing frames in a row the loop leaves
+    // through the orderly shutdown below. Lines start with "[imgui-error]":
+    // the headless smoke run expects none.
+    constexpr int kMaxConsecutiveFrameErrors = 30;
+    int consecutive_errors = 0;
+    int exit_code          = 0;
+    auto frame_failed = [&](std::string what) {
+        std::fprintf(stderr, "[imgui-error] unexpected exception: %s\n", what.c_str());
+        if (frame_open_) {
+            ImGui::EndFrame();  // recovers an unbalanced ImGui stack so the next NewFrame is valid
+            frame_open_ = false;
+        }
+        app_.on_unexpected_exception(what);
+        if (++consecutive_errors >= kMaxConsecutiveFrameErrors) {
+            std::fprintf(stderr, "[imgui-error] %d consecutive failing frames, shutting down\n", consecutive_errors);
+            app_.notify(Notice::Level::Error, "Repeated unexpected errors, shutting down: " + what);
+            running_  = false;
+            exit_code = 2;
+        }
     };
     while (running_) try {
         SDL_Event e;
@@ -234,6 +253,7 @@ int GuiApp::run() {
         }
         const auto now = Clock::now();
         app_.tick(now);
+        if (opts_.report_bundle) report_bundle_result();
         tray_->pump();
         process_dialog_results();
         while (auto a = tray_->poll_action()) app_.handle_tray_action(*a);
@@ -248,25 +268,48 @@ int GuiApp::run() {
             if (spent < 8) SDL_Delay(static_cast<Uint32>(8 - spent));
         }
         if (opts_.smoke_frames > 0 && frames_ >= opts_.smoke_frames) {
-            if (!opts_.screenshot_path.empty()) save_screenshot();
-            running_ = false;
+            // With --bundle the run does not end before the load result was drained
+            // (bounded: a hung load must not hang the smoke run).
+            const bool waiting_for_bundle =
+                opts_.report_bundle && !bundle_reported_ && now - run_started < std::chrono::seconds(10);
+            if (!waiting_for_bundle) {
+                if (opts_.report_bundle && !bundle_reported_)
+                    std::fprintf(stderr, "[bundle] error: no load result within 10 s\n");
+                if (!opts_.screenshot_path.empty()) save_screenshot();
+                running_ = false;
+            }
         }
         last = now;
+        consecutive_errors = 0;
     } catch (const std::exception& e) {
-        fatal(std::string("Unexpected error, shutting down: ") + e.what());
+        frame_failed(e.what());
     } catch (...) {
-        fatal("Unexpected error, shutting down.");
+        frame_failed("unknown exception type");
     }
     (void)last;
     app_.stop_engine();
-    static_cast<void>(app_.save_settings());
+    {
+        std::string save_error;
+        if (!app_.save_settings(&save_error)) std::fprintf(stderr, "settings not saved: %s\n", save_error.c_str());
+    }
     shutdown();
-    return 0;
+    return exit_code;
 }
 
 // ---------------------------------------------------------------------------
 // Events, intents, tray
 // ---------------------------------------------------------------------------
+
+void GuiApp::report_bundle_result() {
+    const std::optional<BundleReport> r = app_.take_bundle_report();
+    if (!r) return;
+    if (r->ok)
+        std::fprintf(stderr, "[bundle] loaded '%s' rate=%u hop=%zu voices=%zu\n", path_to_utf8(r->dir).c_str(),
+                     static_cast<unsigned>(r->rate), r->hop, r->voices);
+    else
+        std::fprintf(stderr, "[bundle] error: %s\n", r->message.c_str());
+    bundle_reported_ = true;
+}
 
 void GuiApp::handle_event(const SDL_Event& e) {
     ImGui_ImplSDL3_ProcessEvent(&e);
@@ -302,8 +345,10 @@ void GuiApp::handle_event(const SDL_Event& e) {
             if (mini_) {
                 int x = 0, y = 0;
                 SDL_GetWindowPosition(window_, &x, &y);
-                app_.settings().mini_x = x;
-                app_.settings().mini_y = y;
+                Settings& s = app_.settings();
+                s.mini_has_position = true;
+                s.mini_x            = x;
+                s.mini_y            = y;
             }
             break;
         default:
@@ -364,6 +409,25 @@ SDL_HitTestResult SDLCALL GuiApp::mini_hit_test(SDL_Window* /*win*/, const SDL_P
                ? SDL_HITTEST_DRAGGABLE : SDL_HITTEST_NORMAL;
 }
 
+namespace {
+
+/// True when (x, y) lies inside some display's bounds; a position saved on a
+/// monitor that is gone is then left to the window manager.
+bool point_on_a_display(int x, int y) {
+    int count = 0;
+    SDL_DisplayID* displays = SDL_GetDisplays(&count);
+    if (displays == nullptr) return false;
+    bool inside = false;
+    for (int i = 0; i < count && !inside; ++i) {
+        SDL_Rect r{};
+        if (SDL_GetDisplayBounds(displays[i], &r) && x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h) inside = true;
+    }
+    SDL_free(displays);
+    return inside;
+}
+
+} // namespace
+
 void GuiApp::enter_mini() {
     if (mini_) return;
     if (hidden_) show_main();
@@ -378,7 +442,7 @@ void GuiApp::enter_mini() {
     SDL_SetWindowMinimumSize(window_, mw, mh);
     SDL_SetWindowSize(window_, mw, mh);
     const Settings& s = app_.settings();
-    if (s.mini_x >= 0 && s.mini_y >= 0) SDL_SetWindowPosition(window_, s.mini_x, s.mini_y);
+    if (s.mini_has_position && point_on_a_display(s.mini_x, s.mini_y)) SDL_SetWindowPosition(window_, s.mini_x, s.mini_y);
     SDL_SetWindowHitTest(window_, &GuiApp::mini_hit_test, this);
 }
 
@@ -409,7 +473,7 @@ void SDLCALL GuiApp::dialog_callback(void* userdata, const char* const* filelist
     DialogResult r;
     r.cb = pd->cb;
     if (filelist) {
-        for (const char* const* p = filelist; *p; ++p) r.paths.emplace_back(*p);
+        for (const char* const* p = filelist; *p; ++p) r.paths.push_back(path_from_utf8(*p));
     }
     // May run on another thread (SDL documents this): only queue here.
     std::lock_guard<std::mutex> lock(pd->self->dialog_mutex_);
@@ -449,13 +513,18 @@ void GuiApp::process_dialog_results() {
 }
 
 void GuiApp::open_url(const std::string& url) {
+    if (!is_web_url(url)) {
+        app_.notify(Notice::Level::Warning, "Refused to open a link that is not an http(s) address.");
+        return;
+    }
     if (!SDL_OpenURL(url.c_str())) app_.notify(Notice::Level::Warning, std::string("Could not open: ") + SDL_GetError());
 }
 
 void GuiApp::open_path(const std::filesystem::path& p) {
-    std::string s = std::filesystem::absolute(p).generic_string();
+    std::string s = path_to_utf8_generic(std::filesystem::absolute(p));
     if (!s.empty() && s.front() != '/') s = "/" + s;  // Windows drive letters
-    open_url("file://" + s);
+    const std::string target = "file://" + s;
+    if (!SDL_OpenURL(target.c_str())) app_.notify(Notice::Level::Warning, std::string("Could not open: ") + SDL_GetError());
 }
 
 void GuiApp::set_clipboard(const std::string& text) {
@@ -480,6 +549,7 @@ void GuiApp::render_frame() {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
+    frame_open_ = true;
 
     handle_shortcuts();
     ViewContext ctx{app_, *this, scale_};
@@ -500,6 +570,7 @@ void GuiApp::render_frame() {
     }
 
     ImGui::Render();
+    frame_open_ = false;
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window_, &w, &h);
     g_gl.Viewport(0, 0, w, h);
@@ -520,7 +591,6 @@ void GuiApp::handle_shortcuts() {
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Q, route)) running_ = false;
     if (!ImGui::GetIO().WantTextInput) {
         if (ImGui::Shortcut(ImGuiKey_M, route)) app_.toggle_mute();
-        if (ImGui::Shortcut(ImGuiKey_Space, route) && app_.section() == Section::Live) app_.toggle_engine();
     }
 }
 
@@ -545,6 +615,12 @@ void GuiApp::draw_main_window() {
         if (ImGui::BeginChild("content", ImVec2(0.0f, -status_h), ImGuiChildFlags_AlwaysUseWindowPadding)) {
             ViewContext ctx{app_, *this, scale_};
             draw_section(ctx, app_.section());
+            // Space toggles the engine only while the Live panel has keyboard
+            // focus (frontend/README.md §4.10): never in the Mini panel, never
+            // while a text field is active or a widget is being operated.
+            if (app_.section() == Section::Live && !mini_ && !ImGui::GetIO().WantTextInput && !ImGui::IsAnyItemActive() &&
+                ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Space, false))
+                app_.toggle_engine();
         }
         ImGui::EndChild();
         ImGui::PopStyleVar();
@@ -625,11 +701,19 @@ void GuiApp::draw_status_bar() {
             TrayInputs in;
             in.stream = s.state;
             in.muted  = app_.muted();
+            in.device_unresolved = app_.device_unresolved();
             return in;
         }());
         widgets::status_dot(state_color(ts), 5.0f * scale_);
         ImGui::SameLine();
         ImGui::TextUnformatted(s.pill.c_str());
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Worker priority: %s (%s)", app_.engine().priority_method(),
+                              app_.engine().priority_elevated() ? "elevated" : "normal");
+        ImGui::SameLine();
+        widgets::dim_text("|");
+        ImGui::SameLine();
+        ImGui::TextUnformatted(s.mode.c_str());  // "Bypass - no model loaded" / "Mode A - <bundle>"
         ImGui::SameLine();
         widgets::dim_text("|");
         ImGui::SameLine();
@@ -676,7 +760,7 @@ void GuiApp::save_screenshot() {
     std::vector<unsigned char> px(static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u);
     g_gl.Finish();
     g_gl.ReadPixels(0, 0, w, h, kGlRgba, kGlUnsignedByte, px.data());
-    std::ofstream f(opts_.screenshot_path, std::ios::binary | std::ios::trunc);
+    std::ofstream f(path_from_utf8(opts_.screenshot_path), std::ios::binary | std::ios::trunc);  // argv is UTF-8
     if (!f) {
         std::fprintf(stderr, "cannot write %s\n", opts_.screenshot_path.c_str());
         return;

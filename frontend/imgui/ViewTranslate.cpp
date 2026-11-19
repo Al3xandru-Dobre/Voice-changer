@@ -11,6 +11,7 @@
 #include <imgui.h>
 
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,10 +39,14 @@ void draw_translate(ViewContext& ctx) {
     const TranslationModel& tm = app.translation();
     widgets::heading("Translate");
 
-    if (!tm.translator_available())
+    // A Mode A only bundle: every control below stays readable but disabled
+    // (frontend/README.md §4.5); the tray refuses translation for the same reason.
+    const bool available = tm.translator_available();
+    if (!available)
         widgets::notice(("Translation is unavailable: " + tm.unavailable_reason() +
                          ". The controls stay readable; they activate when a bundle with translator_enc.onnx and "
                          "translator_dec.onnx is loaded.").c_str(), t.warning);
+    ImGui::BeginDisabled(!available);
 
     if (widgets::begin_card("pair", "Languages")) {
         const LangTable& table = tm.table();
@@ -65,34 +70,39 @@ void draw_translate(ViewContext& ctx) {
     ImGui::Spacing();
 
     if (widgets::begin_card("waitk", "Wait-k")) {
-        int k = app.wait_k();
+        // Range, default and help come from the wait_k descriptor (kParams);
+        // the chunk length from the translator contract once it is loaded.
+        const ParamDesc& wk = param_desc(ParamId::WaitK);
+        float k = app.params().get(ParamId::WaitK);
         ImGui::SetNextItemWidth(320.0f * ctx.scale);
-        if (ImGui::SliderInt("##k", &k, 1, 10, "k = %d chunks", ImGuiSliderFlags_AlwaysClamp)) app.set_wait_k(k);
-        ImGui::SameLine();
-        ImGui::Text("about %.0f ms extra onset latency", TranslationModel::onset_estimate_ms(k));
-        widgets::dim_text_wrapped("Source chunks of 80 ms buffered before translation starts. Lower k answers faster, "
-                                  "higher k resolves word order better. Changing k takes effect on the next chunk "
-                                  "without resetting translator state. The pair default from langs.json is applied "
-                                  "whenever the language pair changes.");
-        const ParamDesc& ad = param_desc(ParamId::AdaptivePolicy);
-        float adaptive = app.params().get(ParamId::AdaptivePolicy);
-        if (widgets::param_control(ad, adaptive)) app.set_param(ParamId::AdaptivePolicy, adaptive);
+        if (widgets::param_control(wk, k)) app.set_param(ParamId::WaitK, k);
+        const std::optional<double> onset = tm.onset_estimate_ms(app.wait_k());
+        const std::optional<double> chunk = tm.onset_estimate_ms(1);
+        if (onset) ImGui::Text("about %.0f ms extra onset latency (%d x %.0f ms chunks)", *onset, app.wait_k(), *chunk);
+        else widgets::dim_text("Onset latency: k x the translator's chunk length, known once the bundle is loaded.");
+        widgets::dim_text_wrapped("Lower k answers faster, higher k resolves word order better. Changing k takes "
+                                  "effect on the next chunk without resetting translator state. Choosing a language "
+                                  "pair applies its default from langs.json; a preset's own Wait-k wins.");
+        if (tm.adaptive_policy_available()) {  // hidden unless the bundle declares readiness (M3 Stage 09)
+            const ParamDesc& ad = param_desc(ParamId::AdaptivePolicy);
+            float adaptive = app.params().get(ParamId::AdaptivePolicy);
+            if (widgets::param_control(ad, adaptive)) app.set_param(ParamId::AdaptivePolicy, adaptive);
+        }
         widgets::end_card();
     }
     ImGui::Spacing();
 
     if (widgets::begin_card("mode", "Mode")) {
         const bool on = app.translate();
-        ImGui::BeginDisabled(!tm.translator_available());
         if (widgets::toggle_button("Translation ON (Mode B)", "Translation OFF (Mode A)", on,
                                    ImVec2(280.0f * ctx.scale, 42.0f * ctx.scale), t.accent))
             static_cast<void>(app.set_translate(!on));
-        ImGui::EndDisabled();
         ImGui::SameLine();
         widgets::dim_text_wrapped("Switching mode or languages resets only translator state; the encoder and "
                                   "vocoder stay continuous, with a 20 ms output ramp.");
         widgets::end_card();
     }
+    ImGui::EndDisabled();
     ImGui::Spacing();
 
     if (widgets::begin_card("lag", "Lag telemetry")) {

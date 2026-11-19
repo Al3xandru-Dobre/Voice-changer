@@ -1575,6 +1575,342 @@
         ]
       },
       "error": "special_units['bos'] (5) must be >= vocab (16)"
+    },
+    {
+      "file": "s2ut_mismatch/translator_enc_latent16.onnx",
+      "sha256": "db8f1471315daac7f688112c7cb8da453282cbbcd1118969fa46ec1edecb0b7e",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_readiness_output\":true,\"langs\":{\"de\":3,\"en\":0,\"es\":1,\"fr\":2},\"latent_dim\":16,\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"role\":\"translator_enc\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_0\",\"mem_v_0\"],\"states\":[\"src_pos\",\"enc_conv\",\"mem_k_0\",\"mem_v_0\"]}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "latents",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              16
+            ]
+          },
+          {
+            "name": "src_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.enc_conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              16
+            ]
+          },
+          {
+            "name": "state_in.mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              16
+            ]
+          },
+          {
+            "name": "state_in.mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              16
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "readiness_logit",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_out.enc_conv",
+            "dtype": "f32",
+            "shape": [
+              1,
+              16
+            ]
+          },
+          {
+            "name": "state_out.mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              16
+            ]
+          },
+          {
+            "name": "state_out.mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              16
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut_mismatch/translator_dec_mem1.onnx",
+      "sha256": "7dc222553dfead4de71bc67f54a3fc012413e26986a3b85889bb5ea3a415a0e3",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_prosody_output\":true,\"langs\":{\"de\":3,\"en\":0,\"es\":1,\"fr\":2},\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"max_tgt_steps\":4,\"role\":\"translator_dec\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_1\",\"mem_v_1\"],\"special_units\":{\"bos\":16,\"eos\":17,\"pad\":18},\"states\":[\"tgt_pos\",\"dec_kv_0\"],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "prev_units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "tgt_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "prosody_ctx",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "mem_k_1",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "mem_v_1",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_in.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "prosody",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              4
+            ]
+          },
+          {
+            "name": "eos_prob",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_out.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "file": "s2ut_mismatch/translator_dec_langs.onnx",
+      "sha256": "6062121ff0fbaae462e6791e86032bd285f7c6a25d79ef066f82d1cd1209a3cb",
+      "contract": "{\"chunk_frames\":4,\"contract_version\":2,\"frame_samples\":320,\"has_prosody_output\":true,\"langs\":{\"en\":0,\"es\":1,\"fr\":2,\"it\":3},\"license\":\"CC0-1.0 (generated fixture, no trained weights)\",\"max_src_steps\":4,\"max_tgt_steps\":4,\"role\":\"translator_dec\",\"sample_rate\":16000,\"shared_mem_states\":[\"mem_k_0\",\"mem_v_0\"],\"special_units\":{\"bos\":16,\"eos\":17,\"pad\":18},\"states\":[\"tgt_pos\",\"dec_kv_0\"],\"vocab\":16}",
+      "graph": {
+        "inputs": [
+          {
+            "name": "prev_units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "tgt_lang",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "prosody_ctx",
+            "dtype": "f32",
+            "shape": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "src_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_in.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "mem_k_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "mem_v_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          },
+          {
+            "name": "state_in.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "name": "units",
+            "dtype": "i64",
+            "shape": [
+              1,
+              4
+            ]
+          },
+          {
+            "name": "prosody",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              4
+            ]
+          },
+          {
+            "name": "eos_prob",
+            "dtype": "f32",
+            "shape": [
+              1,
+              1
+            ]
+          },
+          {
+            "name": "state_out.tgt_pos",
+            "dtype": "i64",
+            "shape": [
+              1
+            ]
+          },
+          {
+            "name": "state_out.dec_kv_0",
+            "dtype": "f32",
+            "shape": [
+              1,
+              4,
+              8
+            ]
+          }
+        ]
+      },
+      "error": null
     }
   ],
   "pairs": [
@@ -1642,6 +1978,26 @@
         "5": 6400,
         "10": 12800
       }
+    }
+  ],
+  "s2ut_mismatch": [
+    {
+      "file": "s2ut_mismatch/translator_enc_latent16.onnx",
+      "quartet": "s2ut_s4",
+      "replaces": "translator_enc",
+      "error": "latent_dim mismatch: encoder 8, translator_enc 16"
+    },
+    {
+      "file": "s2ut_mismatch/translator_dec_mem1.onnx",
+      "quartet": "s2ut_s4",
+      "replaces": "translator_dec",
+      "error": "shared_mem_states mismatch between translator_enc and translator_dec"
+    },
+    {
+      "file": "s2ut_mismatch/translator_dec_langs.onnx",
+      "quartet": "s2ut_s4",
+      "replaces": "translator_dec",
+      "error": "langs mismatch between translator_enc and translator_dec"
     }
   ],
   "bundles": [

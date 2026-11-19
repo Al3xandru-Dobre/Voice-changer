@@ -7,8 +7,8 @@
 //   fv_probe --list-devices
 //   fv_probe record  --input I [--seconds S] [--rate R] out.wav
 //   fv_probe tone    --output O --input I [--seconds S] [--freq F] [--rate R] out.wav
-//   fv_probe latency --output O --input I [--count N] [--interval-ms M] [--rate R]
-//                    [--csv out.csv]
+//   fv_probe latency --output O --input I [--marker chirp|speech|phrase] [--count N]
+//                    [--interval-ms M] [--phrase-ms P] [--rate R] [--csv out.csv]
 //
 // Devices are selected by index (--input/--output) or by name substring
 // (--input-name/--output-name, case-insensitive, must match exactly one
@@ -26,6 +26,13 @@
 //          delay's drift over time. The figure includes fv_probe's own device
 //          buffers: measure a baseline with O's cable read straight back, and
 //          subtract it (Stage 06 doc).
+//          --marker speech plays a 150 ms speech burst and matches its energy
+//          envelope: for Mode A voice conversion, which reshapes the waveform.
+//          --marker phrase plays a 1.2 s speech-like phrase every 3.5 s and
+//          reports two delays per trial from the output's energy edges: the
+//          onset delay and the flush tail lag. For Mode B translation, where
+//          the output starts k chunks late and outlasts the input (Milestone 3
+//          / Stage 11). Measure the cable baseline with the same marker.
 //
 // Device indices match `fluxvoice --list-devices` on the same backend.
 
@@ -65,6 +72,8 @@
 namespace {
 
 constexpr double kTwoPi = 6.283185307179586;
+constexpr uint32_t kPhraseIntervalMs = 3500;    // default --interval-ms with --marker phrase
+constexpr uint32_t kPhraseMinSilenceMs = 1500;  // tail flush + policy reset between phrases
 
 std::atomic<bool> g_stop{false};
 
@@ -83,7 +92,9 @@ struct Options {
     probe::MarkerKind marker_kind = probe::MarkerKind::Chirp;
     int         input = -1, output = -1;
     std::string input_name, output_name;  // substring match (see header note)
+    bool        has_interval = false, has_phrase_ms = false;
     uint32_t    rate = 48000, seconds = 10, freq = 440, count = 60, interval_ms = 500;
+    uint32_t    phrase_ms = 1200;
     std::string wav;  // record / tone output
     std::string csv;  // latency: one row per marker
 };
@@ -96,8 +107,8 @@ void print_usage(const char* argv0) {
         "  " << argv0 << " --list-devices\n"
         "  " << argv0 << " record  [--loopback] --input I [--seconds S] [--rate R] out.wav\n"
         "  " << argv0 << " tone    --output O --input I [--seconds S] [--freq F] [--rate R] out.wav\n"
-        "  " << argv0 << " latency --output O --input I [--marker chirp|speech] [--count N]\n"
-        "                   [--interval-ms M] [--rate R] [--csv out.csv]\n"
+        "  " << argv0 << " latency --output O --input I [--marker chirp|speech|phrase] [--count N]\n"
+        "                   [--interval-ms M] [--phrase-ms P] [--rate R] [--csv out.csv]\n"
         "\n"
         "  record    record capture device I to a 16-bit WAV\n"
         "  tone      play a sine into O while recording I to a WAV\n"
@@ -114,13 +125,20 @@ void print_usage(const char* argv0) {
         "                        (Windows WASAPI; valid with 'record' only)\n"
         "  --seconds <s>         record / tone length (default 10)\n"
         "  --freq <hz>           tone frequency (default 440)\n"
-        "  --marker <kind>       latency marker: 'chirp' (20 ms waveform, default) or\n"
-        "                        'speech' (150 ms speech burst, log-energy envelope)\n"
+        "  --marker <kind>       latency marker: 'chirp' (20 ms waveform, default),\n"
+        "                        'speech' (150 ms speech burst, log-energy envelope) or\n"
+        "                        'phrase' (1.2 s speech-like phrase for Mode B: reports\n"
+        "                        onset_delay_ms and flush_tail_ms from energy edges)\n"
         "  --count <n>           latency markers (default 60)\n"
         "  --interval-ms <ms>    time between markers, and the largest delay that\n"
-        "                        can be measured, plus marker length (default 500)\n"
+        "                        can be measured, plus marker length (default 500;\n"
+        "                        3500 with --marker phrase, which needs the phrase\n"
+        "                        plus at least 1500 ms of silence)\n"
+        "  --phrase-ms <ms>      phrase length with --marker phrase (default 1200)\n"
         "  --rate <hz>           fv_probe's own sample rate (default 48000)\n"
         "  --csv <path>          latency: write marker,t_s,found,latency_ms,score rows\n"
+        "                        (phrase: trial,t_s,found,onset_delay_ms,flush_tail_ms,\n"
+        "                        duration_ms,peak_dbfs,floor_dbfs,miss)\n"
         "  -h, --help            this help\n";
 }
 
@@ -307,6 +325,59 @@ bool report_latency(const probe::MarkerDetector& det, const Stream& s, const Opt
     return sum.found == s.sched.count;
 }
 
+/// Print the phrase result (Mode B); true when every trial was measured.
+bool report_phrase(const probe::PhraseDetector& det, const Stream& s, const Options& opt) {
+    const std::vector<probe::PhraseDetection> dets(det.detections().begin(),
+                                                   det.detections().begin() + static_cast<std::ptrdiff_t>(det.analysed()));
+    const probe::PhraseSummary sum = probe::summarize_phrase(dets, s.sched, opt.rate);
+    const auto old_flags = std::cout.flags();
+    const auto old_precision = std::cout.precision();
+    std::cout.setf(std::ios::fixed);
+    std::cout.precision(2);
+    std::cout << "Trials  : " << dets.size() << " of " << s.sched.count << " analysed, "
+              << sum.found << " found, " << sum.missed << " missed\n";
+    if (sum.missed > 0) {
+        size_t by_reason[6] = {};
+        for (const auto& d : dets)
+            if (!d.found) ++by_reason[static_cast<size_t>(d.miss)];
+        std::cout << "Missed  :";
+        for (size_t r = 1; r < 6; ++r)
+            if (by_reason[r] > 0)
+                std::cout << ' ' << probe::to_string(static_cast<probe::PhraseMiss>(r)) << '=' << by_reason[r];
+        std::cout << '\n';
+    }
+    if (sum.found > 0) {
+        auto line = [&](const char* name, const probe::Summary& v) {
+            std::cout << name << " : median " << ms(v.median, opt.rate) << " ms, p95 "
+                      << ms(v.p95, opt.rate) << " ms, min " << ms(v.min, opt.rate) << " ms, max "
+                      << ms(v.max, opt.rate) << " ms\n";
+        };
+        line("onset_delay_ms", sum.onset);
+        line("flush_tail_ms ", sum.tail);
+        line("output_ms     ", sum.duration);
+        std::cout << "Phrase  : " << opt.phrase_ms << " ms; the cable baseline measured with the same "
+                     "marker must be subtracted from both delays\n";
+        if (sum.tail.max > 0.8 * det.max_flush_tail())
+            std::cout << "Warning : tails approach the " << ms(det.max_flush_tail(), opt.rate)
+                      << " ms the window can hold; raise --interval-ms\n";
+    }
+    std::cout.flags(old_flags);
+    std::cout.precision(old_precision);
+
+    if (!opt.csv.empty()) {
+        std::ofstream f(opt.csv);
+        f << "trial,t_s,found,onset_delay_ms,flush_tail_ms,duration_ms,peak_dbfs,floor_dbfs,miss\n";
+        for (size_t k = 0; k < dets.size(); ++k)
+            f << k << ',' << static_cast<double>(s.sched.start(k)) / opt.rate << ','
+              << (dets[k].found ? 1 : 0) << ',' << ms(dets[k].onset_delay, opt.rate) << ','
+              << ms(dets[k].flush_tail, opt.rate) << ',' << ms(dets[k].duration, opt.rate) << ','
+              << dets[k].peak_dbfs << ',' << dets[k].floor_dbfs << ','
+              << probe::to_string(dets[k].miss) << '\n';
+        if (!f) std::cerr << "Failed to write " << opt.csv << '\n';
+    }
+    return sum.found == s.sched.count;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -348,14 +419,17 @@ int main(int argc, char** argv) {
             const std::string_view m = argv[++i];
             if (m == "chirp")       opt.marker_kind = probe::MarkerKind::Chirp;
             else if (m == "speech") opt.marker_kind = probe::MarkerKind::Speech;
+            else if (m == "phrase") opt.marker_kind = probe::MarkerKind::Phrase;
             else {
-                std::cerr << "Invalid --marker '" << m << "' (expected 'chirp' or 'speech')\n";
+                std::cerr << "Invalid --marker '" << m
+                          << "' (expected 'chirp', 'speech' or 'phrase')\n";
                 return 1;
             }
             opt.has_marker = true;
         }
         else if (a == "--count")           { if (!value(1, 1000000, opt.count)) return 1; }
-        else if (a == "--interval-ms")     { if (!value(100, 60000, opt.interval_ms)) return 1; }
+        else if (a == "--interval-ms")     { if (!value(100, 60000, opt.interval_ms)) return 1; opt.has_interval = true; }
+        else if (a == "--phrase-ms")       { if (!value(300, 10000, opt.phrase_ms)) return 1; opt.has_phrase_ms = true; }
         else if (a == "--rate")            { if (!value(8000, 192000, opt.rate)) return 1; }
         else if (a == "--csv") {
             if (i + 1 >= argc) { std::cerr << "Missing value for --csv\n"; return 1; }
@@ -364,6 +438,9 @@ int main(int argc, char** argv) {
         else if (!a.empty() && a[0] != '-' && opt.cmd != Command::None && opt.wav.empty()) opt.wav = a;
         else { std::cerr << "Unexpected argument: " << a << '\n'; print_usage(argv[0]); return 1; }
     }
+
+    const bool phrase = opt.marker_kind == probe::MarkerKind::Phrase;
+    if (phrase && !opt.has_interval) opt.interval_ms = kPhraseIntervalMs;
 
     if (!opt.list) {
         const bool wants_wav = opt.cmd == Command::Record || opt.cmd == Command::Tone;
@@ -376,6 +453,10 @@ int main(int argc, char** argv) {
         else if (opt.cmd == Command::Latency &&
                  opt.marker_kind == probe::MarkerKind::Speech &&
                  opt.interval_ms < 250)                            err = "--marker speech (150 ms) requires --interval-ms >= 250";
+        else if (opt.has_phrase_ms && !phrase)                     err = "--phrase-ms is only valid with --marker phrase";
+        else if (opt.cmd == Command::Latency && phrase &&
+                 opt.interval_ms < opt.phrase_ms + kPhraseMinSilenceMs)
+                                                                   err = "--marker phrase requires --interval-ms >= --phrase-ms + 1500 (silence for the tail flush)";
         else if (opt.input >= 0 && !opt.input_name.empty())        err = "--input and --input-name are mutually exclusive";
         else if (opt.output >= 0 && !opt.output_name.empty())      err = "--output and --output-name are mutually exclusive";
         else if (!has_input)                                       err = "--input or --input-name is required";
@@ -438,9 +519,12 @@ int main(int argc, char** argv) {
     uint64_t total = static_cast<uint64_t>(opt.seconds) * opt.rate;
     if (opt.cmd == Command::Tone) s.phase_step = kTwoPi * opt.freq / opt.rate;
     if (opt.cmd == Command::Latency) {
-        s.marker = (opt.marker_kind == probe::MarkerKind::Speech)
-                       ? probe::make_speech_burst(opt.rate, 0.5)
-                       : probe::make_chirp(opt.rate, opt.rate / 50, 500.0, 3500.0, 0.5);
+        if (phrase)
+            s.marker = probe::make_phrase(opt.rate, opt.phrase_ms / 1000.0, 0.5);
+        else if (opt.marker_kind == probe::MarkerKind::Speech)
+            s.marker = probe::make_speech_burst(opt.rate, 0.5);
+        else
+            s.marker = probe::make_chirp(opt.rate, opt.rate / 50, 500.0, 3500.0, 0.5);
         s.sched.first    = opt.rate;  // 1 s for both ends to settle
         s.sched.interval = static_cast<uint64_t>(opt.rate) * opt.interval_ms / 1000;
         s.sched.count    = opt.count;
@@ -478,12 +562,18 @@ int main(int argc, char** argv) {
 
     WavWriter wav;
     std::optional<probe::MarkerDetector> det;
+    std::optional<probe::PhraseDetector> phrase_det;
     if (opt.cmd == Command::Latency) {
-        const double min_score = opt.marker_kind == probe::MarkerKind::Speech ? 0.65 : 0.5;
-        det.emplace(s.marker, s.sched, min_score, opt.marker_kind, opt.rate);
-        std::cout << "Probing : " << opt.count
-                  << (opt.marker_kind == probe::MarkerKind::Speech ? " speech bursts" : " chirps")
-                  << ", one every " << opt.interval_ms
+        if (phrase) {
+            phrase_det.emplace(s.marker, s.sched, opt.rate);
+        } else {
+            const double min_score = opt.marker_kind == probe::MarkerKind::Speech ? 0.65 : 0.5;
+            det.emplace(s.marker, s.sched, min_score, opt.marker_kind, opt.rate);
+        }
+        std::cout << "Probing : " << opt.count;
+        if (phrase) std::cout << " phrases of " << opt.phrase_ms << " ms";
+        else std::cout << (opt.marker_kind == probe::MarkerKind::Speech ? " speech bursts" : " chirps");
+        std::cout << ", one every " << opt.interval_ms
                   << " ms (" << static_cast<double>(total) / opt.rate << " s)\n";
     } else if (!wav.open(opt.wav, opt.rate)) {
         std::cerr << "Cannot write " << opt.wav << '\n';
@@ -513,8 +603,9 @@ int main(int argc, char** argv) {
             continue;
         }
         n = static_cast<size_t>(std::min<uint64_t>(n, total - got));
-        if (det) det->push(buf.data(), n);
-        else     wav.write(buf.data(), n);
+        if (det)             det->push(buf.data(), n);
+        else if (phrase_det) phrase_det->push(buf.data(), n);
+        else                 wav.write(buf.data(), n);
         got += n;
 
         // Progress for long (drift) runs: one line per 10 % of the markers.
@@ -524,6 +615,18 @@ int main(int argc, char** argv) {
             std::cout << "  " << reported << '/' << opt.count << "  last: ";
             if (d.found) std::cout << static_cast<double>(std::lround(100.0 * ms(d.lag, opt.rate))) / 100.0 << " ms\n";
             else         std::cout << "missed\n";
+            std::cout.flush();
+        }
+        if (phrase_det && phrase_det->analysed() >= reported + std::max<size_t>(1, opt.count / 10)) {
+            reported = phrase_det->analysed();
+            const auto& d = phrase_det->detections()[reported - 1];
+            std::cout << "  " << reported << '/' << opt.count << "  last: ";
+            if (d.found)
+                std::cout << "onset " << static_cast<double>(std::lround(100.0 * ms(d.onset_delay, opt.rate))) / 100.0
+                          << " ms, tail " << static_cast<double>(std::lround(100.0 * ms(d.flush_tail, opt.rate))) / 100.0
+                          << " ms\n";
+            else
+                std::cout << "missed (" << probe::to_string(d.miss) << ")\n";
             std::cout.flush();
         }
     }
@@ -536,6 +639,7 @@ int main(int argc, char** argv) {
 
     bool ok = overflows == 0 && got == total;
     if (det) ok = report_latency(*det, s, opt) && ok;
+    else if (phrase_det) ok = report_phrase(*phrase_det, s, opt) && ok;
     else if (!wav.close()) { std::cerr << "Failed to write " << opt.wav << '\n'; ok = false; }
     else std::cout << "Wrote " << got << " samples (" << static_cast<double>(got) / opt.rate
                    << " s) to " << opt.wav << '\n';

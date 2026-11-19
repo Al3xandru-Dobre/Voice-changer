@@ -153,9 +153,10 @@ add_executable(fluxvoice
     src/audio/AudioDeviceRegistry.cpp
     src/audio/MiniaudioBackend.cpp
     src/pipeline/InferencePipeline.cpp
+    src/pipeline/ModeAHost.cpp
     src/pipeline/ModelBundle.cpp
+    src/pipeline/OrtBundleLoader.cpp
     src/pipeline/OrtModel.cpp
-    src/ui/AppWindow.cpp
     src/voice/Presets.cpp
 )
 
@@ -218,6 +219,25 @@ if(WIN32)
     target_link_libraries(fv_vc_file PRIVATE psapi)
 endif()
 
+# Offline Mode B (simultaneous S2UT) runner (M3 stages 07-09): the translator
+# quartet through InferencePipeline on a mono WAV, no audio hardware.
+add_executable(fv_s2ut_file
+    tools/fv_s2ut_file.cpp
+    src/pipeline/InferencePipeline.cpp
+    src/pipeline/ModelBundle.cpp
+    src/pipeline/OrtModel.cpp
+    src/voice/Presets.cpp
+)
+target_include_directories(fv_s2ut_file PRIVATE src)
+target_compile_definitions(fv_s2ut_file PRIVATE FLUXVOICE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+target_link_libraries(fv_s2ut_file PRIVATE nlohmann_json_headers Threads::Threads)
+if(FLUXVOICE_HAS_ORT)
+    fluxvoice_link_ort(fv_s2ut_file)
+endif()
+if(WIN32)
+    target_link_libraries(fv_s2ut_file PRIVATE psapi)
+endif()
+
 # ---------------------------------------------------------------------------
 # Warnings
 # ---------------------------------------------------------------------------
@@ -251,6 +271,7 @@ endfunction()
 fluxvoice_set_warnings(fluxvoice)
 fluxvoice_set_warnings(fv_probe)
 fluxvoice_set_warnings(fv_vc_file)
+fluxvoice_set_warnings(fv_s2ut_file)
 
 # ---------------------------------------------------------------------------
 # Tests  (run with: ctest --test-dir build)
@@ -271,7 +292,7 @@ if(FLUXVOICE_BUILD_TESTS)
 
     foreach(_t duplex_router chunk_assembler overlap_add route_guard latency_probe audio_types
                device_registry audio_controller inference_pipeline latency_governor timing_histogram
-               kv_state_cache mode_a_worker voice_catalog worker_priority)
+               kv_state_cache mode_a_worker mode_a_host voice_catalog worker_priority)
         add_executable(test_${_t} tests/test_${_t}.cpp)
         target_include_directories(test_${_t} PRIVATE src tests tools)
         target_link_libraries(test_${_t} PRIVATE rwqueue_headers Threads::Threads)
@@ -288,13 +309,30 @@ if(FLUXVOICE_BUILD_TESTS)
         src/pipeline/InferencePipeline.cpp)
     target_link_libraries(test_audio_controller PRIVATE nlohmann_json_headers)
     target_sources(test_inference_pipeline PRIVATE
-        src/pipeline/InferencePipeline.cpp tests/AllocationCounter.cpp)
+        src/pipeline/InferencePipeline.cpp src/voice/Presets.cpp tests/AllocationCounter.cpp)
     set_target_properties(test_inference_pipeline PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
     target_link_libraries(test_inference_pipeline PRIVATE nlohmann_json_headers)
+    target_compile_definitions(test_inference_pipeline PRIVATE
+        FLUXVOICE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
     target_sources(test_mode_a_worker PRIVATE
         src/pipeline/InferencePipeline.cpp tests/AllocationCounter.cpp)
     target_link_libraries(test_mode_a_worker PRIVATE nlohmann_json_headers)
     set_target_properties(test_mode_a_worker PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    # M4 stage 05: the shared live host over fake models and the fake backend
+    # (no ORT, no hardware; ModeAHost.cpp has no ORT dependency — the ORT
+    # loader lives in OrtBundleLoader.cpp).
+    target_sources(test_mode_a_host PRIVATE
+        src/pipeline/ModeAHost.cpp
+        src/pipeline/InferencePipeline.cpp
+        src/audio/AudioController.cpp
+        src/audio/AudioDeviceRegistry.cpp
+        tests/AllocationCounter.cpp)
+    target_link_libraries(test_mode_a_host PRIVATE nlohmann_json_headers)
+    set_target_properties(test_mode_a_host PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    if(WIN32)
+        # WorkerPriority (MMCSS); ModeAHost::stats() reads util/ProcessMemory.hpp.
+        target_link_libraries(test_mode_a_host PRIVATE avrt psapi)
+    endif()
 
     # M2 stage 09: descriptor table, presets, param channel, pipeline controls
     # and the output chain — all ORT-free over the fake models. Links
@@ -334,6 +372,7 @@ if(FLUXVOICE_BUILD_TESTS)
             tests/test_ort_model.cpp
             src/pipeline/OrtModel.cpp
             src/pipeline/InferencePipeline.cpp
+            src/pipeline/ModelBundle.cpp
         )
         target_include_directories(test_ort_model PRIVATE src tests)
         target_link_libraries(test_ort_model PRIVATE
@@ -348,8 +387,30 @@ if(FLUXVOICE_BUILD_TESTS)
         add_test(NAME cli_vc_without_ort
                  COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice>
                          -P ${CMAKE_SOURCE_DIR}/tests/check_cli_vc_without_ort.cmake)
+        add_test(NAME cli_s2ut_without_ort
+                 COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice> -DCASE=without_ort
+                         -DS2UT=${CMAKE_SOURCE_DIR}/tests/data/fixtures/s2ut
+                         -DIDENTITY=${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity
+                         -P ${CMAKE_SOURCE_DIR}/tests/check_s2ut_cli.cmake)
     endif()
 
+    # M3 stage 08 CLI: --s2ut / --list-langs rejections and listings, all
+    # before ORT and before any audio device is touched.
+    foreach(_s2ut_case no_src no_tgt unknown_lang same_lang wait_k_0 wait_k_11
+                       lang_without_s2ut no_model_dir loopback no_langs_json)
+        add_test(NAME cli_rejects_s2ut_${_s2ut_case}
+                 COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice> -DCASE=${_s2ut_case}
+                         -DS2UT=${CMAKE_SOURCE_DIR}/tests/data/fixtures/s2ut
+                         -DIDENTITY=${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity
+                         -P ${CMAKE_SOURCE_DIR}/tests/check_s2ut_cli.cmake)
+    endforeach()
+    foreach(_s2ut_case list_langs list_params_langs)
+        add_test(NAME cli_${_s2ut_case}
+                 COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice> -DCASE=${_s2ut_case}
+                         -DS2UT=${CMAKE_SOURCE_DIR}/tests/data/fixtures/s2ut
+                         -DIDENTITY=${CMAKE_SOURCE_DIR}/tests/data/fixtures/identity
+                         -P ${CMAKE_SOURCE_DIR}/tests/check_s2ut_cli.cmake)
+    endforeach()
     add_test(NAME vc_file_help COMMAND fv_vc_file --help)
     add_test(NAME cli_vc_validation
              COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fluxvoice>
@@ -376,6 +437,22 @@ if(FLUXVOICE_BUILD_TESTS)
     foreach(_case no_args no_voice fps missing_wavs unknown_opt param change)
         add_test(NAME vc_file_rejects_${_case} COMMAND fv_vc_file ${_vc_file_bad_${_case}})
         set_tests_properties(vc_file_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
+    endforeach()
+
+    # M3 stages 07-09 fv_s2ut_file: exit code + message needle, all builds.
+    add_test(NAME s2ut_file_help COMMAND fv_s2ut_file --help)
+    set_tests_properties(s2ut_file_help PROPERTIES PASS_REGULAR_EXPRESSION "Usage:")
+    set(_s2ut_file_cases no_args unknown_opt wait_k_0 wait_k_11 fps_3 bad_change bad_param missing_wavs)
+    if(FLUXVOICE_HAS_ORT)
+        list(APPEND _s2ut_file_cases unknown_lang same_lang missing_input_wav)
+    else()
+        list(APPEND _s2ut_file_cases without_ort)
+    endif()
+    foreach(_case IN LISTS _s2ut_file_cases)
+        add_test(NAME s2ut_file_rejects_${_case}
+                 COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:fv_s2ut_file> -DCASE=${_case}
+                         -DBUNDLE=${CMAKE_SOURCE_DIR}/tests/data/fixtures/s2ut
+                         -P ${CMAKE_SOURCE_DIR}/tests/check_s2ut_file_cli.cmake)
     endforeach()
 
     # BUG-008: the root .gitignore keeps tests/data/ tracked and ignores the M2
@@ -449,6 +526,11 @@ if(FLUXVOICE_BUILD_TESTS)
         # (standard library only; no models, no training environment).
         add_test(NAME gate_s2ut_selftest
                  COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/python_training/gate_s2ut.py --self-test)
+
+        # M3 stage 07: Mode B golden checker + pipeline-twin rules over fakes
+        # (standard library only; `make` itself needs the training env).
+        add_test(NAME s2ut_golden_selftest
+                 COMMAND Python3::Interpreter -I ${CMAKE_SOURCE_DIR}/python_training/s2ut_golden.py --self-test)
     endif()
 
     # M2 stages 01-02 with the pinned training environment (Python 3.12, onnx,
@@ -536,6 +618,19 @@ if(FLUXVOICE_BUILD_TESTS)
                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
         set_tests_properties(python_training_m3_stage05 PROPERTIES TIMEOUT 900
                              ENVIRONMENT "PYTHONIOENCODING=utf-8")
+        # M3 stage 07: Python ORT golden twin of the Mode B pipeline; with ORT it
+        # also runs fv_s2ut_file on the fixture quartet and requires bit-for-bit
+        # identical decisions, units and audio (the C++ cases skip without ORT).
+        add_test(NAME python_training_m3_stage07_golden
+                 COMMAND ${_training_python} -m pytest -q -p no:cacheprovider tests/test_s2ut_golden.py
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/python_training)
+        if(FLUXVOICE_HAS_ORT)
+            set_tests_properties(python_training_m3_stage07_golden PROPERTIES TIMEOUT 600
+                                 ENVIRONMENT "PYTHONIOENCODING=utf-8;FLUXVOICE_S2UT_FILE=$<TARGET_FILE:fv_s2ut_file>")
+        else()
+            set_tests_properties(python_training_m3_stage07_golden PROPERTIES TIMEOUT 600
+                                 ENVIRONMENT "PYTHONIOENCODING=utf-8")
+        endif()
     endif()
 
     add_test(NAME cli_help       COMMAND fluxvoice --help)
@@ -590,6 +685,29 @@ if(FLUXVOICE_BUILD_TESTS)
                   name_and_index loopback_with_tone bad_marker marker_with_tone speech_short_ivl)
         add_test(NAME probe_rejects_${_case} COMMAND fv_probe ${_probe_args_${_case}})
         set_tests_properties(probe_rejects_${_case} PROPERTIES WILL_FAIL TRUE)
+    endforeach()
+
+    # M3 stage 11: --marker phrase (Mode B onset delay + flush tail). Each case
+    # must fail with its own message, before an audio context is created.
+    add_test(NAME probe_help_phrase COMMAND fv_probe --help)
+    set_tests_properties(probe_help_phrase PROPERTIES
+        PASS_REGULAR_EXPRESSION "chirp\\|speech\\|phrase.*--phrase-ms.*onset_delay_ms and flush_tail_ms")
+    set(_probe_phrase_short_ivl   latency --input 0 --output 0 --marker phrase --interval-ms 2600)
+    set(_probe_phrase_long_phrase latency --input 0 --output 0 --marker phrase --phrase-ms 2100)
+    set(_probe_phrase_ms_alone    latency --input 0 --output 0 --phrase-ms 1200)
+    set(_probe_phrase_ms_speech   latency --input 0 --output 0 --marker speech --phrase-ms 1200)
+    set(_probe_phrase_ms_low      latency --input 0 --output 0 --marker phrase --phrase-ms 299)
+    set(_probe_phrase_with_record record --marker phrase --input 0 out.wav)
+    set(_probe_phrase_expect_short_ivl   "--marker phrase requires --interval-ms >= --phrase-ms \\+ 1500")
+    set(_probe_phrase_expect_long_phrase "--marker phrase requires --interval-ms >= --phrase-ms \\+ 1500")
+    set(_probe_phrase_expect_ms_alone    "--phrase-ms is only valid with --marker phrase")
+    set(_probe_phrase_expect_ms_speech   "--phrase-ms is only valid with --marker phrase")
+    set(_probe_phrase_expect_ms_low      "Invalid value for --phrase-ms: '299'")
+    set(_probe_phrase_expect_with_record "--marker is only valid with the latency command")
+    foreach(_case short_ivl long_phrase ms_alone ms_speech ms_low with_record)
+        add_test(NAME probe_rejects_phrase_${_case} COMMAND fv_probe ${_probe_phrase_${_case}})
+        set_tests_properties(probe_rejects_phrase_${_case} PROPERTIES
+            PASS_REGULAR_EXPRESSION "${_probe_phrase_expect_${_case}}")
     endforeach()
 endif()
 

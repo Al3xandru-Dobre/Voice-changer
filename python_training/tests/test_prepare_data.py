@@ -101,6 +101,28 @@ def test_checksum_mismatch_is_fatal(ctx, tmp_path):
         fd.prepare(ctx, ds)
 
 
+def test_libritts_r_is_resampled(ctx, tmp_path):
+    files = {
+        "LibriTTS_R/SPEAKERS.txt": b";ID  |SEX| SUBSET           |MINUTES| NAME\n"
+                                   b"19   | F | train-clean-100  | 25.19 | Kara\n",
+        "LibriTTS_R/train-clean-100/19/198/19_198.book.tsv": b"book\n",
+        "LibriTTS_R/train-clean-100/19/198/19_198_000000_000000.normalized.txt": b"Hello world.\n",
+        "LibriTTS_R/train-clean-100/19/198/19_198_000000_000000.original.txt": b"Hello, world!\n",
+        "LibriTTS_R/train-clean-100/19/198/19_198_000000_000000.wav": audio_bytes(24000, "WAV"),
+        # Text without audio (LibriTTS-R dropped 9 samples) is skipped silently.
+        "LibriTTS_R/train-clean-100/19/198/19_198_000000_000001.normalized.txt": b"Missing.\n",
+    }
+    make_tar(tmp_path / "train_clean_100.tar.gz", files)
+    rows = run(ctx, fake_dataset(fd.DATASETS["libritts-r-train-clean-100"],
+                                 tmp_path / "train_clean_100.tar.gz"))
+    assert rows == [{"utt_id": "19_198_000000_000000",
+                     "path": "16k/libritts_r/train-clean-100/19/198/19_198_000000_000000.flac",
+                     "duration": 0.5, "speaker": "19", "dataset": "libritts_r",
+                     "subset": "train-clean-100", "gender": "F", "text": "Hello world."}]
+    info = sf.info(str(ctx.root / rows[0]["path"]))
+    assert (info.samplerate, info.channels, info.subtype) == (16000, 1, "PCM_24")
+
+
 def test_ljspeech_is_resampled(ctx, tmp_path):
     files = {"LJSpeech-1.1/metadata.csv": b"LJ001-0001|Printing, in the|Printing, in the\n",
              "LJSpeech-1.1/wavs/LJ001-0001.wav": audio_bytes(22050, "WAV")}

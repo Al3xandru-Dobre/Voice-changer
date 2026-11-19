@@ -8,7 +8,7 @@
 | **Name** | *Laundered non-commercial taint* — VoxPopuli manifests and NC-trained S2UT checkpoints lose `noncommercial: true` and export as `"MIT"` |
 | **Reported** | 2026-11-15 |
 | **Severity** | Medium (violates `00_master.md` Key Constraint 5 and `@ml-speech-trainer` commercial-clean guardrail) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-18 ([fix plan](FIX-PLAN-BUG-029-032_2026-11-18.md); GCC/Clang + pytest green, native MSVC/AppleClang legs pending) |
 | **Component** | `python_training/fvml/units.py:101-129`, `python_training/extract_units.py:275-285`, `python_training/train_s2ut.py:201-232`, `python_training/fvml/s2ut_stream.py:170-200`, `python_training/gate_s2ut.py:718-728` |
 | **Blocks** | [Milestone 3 / Stage 03](../Milestone%203/03_multilingual_encoder_vocoder_upgrade.md) & [Stage 05](../Milestone%203/05_causal_s2ut_translator_policy_gate.md) licence isolation; [Stage 06](../Milestone%203/06_translated_prosody_stateful_onnx_export.md) bundle export |
 

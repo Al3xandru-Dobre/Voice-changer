@@ -1,4 +1,4 @@
-# Build + test matrix (Milestone 1.5 / Stage 01).
+# Build + test matrix (Milestone 1.5 / Stage 01; ORT legs added in Milestone 4).
 #
 # Portability gate: every push to master and every PR builds fluxvoice with
 # warnings-as-errors and runs the CTest suite (all tests are hardware-free —
@@ -6,6 +6,18 @@
 # open a device). Runners have no sound cards; miniaudio may fall back to its
 # null backend there, which the tests must tolerate. Anything needing real
 # audio hardware belongs to stage 06's manual per-OS matrix.
+#
+# Legs: four ORT-less legs (linux-gcc, linux-clang, windows-msvc,
+# macos-clang) plus one ONNX Runtime leg per OS (linux-gcc-ort,
+# windows-msvc-ort, macos-clang-ort) configured with
+# -DFLUXVOICE_FETCH_ORT=ON — the pinned v1.31.0 SDK (SHA-256 verified in
+# cmake/OnnxRuntime.cmake) is fetched into ort-downloads/ outside the build
+# tree, cached under a key derived from that file's hash and the OS, and the
+# full CTest suite runs, so test_ort_model, the DLL staging next to the
+# executables and the ORT version check execute natively on each OS. On the
+# Linux legs xvfb + Mesa llvmpipe also run the headless gui_smoke_* CTest
+# cases (xvfb-run + LIBGL_ALWAYS_SOFTWARE, registered only where xvfb-run
+# exists); macOS/Windows GUI smoke stays a manual frontend/README.md §8 step.
 #
 # Action versions are pinned to major tags (v5 = node-24 runtime) for the
 # same reproducibility / supply-chain reasons as the GIT_TAG pins in
@@ -30,6 +42,11 @@ jobs:
           - { name: linux-clang,  os: ubuntu-latest,  cc: clang, cxx: clang++ }
           - { name: windows-msvc, os: windows-latest }
           - { name: macos-clang,  os: macos-latest,  cc: /usr/bin/clang, cxx: /usr/bin/clang++, cmake_args: "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0" }
+          # ONNX Runtime legs (-DFLUXVOICE_FETCH_ORT=ON): test_ort_model, the
+          # DLL staging and the version check run natively on each OS.
+          - { name: linux-gcc-ort,    os: ubuntu-latest,  cc: gcc,   cxx: g++,   ort: ON }
+          - { name: windows-msvc-ort, os: windows-latest, ort: ON }
+          - { name: macos-clang-ort,  os: macos-latest,  cc: /usr/bin/clang, cxx: /usr/bin/clang++, ort: ON, cmake_args: "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0" }
 
     steps:
       - name: Check out
@@ -50,16 +67,29 @@ jobs:
           key: deps-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt') }}
           restore-keys: deps-${{ matrix.name }}-
 
+      # The pinned ORT SDK archive (version + SHA-256 live in this file) is
+      # kept outside the build tree, so the cache survives build/ removal and
+      # the download runs once per OS per pin. A cached file is still
+      # URL_HASH-verified by CMake before use.
+      - name: Cache ONNX Runtime SDK archive
+        if: matrix.ort == 'ON'
+        uses: actions/cache@v5
+        with:
+          path: ort-downloads
+          key: ort-sdk-${{ runner.os }}-${{ hashFiles('cmake/OnnxRuntime.cmake') }}
+
       # SDL3 (Milestone 4 frontend) builds from source on the Linux legs and
       # needs the X11 extension headers at configure time (it dlopens the
       # libraries at runtime). Wayland/EGL headers enable native Wayland.
+      # xvfb + the Mesa software GL driver (llvmpipe) let the headless
+      # gui_smoke_* CTest cases run under xvfb-run (frontend/README.md §8).
       - name: Install SDL3 build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libx11-dev libxext-dev libxcursor-dev libxi-dev libxrandr-dev \
             libxfixes-dev libxss-dev libxinerama-dev libxtst-dev libxkbcommon-dev libgl1-mesa-dev libegl1-mesa-dev \
-            libwayland-dev libdecor-0-dev libdbus-1-dev
+            libwayland-dev libdecor-0-dev libdbus-1-dev xvfb libgl1-mesa-dri
 
       - name: Toolchain versions
         run: cmake --version
@@ -78,6 +108,7 @@ jobs:
           -DFLUXVOICE_STRICT_WARNINGS=ON
           -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
           ${{ matrix.cmake_args }}
+          ${{ matrix.ort == 'ON' && format('-DFLUXVOICE_FETCH_ORT=ON -DFLUXVOICE_ORT_DOWNLOAD_DIR={0}/ort-downloads', github.workspace) || '' }}
 
       # --config is a no-op on single-config generators and selects the
       # configuration to build on the multi-config Visual Studio generator.
@@ -129,3 +160,4 @@ jobs:
           tests/test_contract.py tests/test_fixtures.py
           tests/test_prepare_s2ut_data.py tests/test_eval_s2ut.py
           tests/test_waitk_policy.py
+          && python -m gate_s2ut --self-test

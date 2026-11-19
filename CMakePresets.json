@@ -1,0 +1,111 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "linux-gate",
+      "hidden": true,
+      "description": "Local Linux gate: one fixed tree per toolchain (build-<preset>/), same options as the CI linux legs.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-${presetName}",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "FLUXVOICE_STRICT_WARNINGS": "ON",
+        "FLUXVOICE_WARNINGS_AS_ERRORS": "ON",
+        "FLUXVOICE_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc",
+      "inherits": "linux-gate",
+      "displayName": "Linux GCC, ORT-less (CI linux-gcc leg)",
+      "cacheVariables": { "CMAKE_C_COMPILER": "gcc", "CMAKE_CXX_COMPILER": "g++" }
+    },
+    {
+      "name": "linux-clang",
+      "inherits": "linux-gate",
+      "displayName": "Linux Clang, ORT-less (CI linux-clang leg)",
+      "cacheVariables": { "CMAKE_C_COMPILER": "clang", "CMAKE_CXX_COMPILER": "clang++" }
+    },
+    {
+      "name": "linux-gcc-ort",
+      "inherits": "linux-gcc",
+      "displayName": "Linux GCC + ONNX Runtime SDK from third_party/onnxruntime",
+      "cacheVariables": { "ONNXRUNTIME_ROOT": "${sourceDir}/third_party/onnxruntime" }
+    },
+    {
+      "name": "linux-clang-ort",
+      "inherits": "linux-clang",
+      "displayName": "Linux Clang + ONNX Runtime SDK from third_party/onnxruntime",
+      "cacheVariables": { "ONNXRUNTIME_ROOT": "${sourceDir}/third_party/onnxruntime" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-gcc", "configurePreset": "linux-gcc" },
+    { "name": "linux-clang", "configurePreset": "linux-clang" },
+    { "name": "linux-gcc-ort", "configurePreset": "linux-gcc-ort" },
+    { "name": "linux-clang-ort", "configurePreset": "linux-clang-ort" }
+  ],
+  "testPresets": [
+    {
+      "name": "ctest-common",
+      "hidden": true,
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "ctest-gate",
+      "hidden": true,
+      "inherits": "ctest-common",
+      "description": "Everything the CI C++ legs run. The python_training_* suites need python_training/.venv, exist only on a dev machine and take minutes each, so they have their own -training presets.",
+      "filter": { "exclude": { "name": "^python_training_" } }
+    },
+    {
+      "name": "ctest-training",
+      "hidden": true,
+      "inherits": "ctest-common",
+      "description": "Only the python_training_* pytest suites (registered when python_training/.venv exists). Slow.",
+      "filter": { "include": { "name": "^python_training_" } }
+    },
+    { "name": "linux-gcc", "configurePreset": "linux-gcc", "inherits": "ctest-gate" },
+    { "name": "linux-clang", "configurePreset": "linux-clang", "inherits": "ctest-gate" },
+    { "name": "linux-gcc-ort", "configurePreset": "linux-gcc-ort", "inherits": "ctest-gate" },
+    { "name": "linux-clang-ort", "configurePreset": "linux-clang-ort", "inherits": "ctest-gate" },
+    { "name": "linux-gcc-training", "configurePreset": "linux-gcc", "inherits": "ctest-training" },
+    { "name": "linux-gcc-ort-training", "configurePreset": "linux-gcc-ort", "inherits": "ctest-training" }
+  ],
+  "workflowPresets": [
+    {
+      "name": "linux-gcc",
+      "steps": [
+        { "type": "configure", "name": "linux-gcc" },
+        { "type": "build", "name": "linux-gcc" },
+        { "type": "test", "name": "linux-gcc" }
+      ]
+    },
+    {
+      "name": "linux-clang",
+      "steps": [
+        { "type": "configure", "name": "linux-clang" },
+        { "type": "build", "name": "linux-clang" },
+        { "type": "test", "name": "linux-clang" }
+      ]
+    },
+    {
+      "name": "linux-gcc-ort",
+      "steps": [
+        { "type": "configure", "name": "linux-gcc-ort" },
+        { "type": "build", "name": "linux-gcc-ort" },
+        { "type": "test", "name": "linux-gcc-ort" }
+      ]
+    },
+    {
+      "name": "linux-clang-ort",
+      "steps": [
+        { "type": "configure", "name": "linux-clang-ort" },
+        { "type": "build", "name": "linux-clang-ort" },
+        { "type": "test", "name": "linux-clang-ort" }
+      ]
+    }
+  ]
+}

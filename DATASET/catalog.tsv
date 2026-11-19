@@ -1,0 +1,79 @@
+purpose	key	name	langs	approx_size_or_hours	licence	commercial_ok	status	source	notes
+core_speech	librispeech-train-clean-100	LibriSpeech train-clean-100	en	100 h	CC BY 4.0	yes	registered	https://www.openslr.org/12/	builder: build_librispeech
+core_speech	librispeech-train-clean-360	LibriSpeech train-clean-360	en	360 h	CC BY 4.0	yes	registered	https://www.openslr.org/12/	builder: build_librispeech
+core_speech	ljspeech	LJSpeech 1.1	en	24 h	public domain	yes	registered	https://keithito.com/LJ-Speech-Dataset/	bootstrap target voice lj
+core_speech	hifitts	Hi-Fi TTS v0	en	~292 h total	CC BY 4.0	yes	registered	https://www.openslr.org/109/	default 4 readers via --hifitts-speakers
+core_speech	vctk	VCTK 0.92 mic1	en	44 h	CC BY 4.0	yes	optional	https://datashare.ed.ac.uk/handle/10283/3443	accent eval + extra voices
+core_speech	libritts-r	LibriTTS-R	en	585 h clean + ~500 h other	CC BY 4.0	yes	registered	https://www.openslr.org/141/	24 kHz restored; train-other-500 for SNR diversity
+core_speech	common-voice-en	Common Voice Scripted v27 en	en	~3.6 kh recorded	CC0-1.0	yes	proposed	https://mozilladatacollective.com/	Mozilla Data Collective (since Oct 2025)
+core_speech	cv-spontaneous-en	CV Spontaneous Speech v5 en	en	~18.6 h	CC0-1.0	yes	proposed	https://mozilladatacollective.com/	unscripted answers; small but unique
+core_speech	mailabs-en	M-AILABS en_US + en_UK	en	~147 h	BSD-3-style	yes	proposed	https://www.caito.de/	studio LibriVox readers
+core_speech	librilight	LibriLight unlab	en	600 h–60 kh	public domain audio + MIT tooling	yes	proposed	https://github.com/facebookresearch/libri-light	SSL pretrain; unlabelled
+core_speech	peoples-speech	People's Speech cc-by-clean	en	~10 kh (subset)	CC BY 4.0	yes-conditional	proposed	https://huggingface.co/datasets/MLCommons/peoples_speech	use ONLY cc-by-* configs (not cc-by-sa)
+core_speech	ami	AMI meeting corpus	en	~100 h	CC BY 4.0	yes	proposed	https://groups.inf.ed.ac.uk/ami/corpus/	spontaneous meetings; IHM+SDM
+core_speech	mls-en	MLS English	en	44.5 kh	CC BY 4.0	yes	proposed	https://www.openslr.org/94/	use mls_english_opus (651 GB)
+core_speech	emilia-yodas	Emilia-YODAS subset	en,de,fr,zh,ja,ko	114 kh	CC BY 4.0	verify	proposed	https://huggingface.co/datasets/amphion/Emilia-Dataset	web provenance caution; en+de+fr usable
+core_speech	gigaspeech	GigaSpeech	en	2.5 kh+	Apache-2.0 (ESB)	verify	proposed	https://github.com/SpeechColab/GigaSpeech	gated download; verify licence
+core_speech	peoples-speech-sa	People's Speech cc-by-sa	en	~20 kh	CC BY-SA	flag-sa	proposed	https://huggingface.co/datasets/MLCommons/peoples_speech	share-alike — legal review
+core_speech	voxforge	VoxForge	en	~130 h	GPL	no	rejected	https://www.voxforge.org/	copyleft — never for training pools
+core_speech	spgispeech	SPGISpeech	en	5 kh	Kensho NC agreement	no	nc-only	https://huggingface.co/datasets/kensho/spgispeech	non-commercial research
+core_speech	tedlium3	TED-LIUM 3	en	452 h	CC BY-NC-ND 3.0	no	nc-only	https://www.openslr.org/51/	NC-ND
+core_speech	emilia	Emilia original	en,zh,de,fr,ja,ko	101 kh	CC BY-NC 4.0	no	nc-only	https://huggingface.co/datasets/amphion/Emilia-Dataset	use YODAS subset instead
+target_voices	hifitts-more	Hi-Fi TTS all readers	en	10 readers	CC BY 4.0	yes	proposed	https://www.openslr.org/109/	widen --hifitts-speakers
+target_voices	mailabs-voices	M-AILABS en readers	en	~6 readers	BSD-3-style	yes	proposed	https://www.caito.de/	studio readers for presets
+target_voices	cmu-arctic	CMU Arctic	en	~8 h / 7 voices	permissive (any purpose)	yes	proposed	http://festvox.org/cmu_arctic/	slt,bdl,rms,clb,awb,jmk,ksp
+target_voices	libritts-r-voices	LibriTTS-R selected speakers	en	pick 4-8	CC BY 4.0	yes	registered	https://www.openslr.org/141/	check per-speaker hours
+target_voices	vctk-voices	VCTK speakers	en	110 speakers	CC BY 4.0	yes	proposed	https://datashare.ed.ac.uk/handle/10283/3443	UK accent presets
+target_voices	expresso-voices	Expresso	en	4 voices	CC BY-NC 4.0	no	nc-only	https://speechbot.github.io/expresso/	would be ideal but NC
+target_voices	private-voice	own voice	en	user-recorded	private	private	registered	prepare_target_voice.py	data/private/<speaker>/ — never commit
+eval	librispeech-test-clean	LibriSpeech test-clean	en	5.4 h	CC BY 4.0	yes	registered	https://www.openslr.org/12/	test_clean_200.tsv sources
+eval	librispeech-dev-clean	LibriSpeech dev-clean	en	5.4 h	CC BY 4.0	yes	registered	https://www.openslr.org/12/	parity streams + pitch accuracy
+eval	librispeech-test-other	LibriSpeech test-other	en	5.3 h	CC BY 4.0	yes	proposed	https://www.openslr.org/12/	noisy/accented WER slice
+eval	libritts-r-test	LibriTTS-R test/dev	en	~10 h	CC BY 4.0	yes	registered	https://www.openslr.org/141/	24 kHz reference eval
+eval	fleurs-en	FLEURS en_us	en	~12 h	CC BY 4.0	yes	proposed	https://huggingface.co/datasets/google/fleurs	n-way parallel text
+eval	cv-en-test	Common Voice en test	en	part of corpus	CC0-1.0	yes	proposed	https://mozilladatacollective.com/	accent eval list
+eval	cv-sps-test	CV Spontaneous Shared Task test	multi	0.8 GB	CC0-1.0	yes	proposed	https://mozilladatacollective.com/	spontaneous eval
+eval	voxceleb1o	VoxCeleb1-O trial pairs	en	—	research-only	no	nc-only	https://www.robots.ox.ac.uk/~vgg/data/voxceleb/	EER eval only
+eval	ears	EARS anechoic	en	~100 h	verify (likely research)	verify	proposed	https://www.openslr.org/…	expressive clean eval
+s2ut_paired	cvss-c-es-en	CVSS-C es→en	es→en	~150 h	CC BY 4.0	yes	registered	https://github.com/google-research-datasets/cvss	canonical En targets
+s2ut_paired	cvss-c-fr-en	CVSS-C fr→en	fr→en	~200 h	CC BY 4.0	yes	registered	https://github.com/google-research-datasets/cvss	—
+s2ut_paired	cvss-c-de-en	CVSS-C de→en	de→en	~150 h	CC BY 4.0	yes	registered	https://github.com/google-research-datasets/cvss	—
+s2ut_paired	covost2-en-de	CoVoST 2 en→de	en→de	~364 h	CC0-1.0	yes	registered	https://github.com/facebookresearch/covost	Piper de targets
+s2ut_paired	europarl-st	Europarl-ST v1.1	en→{es,fr,de}	~150 h	CC BY-NC 4.0	no	MIS-LICENSED (registry says CC BY)	https://www.mllp.upv.es/europarl-st/	reclassify nc — see README §6
+s2ut_paired	cvss-t	CVSS-T voice-matched	{es,fr,de}→en	~784 h total	CC BY 4.0	yes	proposed	https://github.com/google-research-datasets/cvss	voice preservation
+s2ut_paired	fleurs-s2ut-eval	FLEURS en/es/fr/de	en,es,fr,de	~12 h/lang	CC BY 4.0	yes	proposed	https://huggingface.co/datasets/google/fleurs	n-way parallel eval lists
+s2ut_paired	cv-x-en	Common Voice {es,fr,de}+Piper en	{es,fr,de}→en	kh	CC0 + CC BY voices	yes	proposed	https://mozilladatacollective.com/	source diversity beyond CVSS-C
+s2ut_paired	mtedx	mTEDx	es,fr,de +5→en	1.5 kh	CC BY-NC-ND 4.0	no	nc-only	https://www.openslr.org/100/	NC-ND — eval only even for research
+s2ut_paired	mustc	MuST-C	en→{es,fr,de}	~400 h	CC BY-NC-ND	no	nc-only	https://ict.fbk.eu/must-c/	TED NC-ND
+s2ut_paired	mass	MaSS	8 langs incl en/es/fr/de	~170 h	unverified	verify	proposed	https://github.com/facebookresearch/MaSS	CMU Wilderness provenance
+s2ut_paired	seamless-align	SeamlessAlign	multi	470 kh mined	CC BY-NC-SA	no	nc-only	https://github.com/facebookresearch/seamless_communication	research comparison
+s2ut_paired	voxpopuli-s2ut	VoxPopuli S2UT	15 directions	17.3 kh	flagged CC BY-NC 4.0	no	registered-nc	https://github.com/facebookresearch/voxpopuli	data table says CC0 — keep nc isolation
+multilingual_speech	css10-es-fr-de	CSS10	es,fr,de	59 h total	Apache-2.0/CC0	yes	registered	https://github.com/kyubyong/css10	single-speaker studio
+multilingual_speech	cml-tts-es-fr-de	CML-TTS	es,fr,de	~30 h each	CC BY 4.0	yes	registered	https://www.openslr.org/146/	curated 2M+2F SNR≥30
+multilingual_speech	mls-es-fr-de	MLS es/fr/de	es,fr,de	~8.1 kh	CC BY 4.0	yes	proposed	https://www.openslr.org/94/	opus 14/16/29 GB
+multilingual_speech	mailabs-es-fr-de	M-AILABS es/fr/de	es,fr,de	~535 h	BSD-3-style	yes	proposed	https://www.caito.de/	studio readers
+multilingual_speech	cv-es-fr-de	Common Voice es/fr/de	es,fr,de	kh	CC0-1.0	yes	proposed	https://mozilladatacollective.com/	crowdsourced diversity
+multilingual_speech	cml-tts-extra	CML-TTS it/nl/pl/pt/ru	it,nl,pl,pt,ru	~30 h each	CC BY 4.0	yes	proposed	https://www.openslr.org/146/	expansion reserve
+multilingual_speech	mls-extra	MLS it/nl/pl/pt	it,nl,pl,pt	0.3–3.5 kh	CC BY 4.0	yes	proposed	https://www.openslr.org/94/	expansion reserve
+multilingual_speech	emilia-yodas-defr	Emilia-YODAS de/fr	de,fr	~10 kh	CC BY 4.0	verify	proposed	https://huggingface.co/datasets/amphion/Emilia-Dataset	provenance caution
+augmentation	musan	MUSAN	multi	~100 h	CC BY 4.0 corpus; per-file varies	yes-conditional	registered	https://www.openslr.org/17/	noise/music/speech-babble; keep per-file LICENSE
+augmentation	rirs	RIRS_NOISES SLR28	—	1.3 GB	Apache-2.0	yes	registered	https://www.openslr.org/28/	real + simulated RIRs
+augmentation	fsd50k	FSD50K	—	108 h	corpus CC BY; clips CC0/BY/NC/Sampling+	yes-conditional	proposed	https://zenodo.org/records/4060432	filter to CC0+CC-BY clips only
+augmentation	demand	DEMAND	—	1.5 h×16ch	CC BY-SA 3.0	flag-sa	proposed	https://zenodo.org/records/1227121	env noise; input-side only
+augmentation	openair	OpenAIR RIR library	—	~200 IRs	per-IR (mostly CC BY)	verify	proposed	https://www.openairlib.net/	per-room licence check
+augmentation	ms-snsd	MS-SNSD	en	~20 GB	verify	verify	proposed	https://github.com/microsoft/MS-SNSD	licence unclear
+augmentation	dns-noise	MS DNS challenge noise	—	~50 GB	mixed (AudioSet/Freesound)	verify	proposed	https://github.com/microsoft/DNS-Challenge	audit before ingest
+augmentation	esc50	ESC-50	—	2.8 h	CC BY-NC 3.0	no	nc-only	https://github.com/karolpiczak/ESC-50	env sounds NC
+augmentation	wham	WHAM!/WHAMR!	—	—	WSJ-derived (LDC)	no	rejected	https://wham.whisper.ai/	proprietary base
+expressive	expresso	Expresso	en	40 h	CC BY-NC 4.0	no	nc-only	https://speechbot.github.io/expresso/	best expressive corpus, NC
+expressive	esd	ESD	en,zh	29 h	research licence	no	nc-only	https://hltsingapore.github.io/ESD/	emotional parallel
+expressive	ravdess	RAVDESS	en	1.5 h	CC BY-NC-SA 4.0	no	nc-only	https://zenodo.org/records/1188976	emotion actors
+expressive	emovdb	EmoV-DB	en	10 h	verify	verify	proposed	https://github.com/numediart/EmoV-DB	emotion 4 spk
+expressive	cremad	CREMA-D	en	5 h	verify	verify	proposed	https://github.com/CheyneyComputerScience/CREMA-D	crowd-rated
+expressive	iemocap	IEMOCAP	en	12 h	gated NC	no	nc-only	https://sail.usc.edu/iemocap/	agreement required
+expressive	l2arctic	L2-ARCTIC	en	27 h	CC BY-NC 4.0	no	nc-only	https://psi.engr.tamu.edu/l2-arctic-corpus/	accent (not emotion)
+expressive	ears	EARS	en	100 h	verify	verify	proposed	—	anechoic expressive
+noncommercial	voxpopuli	VoxPopuli	23 langs	400 kh unlab	flagged NC (data CC0?)	verify	registered-nc	https://github.com/facebookresearch/voxpopuli	keep data/nc/ isolation
+noncommercial	mhubert147	mHuBERT-147 model	147 langs	—	CC BY-NC-SA 4.0	no	registered-nc	https://huggingface.co/utter-project/mHuBERT-147	teacher probe only
+noncommercial	gead	GigaSpeech	en	2.5 kh	gated	verify	proposed	https://github.com/SpeechColab/GigaSpeech	ESB claims Apache-2.0
+private	own-voice	private own voice	en	user	private	private	registered	—	data/private/<speaker>/ consent required

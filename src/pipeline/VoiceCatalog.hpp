@@ -26,6 +26,8 @@ struct VoiceEntry {
     std::vector<float> embedding;
     TargetVoiceStats stats{};
     std::string license, source;
+    std::string attribution;  // optional
+    std::string lang;         // optional, lowercase [a-z-]{2,8}; empty = unspecified
 };
 
 inline bool valid_voice_name(std::string_view name) {
@@ -58,6 +60,15 @@ inline bool read_voice_catalog(const std::filesystem::path& path,
     std::vector<VoiceEntry> parsed;
     for (const auto& v : data["voices"]) {
         if (!v.is_object()) return fail("voices.json: each voice must be an object");
+        for (const auto& item : v.items()) {
+            bool known = false;
+            for (const char* key : {"name", "display", "embedding", "logf0_mean", "logf0_std",
+                                    "energy_mean", "energy_std", "license", "source",
+                                    "attribution", "lang"})
+                if (item.key() == key) { known = true; break; }
+            if (!known)
+                return fail("voices.json: unknown voice key '" + item.key() + "'");
+        }
         for (const char* key : {"name", "display", "license", "source"})
             if (!v.contains(key) || !v[key].is_string() || v[key].get<std::string>().empty())
                 return fail(std::string("voices.json: missing or empty string key '") + key + "'");
@@ -87,6 +98,21 @@ inline bool read_voice_catalog(const std::filesystem::path& path,
         entry.display = v["display"].get<std::string>();
         entry.license = v["license"].get<std::string>();
         entry.source = v["source"].get<std::string>();
+        for (const char* key : {"attribution", "lang"}) {
+            if (!v.contains(key)) continue;
+            if (!v[key].is_string() || v[key].get<std::string>().empty())
+                return fail("voice '" + entry.name + "': " + key + " must be a non-empty string");
+        }
+        if (v.contains("attribution")) entry.attribution = v["attribution"].get<std::string>();
+        if (v.contains("lang")) {
+            const auto code = v["lang"].get<std::string>();
+            bool ok = code.size() >= 2 && code.size() <= 8;
+            for (const char ch : code) ok = ok && ((ch >= 'a' && ch <= 'z') || ch == '-');
+            if (!ok)
+                return fail("voice '" + entry.name + "': invalid language code '" + code +
+                            "' (expected lowercase [a-z-]{2,8})");
+            entry.lang = code;
+        }
         parsed.push_back(std::move(entry));
     }
     out = std::move(parsed);

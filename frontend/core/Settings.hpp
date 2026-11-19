@@ -22,6 +22,13 @@ enum class Theme : std::uint8_t { Dark, Light, System };
 const char* to_string(Theme t);
 bool theme_from_string(std::string_view s, Theme& out);
 
+/// Upper bound accepted for `latency_target_ms` (a larger value cannot fit the
+/// audio queue anyway; the host reports kQueueCapacity for the borderline).
+inline constexpr std::uint32_t kMaxLatencyTargetMs = 5000;
+
+/// True for 0 (bundle default), 1, 2 and 4.
+constexpr bool valid_frames_per_step(int v) { return v == 0 || v == 1 || v == 2 || v == 4; }
+
 struct Settings {
     // Window & tray behaviour
     bool start_minimized        = false;
@@ -32,10 +39,13 @@ struct Settings {
     float ui_scale              = 1.0f;   // multiplies the display scale
     int window_w                = 1180;
     int window_h                = 760;
-    int mini_x                  = -1;     // -1 = let the window manager place it
-    int mini_y                  = -1;
+    bool mini_has_position      = false; // false = let the window manager place it
+    int mini_x                  = 0;     // screen coordinates; may be negative (monitor left of/above primary)
+    int mini_y                  = 0;
 
-    // Directories ("" = default discovered at start)
+    // Directories ("" = default discovered at start). UTF-8 text, as in the
+    // JSON file: convert with path_from_utf8 / path_to_utf8 (core/Paths.hpp),
+    // never fs::path(std::string) or path.string().
     std::string models_dir;
     std::string user_preset_dir;
     std::string studio_dir;
@@ -57,6 +67,18 @@ struct Settings {
     bool translate       = false;
     float gain_db        = 0.0f;
 
+    // Model host (M4 Stage 05). Both feed fluxvoice::HostLoadRequest.
+    /// Encoder frames per step: 0 = the bundle's default variant, else 1, 2 or 4.
+    int           frames_per_step   = 0;
+    /// Added-latency target in ms: 0 = the master-budget default (LatencyGovernor).
+    std::uint32_t latency_target_ms = 0;
+
+    // Stats log (M4 Stage 06): when on, the UI thread appends one `[stats]`
+    // line per second while a stream runs. `stats_log_path` is UTF-8 text
+    // ("" = `<config dir>/stats.log`); convert with path_from_utf8.
+    bool        write_stats_log = false;
+    std::string stats_log_path;
+
     /// Keys this build does not know, kept verbatim (JSON text) for round-trip.
     std::map<std::string, std::string> extras;
 
@@ -67,7 +89,14 @@ struct Settings {
     /// defaults plus one warning.
     static Settings from_json(std::string_view text, std::vector<std::string>* warnings = nullptr);
 
+    /// Atomic write (`<file>.tmp` then rename). Refuses (returns false, sets
+    /// `error`) when `file` exists but is not a JSON object and cannot be moved
+    /// aside to `<file>.bad`, so a damaged file is never silently overwritten.
     bool save(const std::filesystem::path& file, std::string& error) const;
+
+    /// A missing file yields defaults silently. A file that exists but is not
+    /// a JSON object is renamed to `<file>.bad` (replacing an older one) and
+    /// defaults plus a warning naming the .bad path are returned.
     static Settings load(const std::filesystem::path& file, std::vector<std::string>* warnings = nullptr);
 
     friend bool operator==(const Settings&, const Settings&) = default;

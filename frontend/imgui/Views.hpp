@@ -17,10 +17,11 @@ class ShellServices {
 public:
     virtual ~ShellServices() = default;
 
-    using FilesCallback = std::function<void(const std::vector<std::string>& paths)>;
+    using FilesCallback = std::function<void(const std::vector<std::filesystem::path>& paths)>;
 
     /// Native dialogs are asynchronous: `cb` runs later, on the UI thread,
-    /// with zero paths when cancelled.
+    /// with zero paths when cancelled. SDL's UTF-8 strings are converted with
+    /// path_from_utf8 before the callback sees them.
     virtual void pick_files(const char* filter_name, const char* filter_pattern, bool allow_many,
                             FilesCallback cb) = 0;
     virtual void pick_folder(FilesCallback cb) = 0;
@@ -60,5 +61,10 @@ void draw_settings(ViewContext& ctx);
 void draw_mini_panel(ViewContext& ctx);
 
 void draw_section(ViewContext& ctx, Section section);
+
+/// The "Estimated end-to-end latency" card shared by Live and Telemetry
+/// (M4 Stage 06): `t.latency_card()` with its terms broken out. `id` makes the
+/// ImGui child id unique per panel.
+void draw_latency_card(const TelemetrySnapshot& t, const char* id);
 
 } // namespace fluxvoice::frontend

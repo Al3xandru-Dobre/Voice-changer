@@ -32,6 +32,7 @@ struct VoiceEntry {
     std::string license;
     std::string source;
     std::string attribution;  // optional
+    std::string lang;         // optional, lowercase [a-z-]{2,8}; empty = unspecified
     std::vector<float> embedding;
     float logf0_mean  = 0.0f;
     float logf0_std   = 0.0f;

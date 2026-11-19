@@ -21,6 +21,8 @@
 #include "pipeline/ModelContract.hpp"
 #include "pipeline/OrtModel.hpp"
 #include "pipeline/PipelineGeometry.hpp"
+#include "ToolCli.hpp"
+#include "WavIo.hpp"
 #include "util/ProcessMemory.hpp"
 #include "voice/Presets.hpp"
 #include "voice/VoiceParams.hpp"
@@ -44,14 +46,9 @@
 
 namespace fs = std::filesystem;
 using namespace fluxvoice;
+using namespace fluxvoice::tools;
 
 namespace {
-
-struct ScheduledChange {
-    double seconds = 0.0;
-    const ParamDesc* desc = nullptr;
-    float value = 0.0f;
-};
 
 struct Options {
     fs::path model_dir;
@@ -99,174 +96,6 @@ void print_usage(const char* argv0) {
         "  -h, --help              Show this help and exit\n";
 }
 
-bool parse_uint(std::string_view s, std::uint32_t lo, std::uint32_t hi, std::uint32_t& out) {
-    std::uint32_t v = 0;
-    const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
-    if (s.empty() || ec != std::errc{} || end != s.data() + s.size() || v < lo || v > hi)
-        return false;
-    out = v;
-    return true;
-}
-
-std::uint16_t read_u16_le(const std::uint8_t* p) noexcept {
-    return static_cast<std::uint16_t>(p[0] | (std::uint16_t{p[1]} << 8));
-}
-
-std::uint32_t read_u32_le(const std::uint8_t* p) noexcept {
-    return static_cast<std::uint32_t>(p[0]) |
-           (static_cast<std::uint32_t>(p[1]) << 8) |
-           (static_cast<std::uint32_t>(p[2]) << 16) |
-           (static_cast<std::uint32_t>(p[3]) << 24);
-}
-
-bool read_mono_wav(const fs::path& path, std::uint32_t& sample_rate,
-                   std::vector<float>& samples, std::string& error) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f) {
-        error = "cannot open input WAV: " + path.string();
-        return false;
-    }
-    const auto file_size = f.tellg();
-    if (file_size < 44) {
-        error = "input WAV is too short: " + path.string();
-        return false;
-    }
-    std::vector<std::uint8_t> buf(static_cast<std::size_t>(file_size));
-    f.seekg(0);
-    if (!f.read(reinterpret_cast<char*>(buf.data()), file_size)) {
-        error = "failed to read input WAV: " + path.string();
-        return false;
-    }
-    if (std::memcmp(buf.data(), "RIFF", 4) != 0 || std::memcmp(buf.data() + 8, "WAVE", 4) != 0) {
-        error = "input file is not a RIFF/WAVE file: " + path.string();
-        return false;
-    }
-
-    bool have_fmt = false;
-    bool have_data = false;
-    std::uint16_t format_tag = 0;
-    std::uint16_t channels = 0;
-    std::uint16_t bits_per_sample = 0;
-    const std::uint8_t* data_ptr = nullptr;
-    std::size_t data_bytes = 0;
-
-    std::size_t pos = 12;
-    while (pos + 8 <= buf.size()) {
-        const char* id = reinterpret_cast<const char*>(buf.data() + pos);
-        const std::uint32_t chunk_size = read_u32_le(buf.data() + pos + 4);
-        const std::size_t payload = pos + 8;
-        if (payload + chunk_size > buf.size()) break;
-
-        if (std::memcmp(id, "fmt ", 4) == 0) {
-            if (chunk_size < 16) {
-                error = "malformed fmt chunk in " + path.string();
-                return false;
-            }
-            format_tag = read_u16_le(buf.data() + payload);
-            channels = read_u16_le(buf.data() + payload + 2);
-            sample_rate = read_u32_le(buf.data() + payload + 4);
-            bits_per_sample = read_u16_le(buf.data() + payload + 14);
-            if (format_tag == 0xFFFEu && chunk_size >= 40) {
-                format_tag = read_u16_le(buf.data() + payload + 24);
-            }
-            have_fmt = true;
-        } else if (std::memcmp(id, "data", 4) == 0) {
-            data_ptr = buf.data() + payload;
-            data_bytes = chunk_size;
-            have_data = true;
-            break;
-        }
-        pos = payload + chunk_size + (chunk_size & 1u);
-    }
-
-    if (!have_fmt || !have_data) {
-        error = "WAV file missing fmt or data chunk: " + path.string();
-        return false;
-    }
-    if (channels != 1) {
-        error = "WAV must be mono (got " + std::to_string(channels) + " channels)";
-        return false;
-    }
-
-    if (format_tag == 1 && bits_per_sample == 16) {
-        const std::size_t n = data_bytes / 2;
-        samples.resize(n);
-        for (std::size_t i = 0; i < n; ++i) {
-            const auto u = read_u16_le(data_ptr + 2 * i);
-            const auto s = static_cast<std::int16_t>(u);
-            samples[i] = static_cast<float>(s) / 32768.0f;
-        }
-        return true;
-    }
-    if (format_tag == 3 && bits_per_sample == 32) {
-        const std::size_t n = data_bytes / 4;
-        samples.resize(n);
-        std::memcpy(samples.data(), data_ptr, n * sizeof(float));
-        return true;
-    }
-
-    error = "unsupported WAV format (format_tag=" + std::to_string(format_tag) +
-            ", bits_per_sample=" + std::to_string(bits_per_sample) +
-            "; expected 16-bit PCM or 32-bit float)";
-    return false;
-}
-
-bool write_mono_wav(const fs::path& path, std::uint32_t sample_rate,
-                    std::span<const float> samples, bool pcm16, std::string& error) {
-    if (path.has_parent_path()) {
-        std::error_code ec;
-        fs::create_directories(path.parent_path(), ec);
-    }
-    std::ofstream f(path, std::ios::binary);
-    if (!f) {
-        error = "cannot open output WAV for writing: " + path.string();
-        return false;
-    }
-    auto u16 = [&](std::uint32_t v) {
-        f.put(static_cast<char>(v & 0xFFu));
-        f.put(static_cast<char>((v >> 8) & 0xFFu));
-    };
-    auto u32 = [&](std::uint32_t v) {
-        u16(v & 0xFFFFu);
-        u16((v >> 16) & 0xFFFFu);
-    };
-
-    const std::uint16_t format_tag = pcm16 ? 1u : 3u;
-    const std::uint16_t bytes_per_sample = pcm16 ? 2u : 4u;
-    const std::uint32_t data_bytes = static_cast<std::uint32_t>(samples.size() * bytes_per_sample);
-
-    f.write("RIFF", 4);
-    u32(36u + data_bytes);
-    f.write("WAVE", 4);
-    f.write("fmt ", 4);
-    u32(16u);
-    u16(format_tag);
-    u16(1u); // mono
-    u32(sample_rate);
-    u32(sample_rate * bytes_per_sample);
-    u16(bytes_per_sample);
-    u16(bytes_per_sample * 8u);
-    f.write("data", 4);
-    u32(data_bytes);
-
-    if (pcm16) {
-        for (float s : samples) {
-            const float clamped = std::clamp(s, -1.0f, 1.0f);
-            const auto q = static_cast<std::int16_t>(std::lround(clamped * 32767.0f));
-            u16(static_cast<std::uint16_t>(q));
-        }
-    } else {
-        f.write(reinterpret_cast<const char*>(samples.data()),
-                static_cast<std::streamsize>(data_bytes));
-    }
-
-    if (!f) {
-        error = "failed writing output WAV: " + path.string();
-        return false;
-    }
-    return true;
-}
-
 bool write_units_file(const fs::path& path, std::span<const std::int64_t> units, std::string& error) {
     if (path.has_parent_path()) {
         std::error_code ec;
@@ -302,15 +131,6 @@ bool write_units_file(const fs::path& path, std::span<const std::int64_t> units,
         return false;
     }
     return true;
-}
-
-double percentile(const std::vector<double>& sorted, double p) {
-    if (sorted.empty()) return 0.0;
-    const double idx = (p / 100.0) * static_cast<double>(sorted.size() - 1);
-    const auto lo = static_cast<std::size_t>(std::floor(idx));
-    const auto hi = static_cast<std::size_t>(std::ceil(idx));
-    const double frac = idx - static_cast<double>(lo);
-    return sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
 }
 
 bool parse_args(int argc, char** argv, Options& opts, bool& help_requested) {
@@ -353,37 +173,11 @@ bool parse_args(int argc, char** argv, Options& opts, bool& help_requested) {
         } else if (a == "--param") {
             std::string_view v;
             if (!need_val(v)) return false;
-            const ParamDesc* d = nullptr;
-            float value = 0.0f;
-            std::string warning, error;
-            if (!parse_param_assignment(v, d, value, warning, error)) {
-                std::cerr << "--param: " << error << '\n';
-                return false;
-            }
-            if (!warning.empty()) std::cerr << "--param: " << warning << '\n';
-            opts.assignments.push_back({d, value});
+            if (!parse_param_option(v, opts.assignments)) return false;
         } else if (a == "--change") {
             std::string_view v;
             if (!need_val(v)) return false;
-            const std::size_t colon = v.find(':');
-            if (colon == std::string_view::npos) {
-                std::cerr << "Invalid --change '" << v << "' (expected seconds:name=value)\n";
-                return false;
-            }
-            double seconds = 0.0;
-            if (!parse_finite_float(v.substr(0, colon), seconds) || seconds < 0.0) {
-                std::cerr << "Invalid --change '" << v << "' (bad seconds)\n";
-                return false;
-            }
-            const ParamDesc* d = nullptr;
-            float value = 0.0f;
-            std::string warning, error;
-            if (!parse_param_assignment(v.substr(colon + 1), d, value, warning, error)) {
-                std::cerr << "--change: " << error << '\n';
-                return false;
-            }
-            if (!warning.empty()) std::cerr << "--change: " << warning << '\n';
-            opts.changes.push_back({seconds, d, value});
+            if (!parse_change_option(v, opts.changes)) return false;
         } else if (a == "--no-output-chain") {
             opts.no_output_chain = true;
         } else if (a == "--frames-per-step") {
@@ -459,17 +253,8 @@ int main(int argc, char** argv) {
 
     // Same resolution order as the CLI: descriptor defaults -> preset params
     // and voice names -> --voice / --voice-b -> --param assignments.
-    std::error_code exe_ec;
-    const fs::path exe_dir = fs::weakly_canonical(fs::path(argv[0]), exe_ec).parent_path();
     PresetLoadResult preset_res;
-    if (!opts.preset.empty()) {
-        preset_res = resolve_preset(opts.preset, preset_search_dirs(opts.preset_dir, exe_dir));
-        if (!preset_res.ok()) {
-            std::cerr << preset_res.error << '\n';
-            return 1;
-        }
-        for (const std::string& w : preset_res.warnings) std::cerr << "preset: " << w << '\n';
-    }
+    if (!load_preset_option(opts.preset, opts.preset_dir, argv[0], preset_res)) return 1;
 
     ModelBundle bundle;
     std::string error;
@@ -477,34 +262,10 @@ int main(int argc, char** argv) {
         std::cerr << error << '\n';
         return 1;
     }
-    const auto voice_index = [&](std::string_view name, std::uint16_t& out) -> bool {
-        const VoiceEntry* v = find_voice(bundle.voices, name, error);
-        if (!v) {
-            std::cerr << error << '\n';
-            return false;
-        }
-        out = static_cast<std::uint16_t>(v - bundle.voices.data());
-        return true;
-    };
     VoiceParams params;
-    bool voice_b_follows_a = true;
-    if (preset_res.ok()) {
-        apply_preset_params(*preset_res.preset, params);
-        if (preset_res.preset->voice_a &&
-            !voice_index(*preset_res.preset->voice_a, params.voice_a))
-            return 1;
-        if (preset_res.preset->voice_b &&
-            !voice_index(*preset_res.preset->voice_b, params.voice_b))
-            return 1;
-        if (preset_res.preset->voice_b) voice_b_follows_a = false;
-    }
-    if (!opts.voice.empty() && !voice_index(opts.voice, params.voice_a)) return 1;
-    if (!opts.voice_b.empty()) {
-        if (!voice_index(opts.voice_b, params.voice_b)) return 1;
-        voice_b_follows_a = false;
-    }
-    for (const auto& [d, v] : opts.assignments) params.set(d->id, v);
-    if (voice_b_follows_a) params.voice_b = params.voice_a;
+    if (!resolve_voice_params(bundle.voices, preset_res, opts.voice, opts.voice_b, opts.assignments,
+                              params))
+        return 1;
     const VoiceEntry& voice = bundle.voices[params.voice_a];
     OrtModel& enc = bundle.encoder;
     OrtModel& voc = bundle.vocoder;
@@ -650,16 +411,7 @@ int main(int argc, char** argv) {
         std::printf("Voice B            : %s\n",
                     bundle.voices[initial_params.voice_b].name.c_str());
     // Effective non-default controls (the shipped output chain included).
-    for (const ParamDesc& d : kParams) {
-        if (initial_params.get(d.id) == d.def) continue;
-        std::printf("Param              : %s = %s\n", std::string(d.name).c_str(),
-                    format_param_value(d, initial_params.get(d.id)).c_str());
-    }
-    for (const ScheduledChange& c : opts.changes) {
-        std::printf("Scheduled change   : %s = %s at %.3f s\n",
-                    std::string(c.desc->name).c_str(),
-                    format_param_value(*c.desc, c.value).c_str(), c.seconds);
-    }
+    print_param_summary(initial_params, opts.changes);
     std::printf("Output chain       : %s\n", opts.no_output_chain ? "off (raw vocoder PCM)"
                                                                  : "gain->gate->brightness->limiter");
     std::printf("Algorithmic latency: %lld samples (%.1f ms)\n",

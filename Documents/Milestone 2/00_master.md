@@ -81,7 +81,9 @@ C++ track: 02 (contract) ─► 07 (ORT C++) ──┴─► 08 (RT) ─► 09 �
 - Hot-plug recovery, device switching, drift resampling, CI jobs that need ORT →
   [Milestone 1.5](../Milestone%201.5/00_master.md) (M2 keeps ORT-less builds green)
 - Translator, Wait-k, multilingual units → [Milestone 3](../Milestone%203/00_master.md)
-- Zero-shot cloning from reference audio; formant DSP; model packaging/installer
+- Zero-shot enrolment from reference audio →
+  [Milestone 5](../Milestone%205/00_master.md)
+- Formant DSP; model packaging/installer
 
 ## Stages
 

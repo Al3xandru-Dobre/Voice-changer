@@ -64,8 +64,10 @@ public:
     }
 
     // -- worker -------------------------------------------------------------
-    /// Drain everything, keep the newest. True when `out` was updated.
-    bool drain(VoiceParams& out) noexcept {
+    /// Drain everything, keep the newest. True when `out` was updated;
+    /// `generation` then holds the generation of that newest snapshot (what
+    /// push() returned for it). Untouched when nothing was queued.
+    bool drain(VoiceParams& out, std::uint64_t& generation) noexcept {
         Message m{};
         bool got = false;
         std::uint64_t last = 0;
@@ -74,11 +76,22 @@ public:
             last = m.generation;
             got = true;
         }
-        if (got) applied_generation_.store(last, std::memory_order_relaxed);
+        if (got) {
+            applied_generation_.store(last, std::memory_order_relaxed);
+            generation = last;
+        }
         return got;
     }
 
-    /// Generation the worker last applied; read from the control thread.
+    /// As above, for callers that do not need the drained generation.
+    bool drain(VoiceParams& out) noexcept {
+        std::uint64_t generation = 0;
+        return drain(out, generation);
+    }
+
+    /// Generation the worker last drained (delivery, not acceptance: the
+    /// pipeline may still refuse the snapshot, see ModeAWorker::accepted_generation).
+    /// Read from the control thread.
     std::uint64_t applied_generation() const noexcept {
         return applied_generation_.load(std::memory_order_relaxed);
     }

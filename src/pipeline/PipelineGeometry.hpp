@@ -17,9 +17,17 @@ struct PipelineGeometry {
     std::size_t overlap_samples = 0;
     std::size_t cond_frame_samples = 0;
     std::size_t cond_frames = 0;
+    // Mode B (S2UT) translation chunk in content frames (translator_enc
+    // chunk_frames, a multiple of frames_per_step); 0 in Mode A.
+    std::size_t chunk_frames = 0;
 
     std::size_t queue_samples() const noexcept {
         return hop;
+    }
+    std::size_t chunk_samples() const noexcept { return chunk_frames * frame_samples; }
+    // Hops per translation chunk step (Mode B); 0 in Mode A.
+    std::size_t hops_per_chunk() const noexcept {
+        return frames_per_step ? chunk_frames / frames_per_step : 0;
     }
     std::size_t model_delay_samples() const noexcept {
         return lookahead_frames * frame_samples + overlap_samples;

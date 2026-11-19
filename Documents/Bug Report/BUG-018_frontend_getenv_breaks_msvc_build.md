@@ -8,9 +8,9 @@
 | **Name** | *Red Windows* — the frontend has never built on native Windows/MSVC |
 | **Reported** | 2026-11-14 |
 | **Severity** | High (the Windows leg of the build gate is red on `master`; `fluxvoice_gui` and `test_frontend_model` are not built or tested on the primary target OS) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-18, native MSVC leg pending |
 | **Component** | `frontend/core/Paths.cpp` (`env_or_empty`), CI leg `windows-msvc` |
-| **Blocks** | [Milestone 4 / Stage 01](../Milestone%204/01_frontend_shell_tray_mini_panel.md) (marked ☑), [Stage 04](../Milestone%204/04_build_gate_frontend_hardening.md) |
+| **Blocks** | [Milestone 4 / Stage 01](../Milestone%204/01_frontend_shell_tray_mini_panel.md), [Stage 04](../Milestone%204/04_build_gate_frontend_hardening.md) |
 
 ## Summary
 
@@ -137,3 +137,20 @@ report, and require a green `windows-msvc` check before merging.
 
 None for a `/WX` build. A developer build without `-DFLUXVOICE_WARNINGS_AS_ERRORS=ON`
 compiles the file with a warning.
+
+## Fix (2026-11-18)
+
+`frontend/core/Paths.cpp` has a new `env_path(const char*)` (declared in
+`Paths.hpp`). On Windows it uses `_wdupenv_s` and builds the path from the wide
+string, so a non-ASCII `%APPDATA%` is kept. On POSIX it uses `std::getenv`. No
+warning is suppressed. `default_config_dir()` goes through it. Regression test:
+`test_paths_env` in `tests/test_frontend_shell.cpp` (`frontend_shell`).
+
+Evidence: Linux GCC 13.3.0 and Clang 18.1.3, strict + warnings-as-errors,
+`ctest -E python_training` 105/105 PASS (2026-11-18, local, base `fe2fb68` plus
+the working tree). The POSIX branch is what those legs compile and test. The
+Windows branch has been compiled by no compiler yet; Windows MSVC and macOS are
+NOT RUN (no toolchain, no CI run of this tree). The status stays "native MSVC
+leg pending" until a `windows-msvc` run builds `fluxvoice_gui` and
+`frontend_model`. Making the `build` checks required on `master` is still
+open (Stage 04).

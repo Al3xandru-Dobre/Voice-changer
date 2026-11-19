@@ -63,6 +63,10 @@ struct TrayInputs {
     std::string  error_text;
     std::uint32_t retry_attempt = 0;
     bool         device_unresolved = false;  // a remembered device is missing; Start is refused (BUG-020)
+    /// What the engine is doing with the audio: "Bypass - no model loaded" or
+    /// "Mode A - <bundle>" (EngineHost::mode_label()). Shown in the tooltip so
+    /// a user never mistakes the pass-through for a converted voice.
+    std::string  mode_label;
 };
 
 TrayState tray_state_for(const TrayInputs& in);

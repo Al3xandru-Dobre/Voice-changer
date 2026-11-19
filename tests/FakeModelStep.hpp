@@ -13,6 +13,34 @@
 
 namespace test {
 
+/// Injectable microsecond clock for PipelineOptions::clock_us (M4 Stage 06).
+/// Single-threaded tests only: the worker-thread tests keep the steady clock.
+///   * Every read returns `now`, then advances it by deltas[read_index % size]
+///     ("per-read cost"), so a bracket that makes one read at each end measures
+///     exactly the delta applied after its first read plus whatever runs in
+///     between: a model's `step_us` (see FakeModelStep) is added to `now` inside
+///     step().
+///   * Durations are therefore known by construction; tests derive expectations
+///     from `deltas` and `step_us`, never from the pipeline's own numbers.
+struct FakeClock {
+    static inline std::uint64_t now = 0;
+    static inline std::size_t reads = 0;
+    static inline std::vector<std::uint64_t> deltas{0};
+
+    static void set(std::vector<std::uint64_t> per_read) {
+        now = 0;
+        reads = 0;
+        deltas = std::move(per_read);
+        if (deltas.empty()) deltas.push_back(0);
+    }
+    static std::uint64_t read() noexcept {
+        const std::uint64_t t = now;
+        now += deltas[reads % deltas.size()];   // no allocation: indexes a prebuilt vector
+        ++reads;
+        return t;
+    }
+};
+
 inline fluxvoice::ModelContract fake_contract(fluxvoice::ModelRole role, int fps = 1,
                                                int lookahead = 0, int frame_samples = 320,
                                                int overlap = 0) {
@@ -74,6 +102,7 @@ public:
 
     bool step() noexcept override {
         ++steps;
+        FakeClock::now += step_us;
         if (fail_next || always_fail) {
             fail_next = false;
             return false;
@@ -108,6 +137,8 @@ public:
     bool always_fail = false;
     bool bad_audio_view = false;
     std::size_t steps = 0, resets = 0;
+    /// Microseconds step() adds to FakeClock::now (a model's "compute time").
+    std::uint64_t step_us = 0;
 
 private:
     float delayed(float x) noexcept {

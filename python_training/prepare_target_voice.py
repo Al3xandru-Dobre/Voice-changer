@@ -24,12 +24,20 @@ Outputs in --out (default <data root>/private/<speaker>, git-ignored):
 no SNR rejection, no held-out split, live_mic.tsv with empty text (scored
 later with eval_vc.py --ref-text source).
 
+--lang (default en) is the language of the recordings — one per voice
+(Milestone 3 / Stage 10). It tags every written row and goes into
+speaker_metadata.json, so train_unit_vocoder.py and the Stage 06 export give
+the voice's voices.json entry its `lang`. Optional takes in another language
+(the Stage 10 5-minute target-language reads) keep the voice's own language:
+prepare them with the same --lang.
+
 Exit status: 0 = prepared and the DoD passed (or --allow-short / --live-mic),
 1 = missing inputs or the DoD failed.
 """
 import argparse
 import json
 import pathlib
+import re
 import sys
 
 import numpy as np
@@ -60,10 +68,22 @@ def parse_args(argv=None):
     p.add_argument("--noise-floor-db", type=float, default=None,
                    help="use this floor instead of a session room tone")
     p.add_argument("--display", default=None, help='display name, e.g. "Me (private)"')
+    p.add_argument("--lang", default="en",
+                   help="language of the recordings (the voice's voices.json `lang`; "
+                        "lowercase code, default en)")
     p.add_argument("--live-mic", action="store_true",
                    help="Stage 11 live-mic source set: no SNR rejection, no held-out, "
                         "writes live_mic.tsv")
     return p.parse_args(argv)
+
+
+def validate_lang(code):
+    """The voices.json `lang` rule of fvml.contract.validate_voices:
+    lowercase [a-z-]{2,8} (en, es, fr, de, ...)."""
+    if not isinstance(code, str) or not re.fullmatch(r"[a-z-]{2,8}", code):
+        raise ValueError(f"invalid --lang {code!r}: expected a lowercase language code "
+                         "such as en, es, fr or de")
+    return code
 
 
 def rel_or_abs(path):
@@ -128,7 +148,7 @@ def write_clips(kept, out_dir):
 
 
 def write_report(out_dir, speaker, kept_rows, rejected, dod, live_mic,
-                 heldout_mode=None):
+                 heldout_mode=None, lang=None):
     reasons = {}
     for r in rejected:
         reasons[r["reason"]] = reasons.get(r["reason"], 0.0) + r["duration"]
@@ -139,6 +159,7 @@ def write_report(out_dir, speaker, kept_rows, rejected, dod, live_mic,
         s["seconds"] += r["duration"]
     report = {
         "speaker": speaker,
+        "lang": lang,
         "live_mic": live_mic,
         "kept": {"clips": len(kept_rows),
                  "seconds": round(sum(r["duration"] for r in kept_rows), 1)},
@@ -154,12 +175,14 @@ def write_report(out_dir, speaker, kept_rows, rejected, dod, live_mic,
     (out_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n",
                                          encoding="utf-8")
     lines = [f"# target-voice prep report — {speaker}" + (" (live-mic)" if live_mic else ""),
-             "",
-             f"- kept {report['kept']['clips']} clips, "
-             f"{report['kept']['seconds'] / 60:.1f} min",
-             f"- rejected {report['rejected']['clips']} clips, "
-             f"{report['rejected']['seconds'] / 60:.1f} min",
              ""]
+    if lang:
+        lines.append(f"- language: {lang}")
+    lines += [f"- kept {report['kept']['clips']} clips, "
+              f"{report['kept']['seconds'] / 60:.1f} min",
+              f"- rejected {report['rejected']['clips']} clips, "
+              f"{report['rejected']['seconds'] / 60:.1f} min",
+              ""]
     if reasons:
         lines += ["| reject reason | seconds |", "|---|---|"]
         lines += [f"| {k} | {v:.1f} |" for k, v in sorted(reasons.items())]
@@ -182,6 +205,7 @@ def main(argv=None):
     args = parse_args(argv)
     try:
         speaker = validate_speaker_name(args.speaker)
+        lang = validate_lang(args.lang)
         input_dir = pathlib.Path(args.input)
         if not input_dir.is_dir():
             raise FileNotFoundError(f"--input {input_dir} is not a directory")
@@ -245,7 +269,7 @@ def main(argv=None):
                 print(f"[prepare] {take_path.name}: {len(segs)} segment(s), "
                       f"{len(kept) - n_kept_before} kept")
 
-        rows = write_clips(kept, out_dir)
+        rows = [{**r, "lang": lang} for r in write_clips(kept, out_dir)]
 
         dod = []
         heldout_mode = None
@@ -296,11 +320,12 @@ def main(argv=None):
             ]
         metadata = {speaker: {"display": args.display or speaker,
                               "license": "private — do not distribute",
-                              "source": "own recordings (M2 Stage 10)"}}
+                              "source": "own recordings (M2 Stage 10)",
+                              "lang": lang}}
         (out_dir / "speaker_metadata.json").write_text(
             json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         report = write_report(out_dir, speaker, rows, rejected, dod, args.live_mic,
-                              heldout_mode)
+                              heldout_mode, lang=lang)
         ok = all(ok for _, ok, _ in dod)
         print(f"[prepare] {report['kept']['clips']} clips, "
               f"{report['kept']['seconds'] / 60:.1f} min kept, "

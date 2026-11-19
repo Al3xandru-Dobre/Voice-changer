@@ -199,9 +199,11 @@ def join_items(args, cfg, split, log=print):
     if vocab != cfg.vocab:
         raise ValueError(f"target units have vocab {vocab}, the translator expects {cfg.vocab}")
     # Never ship what an NC teacher labelled - nor a translator fed by a student
-    # that was distilled from one (the latents directory carries that flag too).
+    # that was distilled from one (the latents directory carries that flag too),
+    # nor one trained on NC corpus audio (VoxPopuli) - unless opted in.
     for meta in (*unit_metas, *lat_metas):
         units.check_license(meta, args.include_noncommercial)
+    corpus_nc = units.check_rows_license(rows, args.include_noncommercial)
     langs = cfg.lang_ids
     max_frames = int(round(args.max_seconds * 50))
     items, skipped = [], {"split": 0, "language": 0, "features": 0, "length": 0, "text": 0}
@@ -229,7 +231,15 @@ def join_items(args, cfg, split, log=print):
     log(f"[data] {split}: {len(items)} utterances" + (f" ({dropped})" if dropped else ""))
     if not items:
         raise ValueError(f"no '{split}' utterance has both source latents and target units")
-    return items, {"vocab": vocab, "label_space": label_space}
+    labels_meta = {"vocab": vocab, "label_space": label_space}
+    nc_licenses = [str(m.get("license") or "non-commercial")
+                   for m in (*unit_metas, *lat_metas) if m.get("noncommercial")]
+    if corpus_nc:
+        nc_licenses.append(corpus_nc)
+    if nc_licenses:                   # BUG-031: the taint follows the weights into the ckpt
+        labels_meta.update(noncommercial=True,
+                           license=" + ".join(dict.fromkeys(nc_licenses)))
+    return items, labels_meta
 
 
 class S2utDataset(torch.utils.data.Dataset):

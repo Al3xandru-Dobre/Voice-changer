@@ -27,8 +27,20 @@ Checks (--checks, default all):
 skipped checks are marked SKIPPED in the report, never PASS. Writes
 report.json + report.md under --out; exit 0 only when every executed check
 passes.
+
+--s2ut --src-lang X --tgt-lang Y (Milestone 3 / Stage 09 DoD: "all Stage 09
+voice controls pass their M2 Stage 09 DoD checks when applied to Mode B
+translated output via fv_s2ut_file") runs the same checks on translated
+speech: every conversion goes through fv_s2ut_file (fvml/s2utfile.py). The
+pitch and intonation checks still compare against a baseline run of the same
+tool, which holds for translated speech (same units, only the conditioning
+moves). --list defaults to eval_lists/s2ut/test_X_Y_200.tsv; an S2UT list
+supplies the X->Y rows and its tgt_text references (presets: WER in language Y
+<= Neutral + 3 pts); a Mode A source list (e.g. test_clean_200.tsv for X = en)
+has no target-language references, so presets is SKIPPED.
 """
 import argparse
+import csv
 import json
 import math
 import pathlib
@@ -36,7 +48,7 @@ import sys
 
 import numpy as np
 
-from fvml import audio, evallist, paths, vcfile
+from fvml import audio, evallist, paths, s2utfile, vcfile
 
 PITCH_SHIFTS = (-7.0, -3.0, 3.0, 7.0)
 INTONATIONS = (0.0, 0.5, 1.5)
@@ -148,7 +160,9 @@ def check_intonation(rows, baseline_dir, convert, out_dir, track_fn, log):
                       f"/ absolute std for s=0 (< {INTONATION_ZERO_ST:.4f} nat-log): {detail}"}
 
 
-def check_click(rows, baseline_dir, vc_file, bundle, voice, runner, out_dir, log):
+def check_click(rows, baseline_dir, convert_one, out_dir, log):
+    """`convert_one(in_wav, out_wav, extra_args)` runs one conversion through
+    the shipped tool (fv_vc_file, or fv_s2ut_file with --s2ut)."""
     import tempfile
     failures, measured = [], {}
     # Resampled inputs live in a temp dir, never inside a converted dir, so a
@@ -168,8 +182,7 @@ def check_click(rows, baseline_dir, vc_file, bundle, voice, runner, out_dir, log
                     audio.save(in_wav, audio.load(src))
                 t = float(r["duration"]) / 2.0
                 dst = cdir / f"{r['utt_id']}.wav"
-                runner(vc_file, bundle, in_wav, dst, voice,
-                       ("--change", f"{t:.3f}:{name}={value}"))
+                convert_one(in_wav, dst, ("--change", f"{t:.3f}:{name}={value}"))
                 ref = audio.load(baseline_dir / f"{r['utt_id']}.wav")
                 stepped = audio.load(dst)
                 val, bound = click_metric(ref, stepped, t, audio.SAMPLE_RATE)
@@ -186,14 +199,14 @@ def check_click(rows, baseline_dir, vc_file, bundle, voice, runner, out_dir, log
 
 
 def check_blend(rows, source_list, evaluate_fn, convert, out_dir, voice_b,
-                targets, voice, device, log):
+                targets, voice, device, log, **eval_kwargs):
     cosines, utmos = {}, {}
     for a in BLEND_ALPHAS:
         tag = f"blend_{a:g}"
         cdir = convert(["--voice-b", voice_b, "--param", f"timbre_blend={a:g}"],
                        out_dir / tag)
         res = evaluate_fn(source_list, cdir, targets=targets, voice=voice,
-                          metrics=("spk", "utmos"), device=device)
+                          metrics=("spk", "utmos"), device=device, **eval_kwargs)
         cosines[a] = res["tgt_cos"]
         utmos[a] = res["utmos"]
     ordered = [cosines[a] for a in BLEND_ALPHAS]
@@ -205,7 +218,8 @@ def check_blend(rows, source_list, evaluate_fn, convert, out_dir, voice_b,
                       f"UTMOS @ 0.5 = {utmos[0.5]:.2f} (>= {UTMOS_BLEND_MIN})"}
 
 
-def check_presets(source_list, evaluate_fn, convert, out_dir, presets_dir, device, log):
+def check_presets(source_list, evaluate_fn, convert, out_dir, presets_dir, device, log,
+                  **eval_kwargs):
     preset_files = sorted(pathlib.Path(presets_dir).glob("*.json"))
     if not preset_files:
         return {"status": "skipped", "detail": f"no presets under {presets_dir}"}
@@ -213,7 +227,7 @@ def check_presets(source_list, evaluate_fn, convert, out_dir, presets_dir, devic
     for pf in preset_files:
         cdir = convert(["--preset", pf.stem], out_dir / f"preset_{pf.stem}")
         res = evaluate_fn(source_list, cdir, targets=None, voice=None,
-                          metrics=("wer",), device=device)
+                          metrics=("wer",), device=device, **eval_kwargs)
         wers[pf.stem] = res["wer"]
     ref = wers.get("neutral", next(iter(wers.values())))
     bad = {k: v for k, v in wers.items() if v > ref + WER_PRESET_SLACK}
@@ -223,40 +237,128 @@ def check_presets(source_list, evaluate_fn, convert, out_dir, presets_dir, devic
                       + (f"; failed: {bad}" if bad else "")}
 
 
+def s2ut_languages(args):
+    """(src, tgt) of an --s2ut run; both required and different."""
+    src = str(getattr(args, "src_lang", None) or "").strip()
+    tgt = str(getattr(args, "tgt_lang", None) or "").strip()
+    if not src or not tgt:
+        raise ValueError("--s2ut needs --src-lang and --tgt-lang")
+    if src == tgt:
+        raise ValueError(f"--src-lang and --tgt-lang must differ (both '{src}'); "
+                         "same-language controls are the Mode A run (drop --s2ut)")
+    return src, tgt
+
+
+def default_s2ut_list(src, tgt):
+    path = paths.EVAL_LISTS / "s2ut" / f"test_{src}_{tgt}_200.tsv"
+    if not path.is_file():
+        raise FileNotFoundError(f"{path} not found: build it with make_s2ut_eval_lists.py "
+                                "--only paired, or pass --list")
+    return path
+
+
+def _list_columns(path):
+    with open(path, encoding="utf-8", newline="") as f:
+        return tuple(csv.DictReader(f, delimiter="\t", quoting=csv.QUOTE_NONE).fieldnames or ())
+
+
+def s2ut_source_rows(list_path, src, tgt):
+    """Sources of an --s2ut run -> (rows, has_target_refs). Rows use the Mode A
+    source columns (path = the source audio, text = the target-language
+    reference). An S2UT list contributes its src->tgt rows (noise-only clips
+    dropped: there is no pitch to measure) and their tgt_text; a Mode A source
+    list's transcripts are in the source language, so they are no reference."""
+    if all(c in _list_columns(list_path) for c in evallist.SOURCE_COLUMNS):
+        return [{**r, "text": ""} for r in evallist.read_sources(list_path)], False
+    rows = [r for r in evallist.read_s2ut(list_path) if r.get("kind") != "noise_only"]
+    sel = [r for r in rows if r["src_lang"] == src and r["tgt_lang"] == tgt]
+    if not sel:
+        pairs = sorted({f"{r['src_lang']}->{r['tgt_lang']}" for r in rows})
+        raise ValueError(f"{list_path}: no {src}->{tgt} rows (directions in the list: "
+                         f"{', '.join(pairs) or 'none'})")
+    out = [{"utt_id": r["utt_id"], "speaker": r.get("speaker") or "unknown",
+            "gender": r.get("gender") or "?", "duration": float(r["src_duration"]),
+            "path": r["src_path"], "text": " ".join(str(r.get("tgt_text") or "").split())}
+           for r in sel]
+    return out, any(r["text"] for r in out)
+
+
 def run_checks(args, runner_convert=None, runner_one=None, evaluate_fn=None,
                track_fn=None, log=print):
-    """Execute the requested checks -> {check: {status, detail, ...}}."""
+    """Execute the requested checks -> {check: {status, detail, ...}}.
+
+    Injection points (tests): runner_convert(dest, extra_args) -> dest converts
+    the whole list; runner_one converts one file for the click check with the
+    signature of vcfile.convert, or of s2utfile.convert under --s2ut;
+    evaluate_fn(src_list, cdir, targets, voice, metrics, device) scores a
+    directory (under --s2ut it also receives language=<tgt>)."""
     from fvml import f0_ref
     track_fn = track_fn or f0_ref.track
-    rows = evallist.read_sources(paths.resolve(args.list))[: args.limit or None]
     out_dir = pathlib.Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    if runner_one is None:
-        runner_one = vcfile.convert
+    s2ut = bool(getattr(args, "s2ut", False))
+    has_refs = True
+    if s2ut:
+        src, tgt = s2ut_languages(args)
+        list_path = paths.resolve(args.list) if args.list else default_s2ut_list(src, tgt)
+        rows, has_refs = s2ut_source_rows(list_path, src, tgt)
+        rows = rows[: args.limit or None]
+        # The scoring engine reads Mode A source columns: text = tgt reference.
+        eval_sources = out_dir / "s2ut_sources.tsv"
+        evallist.write(eval_sources, rows, evallist.SOURCE_COLUMNS)
+        eval_kwargs = {"language": tgt}
+        tool = s2utfile.find_s2ut_file()
+        if tool is None:
+            raise FileNotFoundError(s2utfile.NOT_FOUND)
+    else:
+        if getattr(args, "src_lang", None) or getattr(args, "tgt_lang", None):
+            raise ValueError("--src-lang / --tgt-lang only apply with --s2ut")
+        list_path = paths.resolve(args.list or paths.EVAL_LISTS / "test_clean_200.tsv")
+        rows = evallist.read_sources(list_path)[: args.limit or None]
+        eval_sources, eval_kwargs = list_path, {}
+        tool = vcfile.find_vc_file()
+        if tool is None:
+            raise FileNotFoundError("no fv_vc_file: set FLUXVOICE_VC_FILE or build an ORT tree")
+    if not rows:
+        raise ValueError(f"no utterances to convert in {list_path}")
 
     def convert(extra_args, dest):
         dest = pathlib.Path(dest)
         if runner_convert is not None:
             return runner_convert(dest, extra_args)
-        return vcfile.convert_list(vc_file, args.bundle, rows, dest,
-                                   voice=args.voice, args=extra_args) and dest
+        if s2ut:
+            s2utfile.convert_list(args.bundle, rows, dest, src=src, tgt=tgt, voice=args.voice,
+                                  extra_args=extra_args, s2ut_file=tool)
+        else:
+            vcfile.convert_list(tool, args.bundle, rows, dest, voice=args.voice,
+                                args=extra_args)
+        return dest
 
-    def evaluate_default(src_list, cdir, targets, voice, metrics, device):
+    if s2ut:
+        one = runner_one or s2utfile.convert
+
+        def convert_one(in_wav, dst, extra_args):
+            return one(args.bundle, in_wav, dst, src, tgt, voice=args.voice,
+                       extra_args=extra_args, s2ut_file=tool)
+    else:
+        one = runner_one or vcfile.convert
+
+        def convert_one(in_wav, dst, extra_args):
+            return one(tool, args.bundle, in_wav, dst, args.voice, extra_args)
+
+    def evaluate_default(src_list, cdir, targets, voice, metrics, device, language="en"):
         from fvml import evaluate
         cfg = evaluate.EvalConfig(sources=src_list, converted=cdir,
                                   targets=targets, voice=voice,
-                                  metrics=metrics, device=device)
+                                  metrics=metrics, device=device, language=language)
         return evaluate.evaluate(cfg, pathlib.Path(cdir) / "_eval",
                                  log=lambda *a: None)
 
     if evaluate_fn is None:
         evaluate_fn = evaluate_default
 
-    vc_file = vcfile.find_vc_file()
-    if vc_file is None:
-        raise FileNotFoundError("no fv_vc_file: set FLUXVOICE_VC_FILE or build an ORT tree")
-    log(f"[controls] {len(rows)} utterances from {args.list}; fv_vc_file {vc_file}")
+    mode = f"fv_s2ut_file {src}->{tgt}" if s2ut else "fv_vc_file"
+    log(f"[controls] {len(rows)} utterances from {list_path}; {mode} {tool}")
     baseline_dir = convert([], out_dir / "baseline")
     if runner_convert is None:
         baseline_dir = pathlib.Path(baseline_dir)
@@ -271,8 +373,8 @@ def run_checks(args, runner_convert=None, runner_one=None, evaluate_fn=None,
         results["intonation"] = check_intonation(rows, pathlib.Path(baseline_dir),
                                                  convert, out_dir, track_fn, log)
     if "click" in checks:
-        results["click"] = check_click(rows, pathlib.Path(baseline_dir), vc_file,
-                                       args.bundle, args.voice, runner_one, out_dir, log)
+        results["click"] = check_click(rows, pathlib.Path(baseline_dir), convert_one,
+                                       out_dir, log)
     if "blend" in checks:
         if args.skip_ml:
             results["blend"] = {"status": "skipped",
@@ -282,27 +384,33 @@ def run_checks(args, runner_convert=None, runner_one=None, evaluate_fn=None,
                                 "detail": "needs --voice-b to blend toward"}
         else:
             results["blend"] = check_blend(
-                rows, paths.resolve(args.list), evaluate_fn,
-                convert, out_dir, args.voice_b, args.targets, args.voice, args.device, log)
+                rows, eval_sources, evaluate_fn, convert, out_dir, args.voice_b,
+                args.targets, args.voice, args.device, log, **eval_kwargs)
     if "presets" in checks:
         if args.skip_ml:
             results["presets"] = {"status": "skipped",
                                   "detail": "--skip-ml: needs Whisper (WER)"}
+        elif not has_refs:
+            results["presets"] = {"status": "skipped",
+                                  "detail": f"{list_path.name} has no {tgt} references "
+                                            "(tgt_text): pass an S2UT list"}
         else:
             results["presets"] = check_presets(
-                paths.resolve(args.list), evaluate_fn,
-                convert, out_dir, args.presets_dir, args.device, log)
+                eval_sources, evaluate_fn, convert, out_dir, args.presets_dir,
+                args.device, log, **eval_kwargs)
     return results
 
 
-def write_report(results, out_dir):
+def write_report(results, out_dir, title="Stage 09 offline DoD — voice controls", mode=None):
     out_dir = pathlib.Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "report.json").write_text(
-        json.dumps({"checks": results,
-                    "verdict": "PASS" if all(r.get("status") != "fail" for r in results.values())
-                               else "FAIL"}, indent=2) + "\n", encoding="utf-8")
-    lines = ["# Stage 09 offline DoD — voice controls", "",
+    doc = {"checks": results,
+           "verdict": "PASS" if all(r.get("status") != "fail" for r in results.values())
+                      else "FAIL"}
+    if mode:
+        doc["mode"] = mode
+    (out_dir / "report.json").write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    lines = [f"# {title}", "",
              "| check | status | detail |", "|---|---|---|"]
     for name, r in results.items():
         status = {"pass": "PASS", "fail": "FAIL"}.get(r.get("status"), "SKIPPED")
@@ -314,11 +422,17 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                 formatter_class=argparse.RawDescriptionHelpFormatter,
                                 epilog="\n".join(__doc__.splitlines()[2:]))
-    p.add_argument("--bundle", required=True, help="model bundle directory for fv_vc_file")
+    p.add_argument("--bundle", required=True,
+                   help="model bundle directory for fv_vc_file (fv_s2ut_file with --s2ut)")
     p.add_argument("--voice", required=True, help="target voice A")
     p.add_argument("--voice-b", help="target voice B (required by the blend check)")
-    p.add_argument("--list", default=str(paths.EVAL_LISTS / "test_clean_200.tsv"),
-                   help="source eval list TSV")
+    p.add_argument("--list", default=None,
+                   help="source eval list TSV (default eval_lists/test_clean_200.tsv; with "
+                        "--s2ut eval_lists/s2ut/test_<src>_<tgt>_200.tsv)")
+    p.add_argument("--s2ut", action="store_true",
+                   help="M3 Stage 09: run the checks on Mode B translated output (fv_s2ut_file)")
+    p.add_argument("--src-lang", help="--s2ut source language (e.g. en)")
+    p.add_argument("--tgt-lang", help="--s2ut target language (e.g. es)")
     p.add_argument("--targets", default=str(paths.EVAL_LISTS / "targets.tsv"),
                    help="target reference clips TSV (blend check)")
     p.add_argument("--presets-dir", default=str(paths.REPO_ROOT / "presets"))
@@ -339,7 +453,13 @@ def main(argv=None):
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"[eval_controls] error: {e}", file=sys.stderr)
         return 1
-    write_report(results, args.out)
+    if args.s2ut:
+        pair = f"{args.src_lang}->{args.tgt_lang}"
+        write_report(results, args.out,
+                     title=f"M3 Stage 09 offline DoD — voice controls on Mode B output ({pair}, "
+                           "fv_s2ut_file)", mode=f"s2ut {pair}")
+    else:
+        write_report(results, args.out)
     for name, r in results.items():
         print(f"[controls] {name}: {r.get('status', '?').upper()} — {r.get('detail', '')}")
     return 0 if all(r.get("status") != "fail" for r in results.values()) else 1

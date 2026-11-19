@@ -8,7 +8,7 @@
 | **Name** | *Half-wired readiness* — Stage 04 widened readiness to `[0, 2]`, but Stage 05 still trains & feeds `(0, 1)` probabilities |
 | **Reported** | 2026-11-15 |
 | **Severity** | Medium–High (invalidates the `ctc-adaptive` candidate in Stage 05's decision gate: 0 two-write steps at constant `k`, monotonic lag ratchet) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-18 ([fix plan](FIX-PLAN-BUG-029-032_2026-11-18.md); GCC/Clang + pytest green, native MSVC/AppleClang legs pending) |
 | **Component** | `python_training/fvml/s2ut_stream.py:361-362`, `python_training/fvml/translator.py:770-778, 843-845` |
 | **Blocks** | [Milestone 3 / Stage 05](../Milestone%203/05_causal_s2ut_translator_policy_gate.md) policy decision gate (`Strict Wait-k` vs. `CTC-Adaptive`) |
 
@@ -95,3 +95,7 @@ Stage 04 widened `WaitKPolicy::on_source_readiness` to `[0, 2]` after Stage 05 h
 ## Workaround
 
 None for `ctc-adaptive` — running `gate_s2ut.py` today evaluates a delay-only variant rather than true 0/1/2-chunk CTC-Adaptive Wait-*k*.
+
+## Runtime note (2026-11-18)
+
+The C++ Mode B runner mirrors the Python driver's `sigmoid(readiness_logit)` mapping through one function, `readiness_from_logit()` in `src/pipeline/InferencePipeline.cpp`. While this bug is open the two stay identical; when the `[0, 2]` mapping is fixed in `translator.py` / `s2ut_stream.py`, change `readiness_from_logit()` in the same commit (and regenerate the `s2ut_golden.py` fixtures).

@@ -3,6 +3,8 @@
 #include "imgui/Views.hpp"
 
 #include "core/AppModel.hpp"
+#include "core/Paths.hpp"
+#include "core/UrlPolicy.hpp"
 #include "core/VoiceCatalog.hpp"
 #include "imgui/Theme.hpp"
 #include "imgui/Widgets.hpp"
@@ -11,6 +13,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
@@ -71,35 +74,38 @@ void draw_detail(ViewContext& ctx, const VoiceCatalog::Item& it) {
                           static_cast<double>(it.voice->logf0_mean), static_cast<double>(it.voice->logf0_std),
                           static_cast<double>(it.voice->energy_mean), static_cast<double>(it.voice->energy_std));
             widgets::kv_row("Embedding / stats", buf);
-            widgets::kv_row("Folder", it.voice->bundle_dir.string());
+            widgets::kv_row("Folder", path_to_utf8(it.voice->bundle_dir));
         }
         widgets::kv_table_end();
     }
     ImGui::Spacing();
 
     if (it.voice) {
-        const bool active = app.active_bundle() == it.bundle;
-        if (ImGui::Button("Set as Voice A")) {
-            if (!active) static_cast<void>(app.set_active_bundle(it.bundle));
-            static_cast<void>(app.set_voice_a(it.voice->name));
-        }
+        // Names, never rows: the model resolves them against the loaded bundle,
+        // loading the voice's bundle first when it is not the loaded one.
+        if (ImGui::Button("Set as Voice A")) static_cast<void>(app.use_voice(it.bundle, it.voice->name, false));
         ImGui::SameLine();
-        if (ImGui::Button("Set as Voice B")) {
-            if (!active) static_cast<void>(app.set_active_bundle(it.bundle));
-            static_cast<void>(app.set_voice_b(it.voice->name));
-        }
+        if (ImGui::Button("Set as Voice B")) static_cast<void>(app.use_voice(it.bundle, it.voice->name, true));
         ImGui::SameLine();
         if (ImGui::Button("Open folder")) ctx.shell.open_path(it.voice->bundle_dir);
     }
     if (it.entry) {
-        if (!it.page.empty() && ImGui::Button("Open page")) ctx.shell.open_url(it.page);
+        const auto link_button = [&](const char* label, const std::string& link) {
+            const bool ok = is_web_url(link);
+            ImGui::BeginDisabled(!ok);
+            if (ImGui::Button(label)) ctx.shell.open_url(link);
+            ImGui::EndDisabled();
+            if (!ok && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                ImGui::SetTooltip("Only http:// and https:// links can be opened.");
+        };
+        if (!it.page.empty()) link_button("Open page", it.page);
         if (!it.url.empty()) {
             ImGui::SameLine();
-            if (ImGui::Button("Open download link")) ctx.shell.open_url(it.url);
+            link_button("Open download link", it.url);
         }
         ImGui::SameLine();
         if (ImGui::Button("Add bundle folder...")) {
-            ctx.shell.pick_folder([&app](const std::vector<std::string>& paths) {
+            ctx.shell.pick_folder([&app](const std::vector<std::filesystem::path>& paths) {
                 if (!paths.empty()) static_cast<void>(app.add_bundle_dir(paths.front()));
             });
         }
@@ -124,7 +130,7 @@ void draw_catalogue(ViewContext& ctx) {
     if (ImGui::Button("Rescan")) app.rescan_models();
     ImGui::SameLine();
     if (ImGui::Button("Add bundle folder...")) {
-        ctx.shell.pick_folder([&app](const std::vector<std::string>& paths) {
+        ctx.shell.pick_folder([&app](const std::vector<std::filesystem::path>& paths) {
             if (!paths.empty()) static_cast<void>(app.add_bundle_dir(paths.front()));
         });
     }
@@ -160,7 +166,7 @@ void draw_catalogue(ViewContext& ctx) {
     for (const BundleInfo& b : app.catalog().bundles())
         if (!b.valid()) widgets::notice(("Bundle '" + b.name + "' is invalid: " + b.error).c_str(), t.danger);
     for (const CatalogueIndex& i : app.catalog().indices())
-        if (!i.ok()) widgets::notice(("Catalogue index " + i.path.string() + ": " + i.error).c_str(), t.danger);
+        if (!i.ok()) widgets::notice(("Catalogue index " + path_to_utf8(i.path) + ": " + i.error).c_str(), t.danger);
 
     const float list_w = ImGui::GetContentRegionAvail().x * 0.46f;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, t.card_bg);

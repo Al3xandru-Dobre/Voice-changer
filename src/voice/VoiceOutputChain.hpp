@@ -1,7 +1,7 @@
 // VoiceOutputChain — the Stage 09 output stage run on the inference worker
 // thread inside InferencePipeline (Milestone 2 / Stage 09).
 //
-// Order: gain -> gate -> brightness -> limiter. This is a deliberate deviation
+// Order: gain -> gate -> mute -> brightness -> limiter. This is a deliberate deviation
 // from the stage text's "gain -> gate -> limiter (-> brightness)": the limiter
 // stays last so the -1 dBFS ceiling still holds after a +6 dB brightness tilt
 // (and after any future output stage). Documented in
@@ -14,6 +14,11 @@
 //              (hysteresis), then a 5-frame (100 ms) hold before closing;
 //              per-sample envelope: 2 ms linear attack, 50 ms linear release,
 //              floor 0 (full mute)
+//   mute       linear per-sample ramp of a 0..1 multiplier, 5 ms each way
+//              (no click on mute or unmute); set_muted() is a level, kept
+//              across reset() (a muted stream restarts silent). It is part
+//              of the chain, so PipelineOptions::output_chain = false
+//              (raw vocoder PCM, parity runs only) ignores it
 //   brightness first-order tilt: one-pole lowpass `lp` at a 1 kHz pivot,
 //              hp = x - lp, y = lp * 10^(-t/40) + hp * 10^(+t/40) with t the
 //              smoothed tilt dB (per-sample one-pole, tau 20 ms); exactly 0 dB
@@ -45,6 +50,7 @@ public:
             static_cast<float>(1.0 - std::exp(-2.0 * 3.14159265358979323846 * kTiltPivotHz / sr));
         attack_step_ = static_cast<float>(1.0 / (0.002 * sr));   // 2 ms attack
         release_step_ = static_cast<float>(1.0 / (0.050 * sr));  // 50 ms release
+        mute_step_ = static_cast<float>(1.0 / (0.005 * sr));     // 5 ms mute ramp
         reset();
     }
 
@@ -56,12 +62,18 @@ public:
         tilt_target_ = brightness_db;
     }
 
-    /// Snap gain/tilt/limiter-mix to their targets, close the gate
+    /// Ramp the output to silence (true) or back to unity (false) over ~5 ms.
+    /// Worker thread, like set_targets().
+    void set_muted(bool muted) noexcept { mute_target_ = muted ? 0.0f : 1.0f; }
+    bool muted() const noexcept { return mute_target_ == 0.0f; }
+
+    /// Snap gain/tilt/limiter-mix/mute to their targets, close the gate
     /// (envelope 0, hold 0) and clear the tilt filter state.
     void reset() noexcept {
         gain_ = gain_target_;
         tilt_ = tilt_target_;
         mix_ = limiter_target_;
+        mute_ = mute_target_;
         env_ = 0.0f;
         open_ = false;
         hold_ = 0;
@@ -89,7 +101,9 @@ public:
                 gain_ += pole_coef_ * (gain_target_ - gain_);
                 env_ += env_ < target ? std::min(attack_step_, target - env_)
                                       : -std::min(release_step_, env_ - target);
-                float y = out[i] * gain_ * env_;
+                mute_ += mute_ < mute_target_ ? std::min(mute_step_, mute_target_ - mute_)
+                                              : -std::min(mute_step_, mute_ - mute_target_);
+                float y = out[i] * gain_ * env_ * mute_;
                 tilt_ += pole_coef_ * (tilt_target_ - tilt_);
                 // Snap within 1e-6: returns to the exact fast path (no pow)
                 // instead of tailing off through denormals forever.
@@ -113,7 +127,7 @@ public:
     /// Unity below the knee (70 % of the ceiling); above it a tanh curve that
     /// is C1-continuous at the knee and asymptotic to the -1 dBFS ceiling, so
     /// nominal levels pass untouched and nothing exceeds the ceiling. The one
-    /// definition of the curve — frontend::OutputChain delegates here.
+    /// definition of the curve (the GUI's Bypass mode runs this class too).
     static float soft_limit(float x) noexcept {
         const float a = std::fabs(x);
         if (a <= kKnee) return x;
@@ -148,17 +162,20 @@ private:
     float tilt_lp_coef_ = 0.3249f;   // 1 kHz @ 16 kHz until configure()
     float attack_step_ = 0.03125f;   // 2 ms @ 16 kHz until configure()
     float release_step_ = 0.00125f;  // 50 ms @ 16 kHz until configure()
+    float mute_step_ = 0.0125f;      // 5 ms @ 16 kHz until configure()
 
     float gain_target_ = 1.0f;
     float threshold_ = -80.0f;
     float limiter_target_ = 1.0f;
     float tilt_target_ = 0.0f;
+    float mute_target_ = 1.0f;  // multiplier: 1 = audible, 0 = muted
 
     float gain_ = 1.0f;
     float env_ = 0.0f;
     float tilt_ = 0.0f;
     float lp_ = 0.0f;
     float mix_ = 1.0f;
+    float mute_ = 1.0f;
     bool open_ = false;
     std::uint32_t hold_ = 0;
 };

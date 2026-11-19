@@ -400,6 +400,37 @@ def test_adaptive_readiness():
     assert p.t_src - p.t_tgt == 1
 
 
+def test_set_adaptive_mode_live_switch():
+    """Stage 09 `adaptive_policy`: the switch keeps the utterance (t_src, t_tgt,
+    phase) and restarts the readiness bank from 0, so a stale bank cannot
+    release a write."""
+    def banked():
+        p = WaitKPolicy(WaitKConfig(k=3, adaptive_mode=True))
+        assert [drive(p, True, readiness=0.75) for _ in range(2)] == [(Decision.READ, 0)] * 2
+        assert p._readiness == 1.5 and (p.t_src, p.t_tgt) == (2, 0)
+        return p
+
+    ref = banked()
+    assert drive(ref, True) == (Decision.WRITE, 1)             # the old bank writes at lag k
+
+    p = banked()
+    phase = p.phase
+    p.set_adaptive_mode(False)
+    assert not p.config.adaptive_mode and p._readiness == 0.0
+    assert (p.t_src, p.t_tgt, p.phase) == (2, 0, phase)
+    p.set_adaptive_mode(True)
+    assert p.config.adaptive_mode and p._readiness == 0.0
+    assert (p.t_src, p.t_tgt, p.phase, p.flushes_completed) == (2, 0, phase, 0)
+    # Empty bank: hold back until lag >= k + adaptive_extra_wait (3 + 2).
+    assert [drive(p, True) for _ in range(3)] == [(Decision.READ, 0)] * 2 + [(Decision.WRITE, 1)]
+    assert (p.t_src, p.t_tgt) == (5, 1)
+
+    q = banked()
+    q.set_adaptive_mode(False)                                 # strict: lag >= k writes
+    assert drive(q, True) == (Decision.WRITE, 1) and q._readiness == 0.0
+    assert (q.t_src, q.t_tgt) == (3, 1)
+
+
 def test_write_lag_invariant():
     rng = random.Random(7)
     for _ in range(200):
@@ -572,3 +603,106 @@ def test_fifo_overflow_is_all_or_nothing():
 
 def test_fifo_short_prosody_span():
     assert UnitProsodyFifo().push_chunk([1, 2, 3, 4], [0.0] * 9).pushed == 2
+
+
+def test_fifo_stores_float32_prosody():
+    """Frames hold C++ floats: prosody is rounded to binary32 on push."""
+    fifo = UnitProsodyFifo(8, VOCAB, EOS)
+    fifo.push_chunk([1], [0.1, 1e39, -1e39, math.nan])
+    (unit,), (row,) = fifo.pop_hop(1)
+    assert unit == 1 and row[0] == W._f32(0.1) != 0.1
+    assert row[1] == math.inf and row[2] == -math.inf and math.isnan(row[3])
+
+
+# ---------------------------------------------------------------------------
+# UnitProsodyFifo.pad_to_multiple (BUG-028: stranded <EOS> tail frames)
+# ---------------------------------------------------------------------------
+def test_fifo_pad_to_multiple_noop_cases():
+    fifo = UnitProsodyFifo(64, VOCAB, EOS)
+    assert fifo.pad_to_multiple(4) == 0 and fifo.empty()            # empty queue
+    fifo.push_chunk(*make_chunk(0))
+    for n in (-1, 0, 1, 2, 4):                                      # n <= 1, or aligned
+        assert fifo.pad_to_multiple(n) == 0
+    fifo.push_chunk([4, 5, 6, EOS], make_chunk(4)[1])
+    assert fifo.size() == 7 and fifo.pad_to_multiple(1) == 0        # n = 1 never pads
+    assert fifo.overflows == 0
+    units, rows, pads = fifo.pop_hop_with_pads(7)
+    assert units == [0, 1, 2, 3, 4, 5, 6] and pads == [False] * 7
+    assert all(frame_ok(i, u, r) for i, (u, r) in enumerate(zip(units, rows)))
+    assert fifo.pop_hop_with_pads(1) is None
+
+
+def test_fifo_pad_to_multiple_copies_the_newest_frame():
+    fifo = UnitProsodyFifo(64, VOCAB, EOS)
+    _, prosody = make_chunk(0)
+    r = fifo.push_chunk([7, 8, EOS, PAD], prosody)                  # [u0, u1] + specials
+    assert (r.pushed, r.eos, r.overflow) == (2, True, False)
+    assert fifo.pad_to_multiple(4) == 2 and fifo.size() == 4
+    assert fifo.pad_to_multiple(4) == 0                             # aligned now
+    units, rows, pads = fifo.pop_hop_with_pads(4)
+    assert units == [7, 8, 8, 8] and pads == [False, False, True, True]
+    assert rows[1] == (1.25, 1.5, 1.75, -1.0)
+    # The newest frame's unit, z_logf0 and z_energy; voicing 0, aperiodicity 1.
+    assert rows[2] == rows[3] == (1.25, 0.0, 1.0, -1.0)
+    assert fifo.empty() and fifo.overflows == 0
+
+    # pop_hop() keeps its (units, 4-tuple rows) shape for pad frames.
+    fifo.push_chunk([9, PAD, PAD, PAD], prosody)
+    assert fifo.pad_to_multiple(2) == 1
+    assert fifo.pop_hop(2) == ([9, 9], [(0.25, 0.5, 0.75, 0.0), (0.25, 0.0, 1.0, 0.0)])
+
+
+def test_fifo_bug028_tail_does_not_bleed_into_the_next_utterance():
+    """The BUG-028 sequence: [10, 11, EOS, PAD] + pad -> pop 4 -> next utterance
+    [20..23] -> pop 4 is exactly [20..23] (no stranded frame ahead of it)."""
+    fifo = UnitProsodyFifo(64, VOCAB, EOS)
+    _, prosody = make_chunk(0)
+    assert fifo.push_chunk([10, 11, EOS, PAD], prosody).pushed == 2
+    assert fifo.pad_to_multiple(4) == 2
+    units, _, pads = fifo.pop_hop_with_pads(4)
+    assert units == [10, 11, 11, 11] and pads == [False, False, True, True]
+    assert fifo.empty()
+    assert fifo.push_chunk([20, 21, 22, 23], prosody).pushed == 4
+    assert fifo.pad_to_multiple(4) == 0
+    units, rows, pads = fifo.pop_hop_with_pads(4)
+    assert units == [20, 21, 22, 23] and pads == [False] * 4
+    assert [row[1] for row in rows] == [0.5, 1.5, 2.5, 3.5]
+    assert fifo.pop_hop(4) is None
+
+
+def test_fifo_pad_needs_room():
+    fifo = UnitProsodyFifo(6, VOCAB, EOS)                           # not a multiple of 4
+    fifo.push_chunk(*make_chunk(0))
+    assert fifo.push_chunk([4, EOS, PAD, PAD], make_chunk(4)[1]).pushed == 1
+    assert fifo.size() == 5 and fifo.free() == 1
+    assert fifo.pad_to_multiple(4) == 0 and fifo.overflows == 1 and fifo.size() == 5
+    assert fifo.pad_to_multiple(2) == 1 and fifo.size() == 6 and fifo.free() == 0
+    units, _, pads = fifo.pop_hop_with_pads(6)
+    assert units == [0, 1, 2, 3, 4, 4] and pads == [False] * 5 + [True]
+
+
+@pytest.mark.parametrize("hop", [1, 2, 4])
+def test_fifo_padded_stream_stays_hop_aligned(hop):
+    """Random <EOS> cut points, a pad after every push, whole hops popped: the
+    queue is always hop-aligned, real frames come out in order and pads only
+    ever follow a truncated chunk."""
+    rng = random.Random(28 + hop)
+    fifo = UnitProsodyFifo(64, VOCAB, EOS)
+    real, out, pad_total = [], [], 0
+    for step in range(400):
+        units, prosody = make_chunk(step * 4)
+        cut = rng.choice((4, 4, 4, 0, 1, 2, 3))
+        units = units[:cut] + [EOS] + [PAD] * (3 - cut) if cut < 4 else units
+        r = fifo.push_chunk(units[:4], prosody)
+        real += units[:r.pushed]
+        pads = fifo.pad_to_multiple(hop)         # the queue was aligned before the push
+        assert pads == -r.pushed % hop and fifo.size() % hop == 0
+        pad_total += pads
+        while fifo.size() >= hop and (fifo.size() > 8 or rng.random() < 0.5):
+            u, _, p = fifo.pop_hop_with_pads(hop)
+            out += [x for x, is_pad in zip(u, p) if not is_pad]
+    while not fifo.empty():
+        u, _, p = fifo.pop_hop_with_pads(hop)
+        out += [x for x, is_pad in zip(u, p) if not is_pad]
+    assert out == real and fifo.overflows == 0
+    assert (pad_total == 0) == (hop == 1)

@@ -8,7 +8,7 @@
 | **Name** | *Phantom script* — the generated job calls a script and flags that do not exist |
 | **Reported** | 2026-11-14 |
 | **Severity** | Medium (the wizard's step 5 output fails at its first line; no audio or data risk) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-18 (unavailable steps labelled), native legs pending |
 | **Component** | `frontend/core/VoiceStudio.cpp` (`commands`, `write_job`) |
 | **Blocks** | [Milestone 4 / Stage 03](../Milestone%204/03_voice_studio_translate_catalogue_panels.md); depends on [M2 / Stage 10](../Milestone%202/10_target_voice_finetune.md) (☐ not started) |
 
@@ -72,3 +72,39 @@ look for substrings only (`tests/test_frontend_model.cpp:573-589`).
 
 None. The fine-tune must be run by hand with the real options of
 `train_unit_vocoder.py` once the preprocessing script exists.
+
+## Fix (2026-11-18)
+
+The Studio no longer prints commands that cannot run. Mapping:
+
+- **Prepare** is `prepare_target_voice.py --input <dir> --speaker=<voice> --out
+  <project>/prepared [--display <name>]`. It is available only when every take
+  and room-tone file is in one folder named `<voice>_sNN_TTTT.wav` /
+  `<voice>_sNN_roomtone.wav`; otherwise it is unavailable and the failing rule
+  is shown.
+- **Fine-tune** is always "unavailable until M2 Stage 10 lands": it needs the
+  Stage 05 encoder checkpoint, the base vocoder checkpoint, a training manifest
+  and unit directories that the Studio does not collect, and no option names a
+  base bundle.
+- **Export** is unavailable: it would export the fine-tune's checkpoint, and the
+  recipe's `--encoder-ckpt` / `--vocoder-ckpt` do not exist in
+  `export_stateful_onnx.py`.
+
+Unavailable steps are left out of `job.json` `"commands"` (they are listed in a
+separate `"unavailable"` object) and appear only as comments in the run scripts;
+Copy is disabled and the reason is shown. Scripts: POSIX `#!/bin/sh` with
+`set -eu`; PowerShell with `& …` and `if ($LASTEXITCODE -ne 0) { exit
+$LASTEXITCODE }` after each line, single-quote quoting. `takes.tsv` and
+`room_tone.tsv` are still written but nothing consumes them; `base_bundle` and
+`target_bundle` reach only `job.json`.
+
+Regression tests (`test_job_commands` in `tests/test_frontend_studio.cpp`,
+`frontend_studio`; `test_voice_studio` in `frontend_model`): every
+emitted `--option` is checked against the script's `add_argument` strings, and
+the generated script text is checked. Mutation check: removing the PowerShell `$LASTEXITCODE`
+check fails the suite.
+
+Evidence: Linux GCC 13.3.0 and Clang 18.1.3, strict + warnings-as-errors,
+`ctest -E python_training` 105/105 PASS (2026-11-18, local). The PowerShell
+script was not executed on Windows; Windows MSVC and macOS: NOT RUN. Open:
+fine-tune and export commands return only when M2 Stage 10 lands.

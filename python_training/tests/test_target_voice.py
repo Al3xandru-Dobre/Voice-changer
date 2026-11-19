@@ -564,3 +564,83 @@ def test_export_private_voice_banner_and_flag(tmp_path):
     assert not ex.voices_private(report)
     card = ex.model_card(tmp_path / "bundle", report, None)
     assert "PRIVATE" not in card
+
+
+# -- Milestone 3 / Stage 10: the voice's language (--lang) ---------------------------
+def _prep_args(raw, out, *extra):
+    return ["--input", str(raw), "--speaker", "me", "--out", str(out),
+            "--min-minutes", "0.05", "--heldout-s", "3", "--min-clip-s", "2", *extra]
+
+
+def test_prepare_target_voice_lang_tags_rows_and_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("FLUXVOICE_DATA", str(tmp_path))
+    raw = _make_input(tmp_path)
+    out = tmp_path / "out_es"
+    assert ptv.main(_prep_args(raw, out, "--lang", "es")) == 0
+    rows = [json.loads(line) for name in ("train.jsonl", "heldout.jsonl")
+            for line in (out / name).read_text().splitlines()]
+    assert rows and all(r["lang"] == "es" for r in rows)
+    meta = json.loads((out / "speaker_metadata.json").read_text())
+    assert meta["me"]["lang"] == "es"
+    assert meta["me"]["license"] == "private — do not distribute"
+    assert json.loads((out / "report.json").read_text())["lang"] == "es"
+    assert "- language: es" in (out / "report.md").read_text()
+    # Default English; the live-mic rows are tagged too.
+    out_en = tmp_path / "out_en"
+    assert ptv.main(_prep_args(raw, out_en)) == 0
+    assert json.loads((out_en / "speaker_metadata.json").read_text())["me"]["lang"] == "en"
+    live = tmp_path / "live"
+    assert ptv.main(["--input", str(raw), "--speaker", "me", "--out", str(live),
+                     "--live-mic", "--min-clip-s", "2", "--lang", "fr"]) == 0
+    assert all(json.loads(line)["lang"] == "fr"
+               for line in (live / "live_mic.jsonl").read_text().splitlines())
+    # The voices.json rule (lowercase [a-z-]{2,8}) is enforced up front.
+    for bad in ("English", "EN", "e", "en_us"):
+        assert ptv.main(_prep_args(raw, tmp_path / f"bad_{bad}", "--lang", bad)) == 1
+        assert not (tmp_path / f"bad_{bad}" / "train.jsonl").exists()
+
+
+def test_target_voice_lang_reaches_the_exported_voices_json(tmp_path, monkeypatch):
+    """prepare_target_voice --lang -> train_unit_vocoder fine-tune -> checkpoint
+    -> the Stage 06 export's voices.json: the "me" entry carries its language."""
+    from fvml import export as fx, vocoder
+    threads = torch.get_num_threads()
+    torch.set_num_threads(min(threads, 2))        # tiny model: do not thrash a busy box
+    try:
+        _mini_vocoder_run(tmp_path, monkeypatch, [], steps=2)
+        prep = tmp_path / "prep"
+        assert ptv.main(_prep_args(_make_input(tmp_path), prep)) == 0
+        train_rows = [json.loads(line) for line in (prep / "train.jsonl").read_text().splitlines()]
+        udir = tmp_path / "units_me"
+        udir.mkdir()
+        rng = np.random.default_rng(3)
+        urows = []
+        for r in train_rows:              # stand-in units: one id per 20 ms frame
+            n = math.ceil(round(r["duration"] * audio.SAMPLE_RATE) / 320)
+            np.save(udir / f"{r['utt_id']}.npy", rng.integers(0, 16, size=n).astype(np.int16))
+            urows.append({"utt_id": r["utt_id"], "units": f"{r['utt_id']}.npy", "n_frames": n})
+        (udir / units.MANIFEST_FILE).write_text("".join(json.dumps(u) + "\n" for u in urows))
+        (udir / units.META_FILE).write_text(
+            json.dumps(units.base_meta("fake", 320, 0, 16, "fake:0", True, "", {})))
+        assert tuv.main([
+            "--train-manifest", f"{tmp_path / 'm_base.jsonl'},{prep / 'train.jsonl'}",
+            "--train-units", f"{tmp_path / 'units'},{udir}", "--exclude-targets", "",
+            "--upsample-initial-channel", "32", "--segment-samples", "1280",
+            "--batch-size", "2", "--workers", "0", "--device", "cpu", "--steps", "0",
+            "--finetune-from", str(tmp_path / "ckpt" / "base" / "final.pt"),
+            "--new-speaker-init", "hifitts_92", "--mix-speakers", "me",
+            "--speaker-metadata", str(prep / "speaker_metadata.json"),
+            "--run-name", "ft_lang", "--runs-dir", str(tmp_path / "runs"),
+            "--ckpt-dir", str(tmp_path / "ckpt")]) == 0
+    finally:
+        torch.set_num_threads(threads)
+    final = tmp_path / "ckpt" / "ft_lang" / "final.pt"
+    model, ck = vocoder.UnitVocoder.from_checkpoint(final)
+    assert ck["speakers"] == ["lj", "hifitts_92", "me"]
+    assert ck["speaker_metadata"]["me"]["lang"] == "en"
+    exported = {v["name"]: v for v in fx.voices_json(model, ck)["voices"]}
+    assert exported["me"]["lang"] == "en"
+    assert exported["me"]["license"] == "private — do not distribute"
+    assert "lang" not in exported["lj"]             # untagged M2 corpora stay untagged
+    on_disk = json.loads((final.parent / "voices.json").read_text())
+    assert [v.get("lang") for v in on_disk["voices"]] == [None, None, "en"]

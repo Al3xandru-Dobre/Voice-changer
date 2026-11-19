@@ -8,7 +8,7 @@
 | **Name** | *Prefix folders* — the draft directory is the half-typed voice name |
 | **Reported** | 2026-11-14 |
 | **Severity** | High (silent loss of a recording project's draft; writes outside the Studio directory) |
-| **Status** | ◐ fixed in tree 2026-11-15 — native legs pending, see [Resolution](#resolution) |
+| **Status** | ◐ fixed in tree 2026-11-15 — native legs pending, see [Resolution](#resolution); `project_dir` residual fixed 2026-11-18, see [Fix (2026-11-18)](#fix-2026-11-18) |
 | **Component** | `frontend/imgui/ViewStudio.cpp`, `frontend/core/AppModel.cpp` (`studio_save_draft`), `frontend/core/VoiceStudio.cpp` (`project_dir`, `save_draft`) |
 | **Blocks** | [Milestone 4 / Stage 03](../Milestone%204/03_voice_studio_translate_catalogue_panels.md), [Stage 04](../Milestone%204/04_build_gate_frontend_hardening.md); [M2 / Stage 10](../Milestone%202/10_target_voice_finetune.md) uses the Studio's output |
 
@@ -125,3 +125,19 @@ Regression test `test_studio_drafts`:
 Not done: the Studio still has no project list and no "New project" command.
 Only the newest draft is reopened. To reach another project, type its name and
 choose "Open existing project".
+
+## Fix (2026-11-18)
+
+Residual: `VoiceStudioModel::project_dir()` fell back to `untitled` for an unsafe
+name, so a caller that skipped the name check could still write into an
+`untitled` project. It now returns an empty path for an unsafe name.
+
+Regression coverage: `test_project_dir` in `frontend_studio` (`tests/test_frontend_studio.cpp`) and
+`frontend_model` (`test_studio_drafts`; the Resolution section above still says
+`project_dir` falls back to `untitled`, which this fix replaces). Related 2026-11-18 Studio changes in the
+same area: take analysis runs off the UI thread and the draft is saved per
+batch (drained in `AppModel::tick`).
+
+Evidence: Linux GCC 13.3.0 and Clang 18.1.3, strict + warnings-as-errors,
+`ctest -E python_training` 105/105 PASS (2026-11-18, local). Windows MSVC and
+macOS: NOT RUN. The status stays "native legs pending".

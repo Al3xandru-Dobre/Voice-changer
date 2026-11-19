@@ -1,9 +1,13 @@
 // TranslationModel — langs.json parsing and pair validation.
 #include "core/TranslationModel.hpp"
 
+#include "voice/VoiceParams.hpp"
+
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -38,7 +42,7 @@ const Lang* LangTable::by_id(std::uint16_t id) const {
 
 int LangTable::default_k(std::string_view src, std::string_view tgt) const {
     const auto it = default_wait_k.find(std::string(src) + "->" + std::string(tgt));
-    return it == default_wait_k.end() ? 3 : it->second;
+    return it == default_wait_k.end() ? static_cast<int>(param_desc(ParamId::WaitK).def) : it->second;
 }
 
 LangTable parse_langs_json(std::string_view text) {
@@ -91,9 +95,11 @@ LangTable parse_langs_json(std::string_view text) {
     const auto dk = doc.find("default_wait_k");
     if (dk != doc.end()) {
         if (!dk->is_object()) { t.error = "langs.json: 'default_wait_k' must be an object"; return t; }
+        const long long lo = TranslationModel::wait_k_min(), hi = TranslationModel::wait_k_max();
         for (auto it = dk->begin(); it != dk->end(); ++it) {
-            if (!it->is_number_integer() || it->get<long long>() < 1 || it->get<long long>() > 10) {
-                t.error = "langs.json: default_wait_k['" + it.key() + "'] must be an integer in [1, 10]";
+            if (!it->is_number_integer() || it->get<long long>() < lo || it->get<long long>() > hi) {
+                t.error = "langs.json: default_wait_k['" + it.key() + "'] must be an integer in [" + std::to_string(lo) +
+                          ", " + std::to_string(hi) + "]";
                 return t;
             }
             t.default_wait_k[it.key()] = static_cast<int>(it->get<long long>());
@@ -145,6 +151,14 @@ PairValidation TranslationModel::validate_pair(std::string_view src, std::string
     return v;
 }
 
-int TranslationModel::clamp_wait_k(int k) { return k < 1 ? 1 : (k > 10 ? 10 : k); }
+int TranslationModel::wait_k_min() { return static_cast<int>(param_desc(ParamId::WaitK).min); }
+int TranslationModel::wait_k_max() { return static_cast<int>(param_desc(ParamId::WaitK).max); }
+
+int TranslationModel::clamp_wait_k(int k) { return std::clamp(k, wait_k_min(), wait_k_max()); }
+
+std::optional<double> TranslationModel::onset_estimate_ms(int k) const {
+    if (!caps_.known || !(caps_.chunk_ms > 0.0)) return std::nullopt;
+    return caps_.chunk_ms * k;
+}
 
 } // namespace fluxvoice::frontend

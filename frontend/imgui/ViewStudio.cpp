@@ -2,6 +2,7 @@
 #include "imgui/Views.hpp"
 
 #include "core/AppModel.hpp"
+#include "core/Paths.hpp"
 #include "core/VoiceStudio.hpp"
 #include "imgui/Theme.hpp"
 #include "imgui/Widgets.hpp"
@@ -10,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
 #include <optional>
 #include <string>
@@ -77,7 +79,7 @@ void takes_table(ViewContext& ctx, std::vector<Take>& takes, bool removable) {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::PushID(static_cast<int>(i));
-            widgets::text_ellipsis(tk.path.filename().string(), ImGui::GetContentRegionAvail().x);
+            widgets::text_ellipsis(path_to_utf8(tk.path.filename()), ImGui::GetContentRegionAvail().x);
             ImGui::TableNextColumn(); ImGui::TextUnformatted(tk.session.c_str());
             ImGui::TableNextColumn(); ImGui::Text("%.1f s", tk.stats.seconds);
             ImGui::TableNextColumn();
@@ -102,7 +104,13 @@ void takes_table(ViewContext& ctx, std::vector<Take>& takes, bool removable) {
     }
 }
 
-void pick_wavs(ViewContext& ctx, bool many, const std::function<void(const std::vector<std::string>&)>& on_files) {
+/// "analysing..." line while WAV files are being read on the worker thread.
+void analysing_note(const VoiceStudioModel& m) {
+    if (!m.analysis_pending()) return;
+    ImGui::TextColored(theme_colors().warning, "analysing %zu file(s)...", m.analysis_pending_count());
+}
+
+void pick_wavs(ViewContext& ctx, bool many, const ShellServices::FilesCallback& on_files) {
     ctx.shell.pick_files("WAV audio", "wav", many, on_files);
 }
 
@@ -176,15 +184,15 @@ void draw_step_takes(ViewContext& ctx) {
     if (ImGui::Button("Add WAV takes...")) {
         AppModel* ap = &app;
         const std::string session = session_text;
-        pick_wavs(ctx, true, [ap, session](const std::vector<std::string>& paths) {
-            for (const std::string& p : paths) ap->studio().add_take(p, session);
-            ap->studio_save_draft();
+        pick_wavs(ctx, true, [ap, session](const std::vector<std::filesystem::path>& paths) {
+            for (const std::filesystem::path& p : paths) ap->studio().request_take_analysis(TakeKind::Take, p, session);
         });
     }
     ImGui::SameLine();
     widgets::help_marker("Each file is read and checked: duration, format, peak, RMS, clipping (any sample >= 0.999 FS) "
                          "and an SNR estimate from the quietest 10 % of 10 ms blocks vs. the loudest 10 %. Files "
                          "that fail are kept in the list but excluded from the total.");
+    analysing_note(m);
     takes_table(ctx, d.takes, true);
     ImGui::Spacing();
     ImGui::SeparatorText("Material covered");
@@ -204,11 +212,11 @@ void draw_step_roomtone(ViewContext& ctx) {
     ImGui::SameLine();
     if (ImGui::Button("Add room tone...")) {
         AppModel* ap = &app;
-        pick_wavs(ctx, true, [ap](const std::vector<std::string>& paths) {
-            for (const std::string& p : paths) ap->studio().add_room_tone(p);
-            ap->studio_save_draft();
+        pick_wavs(ctx, true, [ap](const std::vector<std::filesystem::path>& paths) {
+            for (const std::filesystem::path& p : paths) ap->studio().request_take_analysis(TakeKind::RoomTone, p);
         });
     }
+    analysing_note(m);
     takes_table(ctx, d.room_tone, true);
     ImGui::Spacing();
     ImGui::SeparatorText("Live-mic source set (10 min through the everyday microphone)");
@@ -218,20 +226,28 @@ void draw_step_roomtone(ViewContext& ctx) {
     ImGui::SameLine();
     if (ImGui::Button("Add live-mic recordings...")) {
         AppModel* ap = &app;
-        pick_wavs(ctx, true, [ap](const std::vector<std::string>& paths) {
-            for (const std::string& p : paths) ap->studio().add_live_mic(p);
-            ap->studio_save_draft();
+        pick_wavs(ctx, true, [ap](const std::vector<std::filesystem::path>& paths) {
+            for (const std::filesystem::path& p : paths) ap->studio().request_take_analysis(TakeKind::LiveMic, p);
         });
     }
+    analysing_note(m);
     takes_table(ctx, d.live_mic, true);
 }
 
-void draw_command(ViewContext& ctx, const char* title, const std::string& cmd) {
+void draw_command(ViewContext& ctx, const char* title, const std::string& cmd, const std::string& unavailable, Shell shell) {
     ImGui::TextUnformatted(title);
     ImGui::SameLine();
     ImGui::PushID(title);
-    if (ImGui::SmallButton("Copy")) ctx.shell.set_clipboard(cmd);
+    ImGui::BeginDisabled(!unavailable.empty());
+    if (ImGui::SmallButton("Copy")) ctx.shell.set_clipboard(checked_line(cmd, shell));
+    ImGui::EndDisabled();
     ImGui::PopID();
+    if (!unavailable.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme_colors().warning);
+        ImGui::TextWrapped("Not available: %s", unavailable.c_str());
+        ImGui::PopStyleColor();
+        return;
+    }
     ImGui::PushStyleColor(ImGuiCol_Text, theme_colors().text_dim);
     ImGui::TextWrapped("%s", cmd.c_str());
     ImGui::PopStyleColor();
@@ -250,9 +266,9 @@ void draw_step_prepare(ViewContext& ctx) {
     widgets::dim_text_wrapped("The pipeline is textless: no transcripts are needed. Prepare normalises and segments the "
                               "takes, fine-tune adds the speaker row (50/50 own/public batches with formant/pitch/EQ "
                               "perturbation), export writes a new bundle version with a private licence.");
-    draw_command(ctx, "1. Prepare", c.prepare);
-    draw_command(ctx, "2. Fine-tune", c.finetune);
-    draw_command(ctx, "3. Export", c.export_);
+    draw_command(ctx, "1. Prepare", c.prepare, c.prepare_unavailable, shell);
+    draw_command(ctx, "2. Fine-tune", c.finetune, c.finetune_unavailable, shell);
+    draw_command(ctx, "3. Export", c.export_, c.export_unavailable, shell);
     ImGui::Spacing();
     if (ImGui::Button("Write job files")) {
         std::string err;
@@ -260,7 +276,10 @@ void draw_step_prepare(ViewContext& ctx) {
         else app.notify(Notice::Level::Error, err);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Open project folder")) ctx.shell.open_path(m.project_dir(app.paths().studio_dir));
+    const std::filesystem::path project = m.project_dir(app.paths().studio_dir);
+    ImGui::BeginDisabled(project.empty());
+    if (ImGui::Button("Open project folder")) ctx.shell.open_path(project);
+    ImGui::EndDisabled();
     ImGui::SameLine();
     widgets::dim_text(m.job_written(app.paths().studio_dir) ? "job.json written" : "job.json not written yet");
 
@@ -287,8 +306,7 @@ void draw_step_install(ViewContext& ctx) {
             for (const VoiceEntry& v : b.voices)
                 if (v.name == m.draft().voice_name) {
                     if (ImGui::Button("Use as Voice A")) {
-                        static_cast<void>(app.set_active_bundle(b.name));
-                        static_cast<void>(app.set_voice_a(v.name));
+                        static_cast<void>(app.use_voice(b.name, v.name, false));
                         app.navigate(Section::Voices);
                     }
                 }
@@ -303,7 +321,7 @@ void draw_step_install(ViewContext& ctx) {
 
 void draw_studio(ViewContext& ctx) {
     AppModel& app = ctx.app;
-    VoiceStudioModel& m = app.studio();
+    VoiceStudioModel& m = app.studio();  // analysis results are drained in AppModel::tick
     widgets::heading("Voice Studio");
     step_indicator(m);
 

@@ -24,6 +24,9 @@ README credits (Stage 11).
 | `musan` | [OpenSLR 17](https://www.openslr.org/17/) | CC BY 4.0 overall; per-file licences (see below) | Noise/music/babble augmentation (Stage 04) + `silence_hallucination_20.tsv` | 11.09 GB |
 | `rirs` | [OpenSLR 28](https://www.openslr.org/28/) (contains the [OpenSLR 26](https://www.openslr.org/26/) simulated RIRs) | Apache 2.0 | Reverberation augmentation (Stage 04) | 1.31 GB |
 | `vctk` (optional) | [Edinburgh DataShare 10283/3443](https://datashare.ed.ac.uk/handle/10283/3443) | CC BY 4.0 | Accent evaluation; extra pitch-accuracy data (Stage 03) | 11.75 GB |
+| `libritts-r-{dev,test}-{clean,other}` | [OpenSLR 141](https://www.openslr.org/141/) | CC BY 4.0 | 24 kHz Miipher-restored LibriTTS — reference eval + vocoder targets | 4.6 GB |
+| `libritts-r-train-clean-100` | OpenSLR 141 | CC BY 4.0 | Student training / target voices (Stage 04-05) | 8.13 GB |
+| `libritts-r-train-clean-360`, `libritts-r-train-other-500` (optional) | OpenSLR 141 | CC BY 4.0 | Scale-up: 360 h clean + 500 h noisier (robustness) | 75.8 GB |
 
 ## Milestone 3 — Bidirectional S2UT & Multilingual Vocoder Datasets (`prepare_s2ut_data.py`)
 
@@ -67,6 +70,9 @@ README credits (Stage 11).
 - **VCTK:** C. Veaux, J. Yamagishi, K. MacDonald, "CSTR VCTK Corpus: English
   Multi-speaker Corpus for CSTR Voice Cloning Toolkit (version 0.92)",
   University of Edinburgh, CSTR, 2019, CC BY 4.0.
+- **LibriTTS-R:** Y. Koizumi et al., "LibriTTS-R: A Restored Multi-Speaker
+  Text-to-Speech Corpus", arXiv:2305.18802, CC BY 4.0. Restored with Miipher;
+  samples identical to LibriTTS (OpenSLR 60, also CC BY 4.0).
 - **CVSS-C:** Y. Jia, M. T. Ramanovich, Q. Wang, H. Zen, "CVSS Corpus and
   Massively Multilingual Speech-to-Speech Translation", LREC 2022, CC BY 4.0.
 - **CoVoST 2:** C. Wang, A. Wu, J. Pino, "CoVoST 2 and Massively Multilingual

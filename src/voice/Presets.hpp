@@ -32,6 +32,8 @@
 
 namespace fluxvoice {
 
+struct LangCatalog;   // pipeline/LangCatalog.hpp
+
 struct Preset {
     std::string name;
     std::string description;
@@ -122,7 +124,11 @@ std::string params_table_text();
 /// The descriptor table as JSON (what `fluxvoice --list-params --json` prints):
 /// {"schema":1,"params":[{"name","label","unit","min","max","default","kind",
 /// "smoothing","tier","group","help"}, ...]}
-std::string descriptor_table_json();
+/// With `langs` (a bundle's langs.json, M3 Stage 09) the document also carries
+/// "langs": [{"code","id","name"}, ...] and "default_wait_k": {"es->en": 3, ...},
+/// so the Milestone 4 UI builds the translate toggle, the Wait-k slider and
+/// the language dropdowns from one dump.
+std::string descriptor_table_json(const LangCatalog* langs = nullptr);
 
 const char* to_string(ParamKind k);
 const char* to_string(ParamTier t);

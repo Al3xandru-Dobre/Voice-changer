@@ -8,7 +8,7 @@
 | **Name** | *Blind tail audit* — babbling decoders score `flush_tail_chunks = 0` (`PASS`) and `hallucinated_words = 0`, while `sil_tail_*` has wrong-language `tgt_text` |
 | **Reported** | 2026-11-15 |
 | **Severity** | Medium–High (the Stage 05 decision gate cannot reject a translator that fails to predict `<EOS>` and hallucinates speech across trailing silence) |
-| **Status** | ☐ open |
+| **Status** | ◐ fixed in tree 2026-11-18 ([fix plan](FIX-PLAN-BUG-029-032_2026-11-18.md); GCC/Clang + pytest green, native MSVC/AppleClang legs pending) |
 | **Component** | `python_training/gate_s2ut.py:228-260, 351-358`, `python_training/fvml/s2ut_eval.py:304-336`, `python_training/make_s2ut_eval_lists.py:236-247`, `python_training/eval_lists/s2ut/silence_hallucination_20.tsv` |
 | **Blocks** | [Milestone 3 / Stage 01](../Milestone%203/01_multilingual_data_simuleval_harness.md) flush/hallucination harness, [Stage 05](../Milestone%203/05_causal_s2ut_translator_policy_gate.md) Definition of Done |
 
@@ -103,3 +103,7 @@ flush_steps: 25 trailing_non_silent_ms: 2080.0 gate flush_tail_chunks: 0
 ## Workaround
 
 Inspect `per_utt.csv` (`trailing_non_silent_ms`, `duration_out / speech_end_s`) and `trace.jsonl` (`eos` events) manually on `silence_hallucination_20.tsv`, and always pass `--metrics flush` (never `bleu`) when running `eval_s2ut.py` on `silence_hallucination_20.tsv`.
+
+## Runtime support (M3 Stage 08)
+
+The C++ Mode B runtime reports the non-terminating case: `S2utTelemetry::cap_ends` (and the trace field `cap_end`, `[stats] s2ut_cap=`) count utterances whose flush ended on the `max_flush_ratio` bound or `max_flush_steps` without an `<EOS>`. `fv_s2ut_file --dump-trace` and `tools/analyze_soak.py --s2ut` can therefore surface this live; it does not replace the gate fix above.

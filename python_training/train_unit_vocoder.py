@@ -60,6 +60,23 @@ Stage 10 target-voice fine-tune recipe (Documents/Milestone 2/10_*.md):
       --speaker-metadata <data>/private/me/speaker_metadata.json \\
       --early-stop-patience 3 --val-utmos --steps 50000 --run-name voc_me
 
+Milestone 3 / Stage 10 cross-lingual "me" fine-tune
+(Documents/Milestone 3/10_cross_lingual_target_voice.md): the multilingual
+Stage 03 vocoder, the "me" row from the nearest English row, 40 % "me" batches
++ 60 % public batches split 15/15/15/15 over {en, es, fr, de}
+(--mix-public-lang-ratios: each public batch is drawn entirely from one
+language; the "me" group needs no language), and the unit embedding table
+frozen for the second half (--freeze-unit-emb-after half: requires_grad off,
+no AdamW update or weight decay; recorded in the checkpoint, kept on --resume):
+  train_unit_vocoder.py --default-lang en --train-subsets train \\
+      --train-manifest <Stage 03 public manifests>,<data>/private/me/train.jsonl \\
+      --train-units <Stage 03 K=1000 units>,<data>/units/mhubert/me \\
+      --exclude-targets eval_lists/targets.tsv,<data>/private/me/me_targets.tsv \\
+      --finetune-from checkpoints/voc_m3/final.pt --new-speaker-init nearest \\
+      --mix-speakers me --mix-ratio 0.4 --mix-public-lang-ratios en,es,fr,de \\
+      --freeze-unit-emb-after half --speaker-metadata <data>/private/me/speaker_metadata.json \\
+      --early-stop-patience 3 --val-utmos --steps 50000 --run-name voc_m3_me
+
 Exit status: 0 = trained, 1 = missing or inconsistent inputs.
 """
 import os
@@ -459,9 +476,20 @@ class MixedBatchSampler(torch.utils.data.Sampler):
     """Endless batches for the Stage 10 fine-tune mix: each batch is drawn
     entirely from the mix group (`in_group_mask`) with probability `ratio`,
     else entirely from the rest. Within a group, items are drawn
-    proportionally to `weights` like WeightedStream (length-weighted)."""
+    proportionally to `weights` like WeightedStream (length-weighted).
 
-    def __init__(self, weights, in_group_mask, batch_size, ratio, seed):
+    Milestone 3 / Stage 10: with `public_ratios` ({lang: share}, e.g.
+    sampling.parse_ratios("en,es,fr,de")) the public (non-mix) share is split
+    by language too: a public batch picks language l with probability
+    public_ratios[l] and is drawn entirely from that language's public items
+    (`public_langs`, parallel to `weights`; entries of mix-group items are
+    ignored, so the mix group needs no language). With ratio 0.4 and four equal
+    shares that is 40 % mix + 15 % each of en/es/fr/de, of all batches and of
+    all drawn crops. Without `public_ratios` the draws (and the RNG stream) are
+    exactly the M2 ones."""
+
+    def __init__(self, weights, in_group_mask, batch_size, ratio, seed,
+                 public_langs=None, public_ratios=None):
         w = torch.as_tensor(weights, dtype=torch.double)
         m = torch.as_tensor(in_group_mask, dtype=torch.bool)
         if w.numel() != m.numel():
@@ -478,14 +506,102 @@ class MixedBatchSampler(torch.utils.data.Sampler):
         self.batch_size = int(batch_size)
         self.ratio = float(ratio)
         self.seed = int(seed)
+        self.public_langs, self.public_probs, self.w_public = None, None, None
+        if public_ratios:
+            if public_langs is None or len(public_langs) != w.numel():
+                raise ValueError("public_langs must give one language per training item")
+            out_idx = [i for i in range(w.numel()) if not bool(m[i])]
+            # Same rules as --lang-ratios: every public item has a share and
+            # every share has items (a missing corpus is an error, not a skew).
+            sampling.language_weights([float(w[i]) for i in out_idx],
+                                      [public_langs[i] for i in out_idx], public_ratios)
+            self.public_langs = list(public_ratios)
+            self.public_probs = torch.tensor([float(public_ratios[lang])
+                                              for lang in self.public_langs],
+                                             dtype=torch.double)
+            lang_of = [None if bool(m[i]) else public_langs[i] for i in range(w.numel())]
+            self.w_public = [torch.where(torch.tensor([x == lang for x in lang_of]), w, zero)
+                             for lang in self.public_langs]
+
+    def batch_shares(self):
+        """{group: expected share of all batches}: "mix", then one entry per
+        public language (or "public" when the public share is not split)."""
+        if self.public_langs is None:
+            return {"mix": self.ratio, "public": 1.0 - self.ratio}
+        total = float(self.public_probs.sum())
+        return {"mix": self.ratio,
+                **{lang: (1.0 - self.ratio) * float(p) / total
+                   for lang, p in zip(self.public_langs, self.public_probs)}}
 
     def __iter__(self):
         g = torch.Generator().manual_seed(self.seed)
         while True:
             pick_in = bool(torch.rand((), generator=g) < self.ratio)
-            w = self.w_in if pick_in else self.w_out
+            if pick_in:
+                w = self.w_in
+            elif self.w_public is None:
+                w = self.w_out
+            else:
+                w = self.w_public[int(torch.multinomial(self.public_probs, 1, generator=g))]
             yield torch.multinomial(w, self.batch_size, replacement=True,
                                     generator=g).tolist()
+
+
+def mix_batch_sampler(train_items, weights, speakers, speaker_lang, mix_names, mix_ratio,
+                      batch_size, seed, public_lang_ratios=None):
+    """The fine-tune batch sampler train() uses -> (sampler, in_group mask).
+    `mix_names` are the mix-group speakers (e.g. {"me"}) out of `speakers`;
+    `speaker_lang` ({speaker: lang}) tags the public items when
+    `public_lang_ratios` splits the public share by language."""
+    unknown = set(mix_names) - set(speakers)
+    if unknown:
+        raise ValueError(f"--mix-speakers: unknown speaker(s) {sorted(unknown)}")
+    in_group = [it[4] in mix_names for it in train_items]
+    public_langs = None
+    if public_lang_ratios:
+        public_langs = [None if g else speaker_lang.get(it[4])
+                        for it, g in zip(train_items, in_group)]
+    sampler = MixedBatchSampler(weights, in_group, batch_size, mix_ratio, seed=seed,
+                                public_langs=public_langs, public_ratios=public_lang_ratios)
+    return sampler, in_group
+
+
+def resolve_freeze_step(spec, steps):
+    """--freeze-unit-emb-after: None (flag absent) -> None, 'half' ->
+    steps // 2, else a step count >= 0. Steps 1..N update unit_emb; it is
+    frozen before step N + 1 (0 = frozen for the whole run)."""
+    if spec is None or str(spec).strip() == "":
+        return None
+    spec = str(spec).strip().lower()
+    if spec == "half":
+        return int(steps) // 2
+    try:
+        n = int(spec)
+    except ValueError:
+        raise ValueError(f"--freeze-unit-emb-after {spec!r}: expected a step number "
+                         "or 'half'") from None
+    if n < 0:
+        raise ValueError(f"--freeze-unit-emb-after must be >= 0, got {n}")
+    return n
+
+
+def unit_emb_weight(gen):
+    """The generator's unit embedding table (discrete-unit vocoders only)."""
+    if not isinstance(getattr(gen, "unit_emb", None), torch.nn.Embedding):
+        raise ValueError("--freeze-unit-emb-after: this vocoder has no unit embedding table "
+                         f"(content_kind {gen.cfg.content_kind!r})")
+    return gen.unit_emb.weight
+
+
+def freeze_unit_emb(gen):
+    """Stage 10 (M3) regularizer: stop training the unit embedding table so the
+    centroids of phones the English "me" data rarely contains cannot drift.
+    requires_grad=False keeps backward from producing a gradient, and a param
+    whose .grad is None is skipped entirely by torch.optim.AdamW: no Adam
+    update and no decoupled weight decay."""
+    w = unit_emb_weight(gen)
+    w.requires_grad_(False)
+    w.grad = None
 
 
 def worker_init(_):
@@ -663,6 +779,17 @@ def train(args, log=print):
     labels_meta_clean = {k: labels_meta.get(k) for k in keep}
     speaker_lang = data_info.get("speaker_lang", {})
     lang_ratios = sampling.parse_ratios(args.lang_ratios)
+    # Milestone 3 / Stage 10: split the public share of the "me" mix by language.
+    public_lang_ratios = sampling.parse_ratios(args.mix_public_lang_ratios)
+    mix_names = {s.strip() for s in (args.mix_speakers or "").split(",") if s.strip()}
+    if public_lang_ratios and not mix_names:
+        raise ValueError("--mix-public-lang-ratios splits the public share of a "
+                         "--mix-speakers fine-tune: pass --mix-speakers as well")
+    if public_lang_ratios and lang_ratios:
+        raise ValueError("--lang-ratios and --mix-public-lang-ratios are exclusive: the first "
+                         "reweights every item (the mix group too), the second only the "
+                         "public batches of a --mix-speakers fine-tune")
+    freeze_after = resolve_freeze_step(args.freeze_unit_emb_after, args.steps)
 
     cfg = vocoder.VocoderConfig(
         sample_rate=audio.SAMPLE_RATE,
@@ -791,6 +918,30 @@ def train(args, log=print):
     elif args.finetune_from:
         log(f"[train] initialized weights from {args.finetune_from}")
 
+    # Milestone 3 / Stage 10: --freeze-unit-emb-after. requires_grad is not part
+    # of a state_dict, so a resumed run re-applies the switch its checkpoint
+    # recorded; a --finetune-from run starts its own schedule.
+    unit_emb_frozen_at = None
+    if resume and prior_ck is not None:
+        unit_emb_frozen_at = prior_ck.get("unit_emb_frozen_at")
+        recorded = prior_ck.get("freeze_unit_emb_after")
+        if freeze_after is None:
+            freeze_after = recorded
+        elif unit_emb_frozen_at is None and recorded is not None and recorded != freeze_after:
+            log(f"[train] --freeze-unit-emb-after: switch moved from step {recorded} "
+                f"to {freeze_after}")
+    if unit_emb_frozen_at is not None:
+        freeze_unit_emb(gen)
+        if freeze_after is not None and freeze_after > unit_emb_frozen_at:
+            log(f"[train] unit_emb stays frozen since step {unit_emb_frozen_at} "
+                f"(a resumed run cannot unfreeze it for --freeze-unit-emb-after {freeze_after})")
+        else:
+            log(f"[train] unit_emb stays frozen (since step {unit_emb_frozen_at})")
+    elif freeze_after is not None:
+        unit_emb_weight(gen)                    # fail before training on a soft-unit vocoder
+        log(f"[train] unit_emb trains for steps 1..{freeze_after}, frozen from step "
+            f"{freeze_after + 1} on")
+
     summary = gen.summary()
     d_params = sum(p.numel() for p in disc.parameters())
     log(f"[train] {run}: gen {summary['params'] / 1e6:.2f}M params ({summary['macs_per_second'] / 1e9:.2f} "
@@ -810,17 +961,17 @@ def train(args, log=print):
             f"{lang} {100 * s['share']:.0f}% of draws ({s['items']} utterances, "
             f"{sum(1 for sp in speakers if speaker_lang.get(sp) == lang)} voice(s))"
             for lang, s in shares.items()))
-    mix_names = {s.strip() for s in (args.mix_speakers or "").split(",") if s.strip()}
     if mix_names:
-        unknown = mix_names - set(speakers)
-        if unknown:
-            raise ValueError(f"--mix-speakers: unknown speaker(s) {sorted(unknown)}")
-        in_group = [it[4] in mix_names for it in train_items]
-        batch_sampler = MixedBatchSampler(weights, in_group, args.batch_size,
-                                          args.mix_ratio,
-                                          seed=args.seed * 1_000_003 + step)
+        batch_sampler, in_group = mix_batch_sampler(
+            train_items, weights, speakers, speaker_lang, mix_names, args.mix_ratio,
+            args.batch_size, seed=args.seed * 1_000_003 + step,
+            public_lang_ratios=public_lang_ratios)
         log(f"[train] mix: {sum(in_group)} of {len(train_items)} utterances in the "
             f"mix group {sorted(mix_names)}, batch-level ratio {args.mix_ratio}")
+        if public_lang_ratios:
+            log("[train] public batches by language: " + ", ".join(
+                f"{grp} {100 * share:.0f}%" for grp, share in batch_sampler.batch_shares().items())
+                + " of all batches")
         loader = torch.utils.data.DataLoader(
             ds, batch_sampler=batch_sampler, num_workers=args.workers,
             pin_memory=device.type == "cuda", worker_init_fn=worker_init,
@@ -858,6 +1009,10 @@ def train(args, log=print):
              "early_stop_since": stopper.since,
              "speaker_metadata": speaker_metadata, "run_name": run,
              "lang_ratios": json.dumps(lang_ratios) if lang_ratios else None,
+             "mix_public_lang_ratios": (json.dumps(public_lang_ratios)
+                                        if public_lang_ratios else None),
+             "freeze_unit_emb_after": freeze_after,
+             "unit_emb_frozen_at": unit_emb_frozen_at,
              "elapsed": elapsed0 + time.monotonic() - t_start},
             extra_metadata=speaker_metadata
         )
@@ -873,6 +1028,12 @@ def train(args, log=print):
     disc.train()
     it = iter(loader)
     while step < args.steps:
+        # Freeze before this step's forward pass builds its graph.
+        if freeze_after is not None and unit_emb_frozen_at is None and step >= freeze_after:
+            freeze_unit_emb(gen)
+            unit_emb_frozen_at = step
+            log(f"[train] step {step}: unit_emb frozen (--freeze-unit-emb-after "
+                f"{args.freeze_unit_emb_after or freeze_after})")
         wav, u, logf0, voicing, aperiodicity, energy, spk_id = next(it)
         wav = wav.to(device, non_blocking=True)
         u = u.to(device, non_blocking=True)
@@ -935,6 +1096,8 @@ def train(args, log=print):
             continue
 
         nonfinite_streak = 0
+        if unit_emb_frozen_at is not None:
+            gen.unit_emb.weight.grad = None     # AdamW skips a grad-less param (no decay either)
         opt_g.step()
         sched_g.step()
         sched_d.step()
@@ -1084,6 +1247,15 @@ def parse_args(argv=None):
                    help="comma-separated speakers forming the fine-tune mix group (e.g. 'me')")
     p.add_argument("--mix-ratio", type=float, default=0.5,
                    help="probability a batch is drawn entirely from the mix group")
+    p.add_argument("--mix-public-lang-ratios", default=None, metavar="SPEC",
+                   help="M3 Stage 10: split the public (non --mix-speakers) batches by "
+                        "language, each batch drawn entirely from one language: 'en,es,fr,de' "
+                        "or 'en=1,es=1,fr=1,de=1' (with --mix-ratio 0.4: 15%% of all batches "
+                        "per language); the mix group needs no language tag")
+    p.add_argument("--freeze-unit-emb-after", default=None, metavar="{STEP,half}",
+                   help="M3 Stage 10: stop training the unit embedding table after STEP steps "
+                        "('half' = --steps // 2; 0 = frozen throughout); the switch is "
+                        "recorded in the checkpoint and kept on --resume")
     p.add_argument("--early-stop-patience", type=int, default=0,
                    help="stop after N validations without improvement (0 = off)")
     p.add_argument("--val-utmos", action="store_true",

@@ -89,6 +89,15 @@ def _ls(subset, size, md5, group):
                    "build_librispeech", "", "CC BY 4.0", subset)
 
 
+def _ltsr(subset, size, md5, group):
+    """LibriTTS-R (OpenSLR 141): archive names use '_' (dev_clean.tar.gz),
+    subset dirs inside use '-' (dev-clean)."""
+    subset_dash = subset.replace("_", "-")
+    return Dataset(f"libritts-r-{subset_dash}", f"LibriTTS-R {subset_dash}", group,
+                   (Archive(f"{subset}.tar.gz", openslr(141, f"{subset}.tar.gz"), size, md5),),
+                   "build_libritts_r", "", "CC BY 4.0", subset_dash)
+
+
 DATASETS = {d.key: d for d in (
     _ls("test-clean", 346_663_984, "32fa31d27d2e1cad72775fee3f4849a9", "eval"),
     _ls("dev-clean", 337_926_286, "42e2234ba48799c1f50f24a7926300a1", "eval"),
@@ -114,6 +123,13 @@ DATASETS = {d.key: d for d in (
                      ("https://datashare.ed.ac.uk/bitstream/handle/10283/3443/VCTK-Corpus-0.92.zip",),
                      11_747_302_977, "8a6ba2946b36fcbef0212cad601f4bfa"),),
             "build_vctk", "VCTK-Corpus-0.92", "CC BY 4.0"),
+    _ltsr("dev_clean", 1_357_352_348, "2c1f5312914890634cc2d15783032ff3", "core"),
+    _ltsr("dev_other", 975_450_334, "62d3a80ad8a282b6f31b3904f0507e4f", "core"),
+    _ltsr("test_clean", 1_294_768_623, "4d373d453eb96c0691e598061bbafab7", "core"),
+    _ltsr("test_other", 1_011_954_678, "dbc0959d8bdb6d52200595cabc9995ae", "core"),
+    _ltsr("train_clean_100", 8_129_817_509, "6df668d8f5f33e70876bfa33862ad02b", "core"),
+    _ltsr("train_clean_360", 28_953_983_271, "382eb3e64394b3da6a559f864339b22c", "optional"),
+    _ltsr("train_other_500", 46_843_185_428, "a37a8e9f4fe79d20601639bf23d1add8", "optional"),
 )}
 GROUPS = {"eval": ("eval",), "core": ("eval", "core"), "all": ("eval", "core", "optional")}
 
@@ -369,6 +385,37 @@ def build_librispeech(ctx, ds):
     return [row(ctx, utt, p, d, utt.split("-")[0], "librispeech", ds.arg,
                 gender=genders.get(utt.split("-")[0]), text=text)
             for (utt, p, text), d in zip(items, durs)]
+
+
+def build_libritts_r(ctx, ds):
+    """LibriTTS_R/<subset>/<reader>/<book>/<utt>.wav (24 kHz) with a
+    <utt>.normalized.txt transcript each; resample into 16k/libritts_r/.
+    Subset dirs use '-' (dev-clean) while archive names use '_' (dev_clean)."""
+    root = ctx.raw / "LibriTTS_R"
+    # Per-subset archives don't ship SPEAKERS.txt; LibriTTS-R reuses the same
+    # LibriVox reader IDs as LibriSpeech, so fall back to its SPEAKERS.TXT.
+    speakers = root / "SPEAKERS.txt"
+    if not speakers.is_file():
+        speakers = ctx.raw / "LibriSpeech" / "SPEAKERS.TXT"
+    genders = parse_librispeech_speakers(speakers) if speakers.is_file() else {}
+    norm = ds.arg.replace("-", "_").lower()
+    sub = next((p for p in root.iterdir()
+                if p.is_dir() and p.name.replace("-", "_").lower() == norm), None)
+    if sub is None:
+        raise PrepareError(f"{ds.key}: no {ds.arg} subset dir under {root}")
+    out = ctx.dir("16k", "libritts_r")
+    items = []
+    for txt in sorted(sub.glob("*/*/*.normalized.txt")):
+        utt = txt.name[:-len(".normalized.txt")]
+        wav = txt.with_name(f"{utt}.wav")
+        if wav.is_file():
+            items.append((utt, wav, out / sub.name / txt.parent.parent.name /
+                          txt.parent.name / f"{utt}.flac",
+                          txt.read_text(encoding="utf-8").strip()))
+    durs = resample_all(ctx, [(s, d) for _, s, d, _ in items])
+    return [row(ctx, utt, dst, d, utt.split("_")[0], "libritts_r", sub.name,
+                gender=genders.get(utt.split("_")[0]), text=text)
+            for (utt, _, dst, text), d in zip(items, durs)]
 
 
 def build_ljspeech(ctx, ds):

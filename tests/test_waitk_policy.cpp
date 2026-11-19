@@ -929,6 +929,192 @@ void test_fifo_short_prosody_span() {
 
 } // namespace
 
+// BUG-028: pad_to_multiple() keeps the queue aligned to the vocoder hop.
+void test_fifo_pad_to_multiple() {
+    std::array<UnitProsodyFifo::Frame, 4> frames{};
+    {   // already aligned, empty, and n <= 1: nothing appended
+        UnitProsodyFifo fifo(64, kVocab, kEos);
+        CHECK(fifo.pad_to_multiple(4) == 0 && fifo.empty());
+        std::array<std::int64_t, 4> units{};
+        std::array<float, 16> prosody{};
+        make_chunk(0, units, prosody);
+        CHECK(fifo.push_chunk(units, prosody).pushed == 4);
+        CHECK(fifo.pad_to_multiple(4) == 0 && fifo.size() == 4);
+        CHECK(fifo.pad_to_multiple(2) == 0 && fifo.size() == 4);
+        CHECK(fifo.pad_to_multiple(1) == 0 && fifo.pad_to_multiple(0) == 0 && fifo.size() == 4);
+        const std::array<std::int64_t, 4> partial{5, 6, kEos, kPad};
+        CHECK(fifo.push_chunk(partial, prosody).pushed == 2);   // size 6
+        CHECK(fifo.pad_to_multiple(1) == 0 && fifo.size() == 6); // n <= 1 never pads
+        CHECK(fifo.pad_to_multiple(0) == 0 && fifo.size() == 6);
+    }
+    {   // [u0, u1] -> 2 pads copying u1's unit / z_f0 / z_energy
+        UnitProsodyFifo fifo(64, kVocab, kEos);
+        std::array<std::int64_t, 4> units{7, 9, kEos, kPad};
+        std::array<float, 16> prosody{};
+        for (std::size_t j = 0; j < 4; ++j) {
+            prosody[4 * j + 0] = 10.0f + static_cast<float>(j);     // z_f0
+            prosody[4 * j + 1] = 0.8f;                              // voicing
+            prosody[4 * j + 2] = 0.2f;                              // aperiodicity
+            prosody[4 * j + 3] = 20.0f + static_cast<float>(j);     // z_energy
+        }
+        const auto r = fifo.push_chunk(units, prosody);
+        CHECK(r.pushed == 2 && r.eos);
+        CHECK(fifo.pad_to_multiple(4) == 2 && fifo.size() == 4);
+        CHECK(fifo.pop_hop(4, frames.data()));
+        CHECK(frames[0].unit == 7 && !frames[0].pad && frames[0].voicing == 0.8f);
+        CHECK(frames[1].unit == 9 && !frames[1].pad && frames[1].aperiodicity == 0.2f);
+        for (std::size_t i = 2; i < 4; ++i) {
+            CHECK(frames[i].unit == 9);                             // newest real unit
+            CHECK(frames[i].logf0_z == 11.0f);                      // newest real z_f0
+            CHECK(frames[i].energy_z == 21.0f);                     // newest real z_energy
+            CHECK(frames[i].voicing == 0.0f);
+            CHECK(frames[i].aperiodicity == 1.0f);
+            CHECK(frames[i].pad);
+        }
+        CHECK(fifo.empty());
+    }
+    {   // n = 4 pads 3 (rem 1) and 1 (rem 3), counting what is already queued
+        UnitProsodyFifo fifo(64, kVocab, kEos);
+        std::array<float, 16> prosody{};
+        const std::array<std::int64_t, 4> one{3, kEos, kPad, kPad};
+        const std::array<std::int64_t, 4> three{4, 5, 6, kEos};
+        CHECK(fifo.push_chunk(one, prosody).pushed == 1);
+        CHECK(fifo.pad_to_multiple(4) == 3 && fifo.size() == 4);
+        CHECK(fifo.push_chunk(three, prosody).pushed == 3);
+        CHECK(fifo.pad_to_multiple(4) == 1 && fifo.size() == 8);
+        CHECK(fifo.pad_to_multiple(4) == 0);                        // idempotent once aligned
+    }
+}
+
+void test_fifo_pad_overflow_and_pop_flags() {
+    {
+        UnitProsodyFifo fifo(6, kVocab, kEos);
+        std::array<std::int64_t, 4> units{};
+        std::array<float, 16> prosody{};
+        make_chunk(0, units, prosody);
+        CHECK(fifo.push_chunk(units, prosody).pushed == 4);
+        const std::array<std::int64_t, 4> more{1, 2, 3, 4};
+        CHECK(fifo.push_chunk(more, prosody).overflow);             // needs 4, 2 free
+        CHECK(fifo.overflows() == 1);
+        // capacity 6, 5 queued would need 3 pads for n = 4: build 5 queued.
+        UnitProsodyFifo tight(6, kVocab, kEos);
+        const std::array<std::int64_t, 4> five{1, 2, 3, 4};
+        CHECK(tight.push_chunk(five, prosody).pushed == 4);
+        const std::array<std::int64_t, 4> one{8, kEos, kPad, kPad};
+        CHECK(tight.push_chunk(one, prosody).pushed == 1);          // 5 queued, 1 free
+        CHECK(tight.overflows() == 0);
+        CHECK(tight.pad_to_multiple(4) == 0);                       // needs 3 pads, 1 free
+        CHECK(tight.overflows() == 1 && tight.size() == 5);
+    }
+    {   // pop_hop(4, frames) reports the pad flags {false, false, true, true}
+        UnitProsodyFifo fifo(64, kVocab, kEos);
+        std::array<float, 16> prosody{};
+        const std::array<std::int64_t, 4> units{1, 2, kEos, kPad};
+        CHECK(fifo.push_chunk(units, prosody).pushed == 2);
+        CHECK(fifo.pad_to_multiple(4) == 2);
+        std::array<UnitProsodyFifo::Frame, 4> frames{};
+        CHECK(fifo.pop_hop(4, frames.data()));
+        CHECK(!frames[0].pad && !frames[1].pad && frames[2].pad && frames[3].pad);
+        // The pad flag and the copied frame also survive a ring wrap.
+        UnitProsodyFifo ring(6, kVocab, kEos);
+        const std::array<std::int64_t, 4> full{1, 2, 3, 4};
+        CHECK(ring.push_chunk(full, prosody).pushed == 4);
+        CHECK(ring.pop_hop(4, frames.data()));                      // head = 4, empty
+        CHECK(ring.push_chunk(units, prosody).pushed == 2);         // slots 4, 5
+        CHECK(ring.pad_to_multiple(4) == 2);                        // pads wrap to slots 0, 1
+        CHECK(ring.pop_hop(4, frames.data()));
+        CHECK(frames[0].unit == 1 && frames[1].unit == 2);
+        CHECK(!frames[0].pad && !frames[1].pad && frames[2].pad && frames[3].pad);
+        CHECK(frames[2].unit == 2 && frames[3].unit == 2);
+    }
+}
+
+// BUG-028 sequence: a partial <EOS> chunk is completed with pads, popped as
+// one hop, and nothing leaks into the next utterance's first hop.
+void test_fifo_bug028_sequence() {
+    UnitProsodyFifo fifo(64, kVocab, kEos);
+    std::array<float, 16> prosody{};
+    for (std::size_t j = 0; j < 4; ++j) prosody[4 * j + 1] = 1.0f;
+    const std::array<std::int64_t, 4> first{10, 11, kEos, kPad};
+    CHECK(fifo.push_chunk(first, prosody).pushed == 2);
+    CHECK(fifo.pad_to_multiple(4) == 2);
+    std::array<UnitProsodyFifo::Frame, 4> hop{};
+    CHECK(fifo.pop_hop(4, hop.data()));
+    CHECK(hop[0].unit == 10 && hop[1].unit == 11);
+    CHECK(fifo.empty());                                            // no stranded frame
+
+    const std::array<std::int64_t, 4> second{20, 21, 22, 23};
+    CHECK(fifo.push_chunk(second, prosody).pushed == 4);
+    CHECK(fifo.pad_to_multiple(4) == 0);
+    CHECK(fifo.pop_hop(4, hop.data()));
+    for (std::size_t i = 0; i < 4; ++i) {
+        CHECK(hop[i].unit == 20 + static_cast<std::int64_t>(i));
+        CHECK(!hop[i].pad);
+    }
+    CHECK(fifo.empty());
+}
+
+// Stage 09 `adaptive_policy` live switch: keeps the utterance (t_src, t_tgt,
+// phase) and restarts the readiness bank from 0, so a stale bank cannot
+// release a write. Mirrors python_training/tests/test_waitk_policy.py::
+// test_set_adaptive_mode_live_switch.
+// Kills: set_adaptive_mode() not zeroing readiness_ (the banked 1.5 would
+// write at lag k), resetting the utterance state / phase / counters on a
+// switch, or ignoring adaptive_extra_wait after the switch.
+void test_set_adaptive_mode_live_switch() {
+    const auto banked = [] {
+        WaitKPolicy p(adaptive_config(3));
+        // 0.75 per chunk banks 1.5 (readiness is private: checked by behaviour below)
+        CHECK(drive(p, true, kChunkMs, 0.75f).decision == Decision::kRead);
+        CHECK(drive(p, true, kChunkMs, 0.75f).decision == Decision::kRead);
+        CHECK(p.t_src() == 2 && p.t_tgt() == 0);
+        return p;
+    };
+
+    {   // control: the untouched bank writes at lag k
+        WaitKPolicy ref = banked();
+        const StepOut out = drive(ref, true);
+        CHECK(out.decision == Decision::kWrite && out.writes == 1);
+    }
+    {   // off -> on: bank zeroed, utterance kept, hold back until lag >= k + extra (3 + 2)
+        WaitKPolicy p = banked();
+        CHECK(p.utterance_active() && !p.flushing());
+        p.set_adaptive_mode(false);
+        CHECK(!p.config().adaptive_mode);
+        CHECK(p.t_src() == 2 && p.t_tgt() == 0 && p.utterance_active() && !p.flushing());
+        p.set_adaptive_mode(true);
+        CHECK(p.config().adaptive_mode);
+        CHECK(p.t_src() == 2 && p.t_tgt() == 0 && p.utterance_active() && !p.flushing());
+        CHECK(p.flushes_completed() == 0 && p.flush_resumes() == 0 && p.k() == 3);
+        StepOut a = drive(p, true);                          // lag 3, empty bank
+        StepOut b = drive(p, true);                          // lag 4
+        StepOut c = drive(p, true);                          // lag 5 = k + adaptive_extra_wait
+        CHECK(a.decision == Decision::kRead && a.writes == 0);
+        CHECK(b.decision == Decision::kRead && b.writes == 0);
+        CHECK(c.decision == Decision::kWrite && c.writes == 1);
+        CHECK(p.t_src() == 5 && p.t_tgt() == 1);
+    }
+    {   // adaptive -> strict: the stale bank is gone and lag >= k writes at once
+        WaitKPolicy q = banked();
+        q.set_adaptive_mode(false);
+        const StepOut out = drive(q, true);
+        CHECK(out.decision == Decision::kWrite && out.writes == 1);
+        CHECK(q.t_src() == 3 && q.t_tgt() == 1);
+        // and strict mode never banks: a later switch back starts empty again
+        q.set_adaptive_mode(true);
+        CHECK(drive(q, true).writes == 0);                   // t_src 4, t_tgt 1: lag 3 < k + extra (5), empty bank
+    }
+    {   // a flush in progress survives the switch untouched
+        WaitKPolicy f(adaptive_config(2));
+        for (int i = 0; i < 3; ++i) drive(f, true, kChunkMs, 1.0f);
+        f.on_chunk_energy(false, 500);                       // pause > tail_flush_ms: flushing
+        CHECK(f.flushing());
+        const std::int64_t src = f.t_src(), tgt = f.t_tgt();
+        f.set_adaptive_mode(false);
+        CHECK(f.flushing() && f.t_src() == src && f.t_tgt() == tgt && f.flushes_completed() == 0);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc == 3 && std::strcmp(argv[1], "--replay") == 0) return replay_file(argv[2]);
     if (argc != 2) {
@@ -966,5 +1152,9 @@ int main(int argc, char** argv) {
     test_fifo_skips_trailing_special_units();
     test_fifo_overflow_is_all_or_nothing();
     test_fifo_short_prosody_span();
+    test_fifo_pad_to_multiple();
+    test_fifo_pad_overflow_and_pop_flags();
+    test_fifo_bug028_sequence();
+    test_set_adaptive_mode_live_switch();
     return test::finish("waitk_policy");
 }

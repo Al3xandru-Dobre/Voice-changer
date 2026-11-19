@@ -38,10 +38,28 @@ S2UT_METRICS = ("bleu", "latency", "spk", "utmos", "flush")
 SUMMARY_KEYS = (
     "asr_bleu", "asr_chrfpp", "onset_delay_ms", "al_ms", "al_ca_ms",
     "tgt_cos", "src_cos", "utmos", "trailing_non_silent_ms",
-    "hallucinated_words", "noise_hallucination_rate", "rtf",
+    "hallucinated_words", "tail_hallucinated_words", "noise_hallucination_rate", "rtf",
 )
 FRAME_MS = 20.0
-DEFAULT_TAIL_ALLOWANCE_MS = 320.0   # <= 4 chunks (320 ms) flush tail tolerance
+DEFAULT_TAIL_ALLOWANCE_MS = 320.0   # floor below the gamma-aware bound (BUG-030)
+TAIL_FLUSH_MS = 400.0               # waitk_policy.TAIL_FLUSH_MS (numeric copy)
+TAIL_GAMMA = 1.35                   # Romance/German target duration expansion headroom
+TAIL_SLACK_MS = 240.0               # 3 x 80 ms chunks of flush tail tolerance
+
+
+def expected_tail_end_s(row, wait_ms=0.0, tail_flush_ms=TAIL_FLUSH_MS, gamma=TAIL_GAMMA,
+                        slack_ms=TAIL_SLACK_MS):
+    """End time (s) after which output audio counts as trailing babble
+    (BUG-030): the translated sentence may legally run `gamma` times longer
+    than the source speech, the tail flush only starts `tail_flush_ms` after
+    the user stops speaking, and Wait-k buffering delays everything by
+    `wait_ms`. A flat 320 ms allowance sat below kTailFlushMs alone and flagged
+    every legal Wait-k translation."""
+    speech_end = float(row.get("speech_end_s")
+                       or row.get("tgt_duration") or row["src_duration"])
+    return (wait_ms / 1000.0
+            + max(gamma * speech_end, speech_end + tail_flush_ms / 1000.0)
+            + slack_ms / 1000.0)
 
 
 @dataclass
@@ -55,6 +73,7 @@ class S2utEvalConfig:
     metrics: tuple = S2UT_METRICS
     silence_dbfs: float = -55.0
     tail_allowance_ms: float = DEFAULT_TAIL_ALLOWANCE_MS
+    wait_ms: float = 0.0             # Wait-k buffering delay (k * 80 ms; the gate passes it)
     device: str = "cuda"
     batch_size: int = 8
     timing: object = None           # CSV utt_id,seconds
@@ -91,7 +110,10 @@ def average_lagging_ms(src_duration_ms, steps):
 
     ordered = sorted(steps, key=lambda s: (s.get("step", 0), float(s["t_src_ms"])))
     for s in ordered:
-        t_src = float(s["t_src_ms"])
+        # A reader can never have read more than the whole source: offline
+        # runners (fv_s2ut_file) keep counting the zero tail they feed to drain
+        # the flush, so clamp to T_src (SimulEval's convention).
+        t_src = min(float(s["t_src_ms"]), float(src_duration_ms))
         n_emit = int(s.get("t_tgt_frames_emitted", 0))
         if "t_wall_ms" in s and s["t_wall_ms"] is not None:
             has_ca = True
@@ -254,6 +276,17 @@ def evaluate_s2ut(cfg, out_dir, log=print):
     summary = {k: None for k in SUMMARY_KEYS}
     extra = {}
 
+    def row_exp_end(r):
+        """BUG-030: gamma- and wait-aware end of the legal translated tail —
+        the flat tail_allowance_ms is only a floor."""
+        if r.get("kind") == "noise_only":
+            return 0.0
+        base = float(r["speech_end_s"]) if (
+            "speech_end_s" in r and float(r["speech_end_s"]) < float(r["src_duration"])
+        ) else float(r.get("tgt_duration") or r["src_duration"])
+        return max(base + cfg.tail_allowance_ms / 1000.0,
+                   expected_tail_end_s(r, wait_ms=cfg.wait_ms))
+
     need_whisper = bool({"bleu", "flush"} & set(cfg.metrics))
     if need_whisper:
         t = time.monotonic()
@@ -270,6 +303,24 @@ def evaluate_s2ut(cfg, out_dir, log=print):
 
         refs_norm = [w.normalize(r["tgt_text"], language=r["tgt_lang"]) for r in rows]
         hyps_norm = [w.normalize(h, language=r["tgt_lang"]) for h, r in zip(hyps_raw, rows)]
+        tail_hyps = {}
+        if "flush" in cfg.metrics:
+            # BUG-030: words spoken past the tail allowance on trailing_silence
+            # rows are the real babble signal — those rows have no target
+            # reference, so only their post-allowance tail is transcribed.
+            by_lang_tail = defaultdict(list)
+            for idx, r in enumerate(rows):
+                if r.get("kind") != "trailing_silence":
+                    continue
+                start = min(int(row_exp_end(r) * audio.SAMPLE_RATE), len(outs[idx]))
+                tail_wav = outs[idx][start:]
+                if len(tail_wav) >= int(0.08 * audio.SAMPLE_RATE):
+                    by_lang_tail[r["tgt_lang"]].append((idx, tail_wav))
+            for tgt_lang, items in sorted(by_lang_tail.items()):
+                hyps = w.transcribe([x[1] for x in items], language=tgt_lang,
+                                    silence_dbfs=cfg.silence_dbfs)
+                for (idx, _), h in zip(items, hyps):
+                    tail_hyps[idx] = w.normalize(h, language=tgt_lang)
         w.close()
         stage_s["whisper"] = time.monotonic() - t
 
@@ -305,9 +356,14 @@ def evaluate_s2ut(cfg, out_dir, log=print):
             noise_words = 0
             noise_clips = 0
             noise_hallucinated_clips = 0
+            tail_words = 0
+            tail_clips = 0
             for idx, (r, p) in enumerate(zip(rows, per)):
                 words = len(hyps_norm[idx].split()) if hyps_norm[idx] else 0
-                is_noise = r.get("kind") == "noise_only" or not r["tgt_text"].strip()
+                # BUG-030: whole-clip babble counting is for noise-only clips;
+                # trailing_silence rows are audited on their post-allowance tail.
+                is_noise = r.get("kind") == "noise_only" or (
+                    not r["tgt_text"].strip() and r.get("kind") != "trailing_silence")
                 p["hyp_words"] = words
                 if is_noise:
                     noise_clips += 1
@@ -315,21 +371,24 @@ def evaluate_s2ut(cfg, out_dir, log=print):
                     if words > 0:
                         noise_hallucinated_clips += 1
                     p["hallucinated_words"] = words
+                if r.get("kind") == "trailing_silence":
+                    tail_clips += 1
+                    words = len(tail_hyps.get(idx, "").split())
+                    p["tail_hallucinated_words"] = words
+                    tail_words += words
             if noise_clips > 0:
                 summary["hallucinated_words"] = int(noise_words)
                 summary["noise_hallucination_rate"] = noise_hallucinated_clips / noise_clips
                 extra["noise_clips"] = noise_clips
+            if tail_clips > 0:
+                summary["tail_hallucinated_words"] = int(tail_words)
+                extra["trailing_silence_clips"] = tail_clips
 
     if "flush" in cfg.metrics:
         tails = []
         for r, o, p in zip(rows, outs, per):
-            if r.get("kind") == "noise_only":
-                exp_end = 0.0
-            elif "speech_end_s" in r and r["speech_end_s"] < r["src_duration"]:
-                exp_end = float(r["speech_end_s"]) + cfg.tail_allowance_ms / 1000.0
-            else:
-                exp_end = float(r.get("tgt_duration") or r["src_duration"]) + cfg.tail_allowance_ms / 1000.0
-            tail_ms = trailing_non_silent_duration_ms(o, exp_end, threshold_dbfs=cfg.silence_dbfs)
+            tail_ms = trailing_non_silent_duration_ms(o, row_exp_end(r),
+                                                      threshold_dbfs=cfg.silence_dbfs)
             p["trailing_non_silent_ms"] = tail_ms
             tails.append(tail_ms)
         summary["trailing_non_silent_ms"] = float(np.mean(tails)) if tails else None

@@ -1,13 +1,31 @@
 // Paths — per-OS configuration directory, asset discovery and system-font
-// candidates. Uses only the environment (std::getenv) and <filesystem>, so it
-// needs no OS headers and compiles identically on every leg.
+// candidates. Uses only the environment (getenv / _wdupenv_s on Windows) and
+// <filesystem>, so it needs no OS headers and compiles identically on every leg.
 #pragma once
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fluxvoice::frontend {
+
+/// UTF-8 text (SDL dialog results, argv under SDL_main, JSON strings, ImGui
+/// buffers) as a path. Built on `std::u8string`: `fs::path(std::string)` reads
+/// the bytes in the ANSI code page on Windows and garbles non-ASCII names.
+/// On POSIX the bytes are kept verbatim, so any byte string round-trips.
+std::filesystem::path path_from_utf8(std::string_view utf8);
+
+/// A path as UTF-8 text for JSON, ImGui, SDL and messages; never use
+/// `path.string()` for these (ANSI code page on Windows). The `_generic`
+/// variant uses '/' separators (POSIX shell commands, file:// URLs).
+std::string path_to_utf8(const std::filesystem::path& p);
+std::string path_to_utf8_generic(const std::filesystem::path& p);
+
+/// Value of an environment variable as a path; empty when unset or empty.
+/// Windows reads the wide value (`_wdupenv_s`) so non-ASCII `%APPDATA%` survives
+/// and MSVC's C4996 deprecation of `std::getenv` is avoided (BUG-018).
+std::filesystem::path env_path(const char* name);
 
 /// `%APPDATA%\fluxvoice` on Windows, `~/Library/Application Support/fluxvoice`
 /// on macOS, `$XDG_CONFIG_HOME/fluxvoice` or `~/.config/fluxvoice` elsewhere.

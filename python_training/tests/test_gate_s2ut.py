@@ -25,6 +25,23 @@ def test_self_test_passes(capsys):
     assert "checks passed" in capsys.readouterr().out
 
 
+def test_export_step_graphs_guards_noncommercial_licence(tmp_path):
+    """BUG-031: a translator trained on non-commercial units refuses to export
+    unless opted in, and is then stamped with the NC note."""
+    from fvml import export as fx
+
+    cfg = tr.tiny_config(latent_dim=8, vocab=16)
+    model = tr.S2utTranslator(cfg).eval()
+    meta = {"vocab": cfg.vocab, "label_space": "synthetic", "noncommercial": True,
+            "license": "CC-BY-NC-SA-4.0"}
+    with pytest.raises(fx.ExportError, match="non-commercial"):
+        ss.export_step_graphs(model, tmp_path / "clean", exporter="torchscript",
+                              labels_meta=meta)
+    rec = ss.export_step_graphs(model, tmp_path / "nc", exporter="torchscript",
+                                labels_meta=meta, include_noncommercial=True)
+    assert rec["encoder_contract"].license.endswith(fx.NC_NOTE)
+
+
 def test_each_rule_decides_on_its_own():
     """Break one rule at a time on an otherwise passing row: exactly that check
     fails, and the row stops being eligible."""
@@ -38,6 +55,7 @@ def test_each_rule_decides_on_its_own():
         "al": {"al_ms": {**base["al_ms"], "fr->en": 1201.0}},
         "compute": {"compute_p95_ms": 41.0, "projected_onset_ms": 331.0},
         "silence": {"hallucinated_words": 2},
+        "flush": {"flush_tail_chunks_max": 4},
     }
     assert set(breakers) == set(gate.CHECKS)
     for name, override in breakers.items():
@@ -76,18 +94,19 @@ def speech_wav(seconds, tail=0.0, f0=180.0):
                            np.zeros(int(16000 * tail))]).astype(np.float32)
 
 
-@pytest.fixture
-def rig(tmp_path, monkeypatch):
+def make_rig(tmp_path, monkeypatch, babble=False):
     """A tiny stacked_4 checkpoint that fits the fixture bundle (latent_dim 8,
-    vocab 16), eval lists over synthetic wavs, and a fake scorer."""
+    vocab 16), eval lists over synthetic wavs, and a fake scorer. With
+    `babble=True` the decoder never predicts <EOS> (the BUG-030 babbling
+    decoder); otherwise its flushes terminate via <EOS>."""
     monkeypatch.setenv("FLUXVOICE_DATA", str(tmp_path / "data"))
     (tmp_path / "data" / "wav").mkdir(parents=True)
     torch.manual_seed(0)
     cfg = tr.tiny_config(latent_dim=8, vocab=16)
     model = tr.S2utTranslator(cfg)
-    with torch.no_grad():                           # always regular units, never <EOS>
+    with torch.no_grad():                           # always regular units
         model.decoder.unit_head.bias.view(4, cfg.n_classes)[:, cfg.vocab:] = -50.0
-        model.decoder.eos_head.bias.fill_(-50.0)
+        model.decoder.eos_head.bias.fill_(-50.0 if babble else 50.0)
     ckpt = tmp_path / "tiny.pt"
     torch.save({"model": model.state_dict(), "config": json.dumps(cfg.to_dict()),
                 "ctc_vocab": "{}"}, ckpt)
@@ -117,9 +136,9 @@ def rig(tmp_path, monkeypatch):
         {"utt_id": "sil_noise", "kind": "noise_only", "src_lang": "en", "tgt_lang": "es",
          "src_duration": 1.0, "speech_end_s": 0.0, "src_path": "wav/sil_noise.wav",
          "src_text": "", "tgt_text": ""},
-        {"utt_id": "sil_speech", "kind": "speech_silence", "src_lang": "en", "tgt_lang": "fr",
+        {"utt_id": "sil_speech", "kind": "trailing_silence", "src_lang": "en", "tgt_lang": "fr",
          "src_duration": 3.2, "speech_end_s": 1.2, "src_path": "wav/sil_speech.wav",
-         "src_text": "hello", "tgt_text": "bonjour"}], evallist.SILENCE_COLUMNS)
+         "src_text": "hello", "tgt_text": ""}], evallist.SILENCE_COLUMNS)
 
     scored = []
 
@@ -139,10 +158,16 @@ def rig(tmp_path, monkeypatch):
         scored.append((pathlib.Path(cfg_eval.eval_list).name, cfg_eval.metrics))
         return {"asr_bleu": 30.0, "asr_chrfpp": 50.0, "utmos": 3.5, "n": len(rows),
                 "al_ms": float(np.mean(als)) if als else None, "al_ca_ms": None,
-                "onset_delay_ms": 240.0, "hallucinated_words": 0, "trailing_non_silent_ms": 0.0}
+                "onset_delay_ms": 240.0, "hallucinated_words": 0,
+                "tail_hallucinated_words": 0, "trailing_non_silent_ms": 0.0}
 
     monkeypatch.setattr(s2ut_eval, "evaluate_s2ut", fake_scorer)
     return {"ckpt": ckpt, "lists": lists, "out": tmp_path / "gate", "scored": scored, "cfg": cfg}
+
+
+@pytest.fixture
+def rig(tmp_path, monkeypatch):
+    return make_rig(tmp_path, monkeypatch)
 
 
 def run(rig, *extra):
@@ -167,18 +192,21 @@ def test_gate_runs_the_whole_chain_on_the_ort_clock(rig, capsys):
         assert r["compute_steps"] > 100 and 0 < r["compute_p50_ms"] <= r["compute_p95_ms"]
         # Fixture encoder has L = 0: 25 + k * 80 + p95 + 10.
         assert r["projected_onset_ms"] == pytest.approx(35.0 + 80.0 * k + r["compute_p95_ms"])
-        # eval_s2ut's Average Lagging on the written traces. It is above the k * 80 ms of
-        # an ideal Wait-k stream because this decoder never says <EOS>: it keeps writing to
-        # the flush bound, so its output is ~1.9x longer than the 1.6 s source.
-        assert all(80.0 * k <= v <= 80.0 * k + 500.0 for v in r["al_ms"].values()), r["al_ms"]
+        # eval_s2ut's Average Lagging on the written traces. The ideal k * 80 ms
+        # upper structure holds, but this rig's decoder emits no frames on READ
+        # steps, so |Y| shrinks by (k - 1) chunks and the gamma correction pulls
+        # AL well below k * 80 (the exact AL math is pinned by test_eval_s2ut).
+        assert all(40.0 * k <= v <= 80.0 * k + 500.0 for v in r["al_ms"].values()), r["al_ms"]
         assert set(r["bleu"]) == set(gate.PAIRS) and set(r["utmos"]) == set(gate.TARGET_LANGS)
         assert r["hallucinated_words"] == 0 and r["fifo_overflows"] == 0
+        # BUG-030: the flush audit is measured and passing for a terminating decoder.
+        assert r["flush_capped"] == 0 and r["tail_hallucinated_words"] == 0, r["reasons"]
         assert r["eligible"], r["reasons"]
     assert rows["waitk-2"]["al_ms"]["es->en"] < rows["waitk-4"]["al_ms"]["es->en"]
     assert report["decision"]["winner"] in ("waitk-2", "ctc-adaptive")
     assert report["decision"]["default_wait_k"] == {p: 2 for p in gate.PAIRS}
-    # This decoder emits unit frames on every write up to the flush bound, so no write
-    # follows the last unit frame.
+    # This decoder ends every utterance with <EOS>: the last write carries the
+    # final unit frames, so no write follows the last unit frame.
     assert rows["waitk-2"]["flush_tail_chunks_max"] == 0
     md = (rig["out"] / "gate_s2ut.md").read_text("utf-8")
     assert "| Strict Wait-2 | `stacked_4` |" in md and "neutral target-voice prosody" in md
@@ -192,13 +220,36 @@ def test_gate_runs_the_whole_chain_on_the_ort_clock(rig, capsys):
         ["t_es_en_0.wav", "t_es_en_1.wav", "timing.csv", "trace.jsonl"]
     trace = [json.loads(x) for x in (conv / "trace.jsonl").read_text("utf-8").splitlines()][0]
     decisions = [s["decision"] for s in trace["steps"]]
-    assert decisions[:2] == ["READ", "WRITE"] and "FLUSH" in decisions
+    # A terminating decoder drains on <EOS> before the tail flush opens, so the
+    # utterance ends in READ steps (the babbling rig below shows the FLUSH path).
+    assert decisions[:2] == ["READ", "WRITE"] and "WRITE" in decisions
+    assert decisions[-1] == "READ"
     assert [s["t_tgt_frames_emitted"] for s in trace["steps"][:3]] == [0, 4, 4]
     assert trace["steps"][-1]["t_src_ms"] == 1600.0     # capped at the source duration
     # Silence in, silence out: the policy never leaves IDLE on the digital-silence clip.
     sil = rig["out"] / "converted" / "waitk-2_stacked_4" / "silence_hallucination_20"
     assert float(np.abs(audio.load(sil / "sil_noise.wav")).max()) == 0.0
     assert float(np.abs(audio.load(sil / "sil_speech.wav")).max()) > 0.0
+
+
+def test_babbling_decoder_fails_the_flush_gate(tmp_path, monkeypatch):
+    """BUG-030: a decoder that never predicts <EOS> and babbles across the
+    trailing silence cannot be eligible - it used to score
+    flush_tail_chunks = 0 (PASS) and hallucinated_words = 0."""
+    rig = make_rig(tmp_path, monkeypatch, babble=True)
+    assert run(rig) == 2                            # no winner: nobody eligible
+    report = json.loads((rig["out"] / "gate_s2ut.json").read_text("utf-8"))
+    assert report["candidates"]
+    for row in report["candidates"]:
+        assert not row["eligible"], (row["candidate"], row["reasons"])
+        assert row["reasons"][0].startswith("flush:"), row["reasons"]
+        assert row["flush_capped"] > 0, "the silence list saw a flush bound without <EOS>"
+    # ... and the babble really ran through kFlush steps on the trailing-silence clip.
+    trace = [json.loads(x) for x in (
+        rig["out"] / "converted" / "waitk-2_stacked_4" / "silence_hallucination_20"
+        / "trace.jsonl").read_text("utf-8").splitlines() if x.strip()]
+    by_id = {t["utt_id"]: t["steps"] for t in trace}
+    assert "FLUSH" in {s["decision"] for s in by_id["sil_speech"]}
 
 
 def test_torch_runtime_is_reported_but_not_gate_valid(rig):

@@ -211,8 +211,7 @@ FluxVoice-S2UT/
     │   ├── KVStateCache.hpp   # Recurrent ONNX tensor state across chunks
     │   ├── WaitKPolicy.hpp    # Simultaneous-translation state machine
     │   └── InferencePipeline.cpp
-    └── ui/
-        └── AppWindow.cpp      # Device dropdowns & latency telemetry
+    └── (desktop UI)           # frontend/ — SDL3 + Dear ImGui, see frontend/README.md
 ```
 
 ---
@@ -289,6 +288,8 @@ Detailed staged plans live in [`Documents/`](Documents/). Each milestone has a `
 | 2 | **Textless VC mode** | Causal encoder + custom Unit-HiFi-GAN exported to ONNX; Mode A runs in C++ with stateful KV/CNN caches | [Documents/Milestone 2](Documents/Milestone%202/00_master.md) |
 | 3 | **Wait-*k* S2UT mode** | Causal S2UT transformer on discrete units; `WaitKPolicy` bridges encoder → vocoder in C++ | [Documents/Milestone 3](Documents/Milestone%203/00_master.md) |
 | 4 | **UI & optimization** | SDL3 + Dear ImGui desktop frontend with system tray, Mini panel, Voice Studio, translation and catalogue panels ([`frontend/README.md`](frontend/README.md)); FP16/INT8 quantization and GPU execution-provider toggles pending | [Documents/Milestone 4](Documents/Milestone%204/00_master.md) |
+| 5 | **Personal voice profiles** *(planned)* | On-device enrolment: a voice profile (speaker embedding + pitch statistics) derived locally from user-provided recordings, with a consent record, export/erase and synthetic-audio marking; no network, bundles unchanged | [Documents/Milestone 5](Documents/Milestone%205/00_master.md) |
+| 6 | **Local-first dataset execution & training runbook** *(planned)* | Disk-budgeted two-wave local Mode A training (CUDA venv preflight, `--delete-raw`, encoder wave → reclaim → vocoder wave → gate/ONNX/live soak) + low-cost/free cloud handoff for P1/P2 & M3 S2UT | [Documents/Milestone 6](Documents/Milestone%206/00_master.md) |
 
 ---
 

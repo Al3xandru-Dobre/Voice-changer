@@ -20,8 +20,13 @@ tested without trained weights:
   s2ut/voices.json, s2ut/langs.json
   broken/*.onnx                    valid ONNX whose metadata or I/O breaks v1 or v2;
                                    manifest.json records the exact rejection message
+  s2ut_mismatch/*.onnx             valid v2 translators that load on their own but break
+                                   the s2ut_s4 quartet in the role they replace (latent_dim,
+                                   shared_mem_states, langs); manifest.json "s2ut_mismatch"
+                                   records the exact validate_s2ut_bundle error
   manifest.json                    every file's SHA256, contract string, graph I/O and
-                                   expected error, plus Mode A pairs and Mode B quartets
+                                   expected error, plus Mode A pairs, Mode B quartets and
+                                   Mode B quartet mismatches
 
 Built with onnx.helper only (no torch), opset 17 / IR 8 so any ONNX Runtime
 >= 1.13 loads them, with a fixed producer and no timestamps: the bytes
@@ -74,6 +79,8 @@ S2UT_RING = 4                    # 4-slot ring memory for wrap-around unit tests
 S2UT_SHARED_MEM = ("mem_k_0", "mem_v_0")
 S2UT_LANGS = {"en": 0, "es": 1, "fr": 2, "de": 3}
 S2UT_WAIT_K_TEST = (1, 3, 5, 10)
+S2UT_MISMATCH_QUARTET = "s2ut_s4"             # base quartet of the s2ut_mismatch/ fixtures
+S2UT_QUARTET_ROLES = ("encoder", "translator_enc", "translator_dec", "vocoder")
 
 
 # -- graph building blocks ---------------------------------------------------
@@ -247,12 +254,13 @@ def dual_encoder(fps, text=None, with_latents=True):
                 nodes, inits, c.to_json() if text is None else text)
 
 
-def fixture_translator_enc(text=None, with_src_pos=True):
+def fixture_translator_enc(text=None, with_src_pos=True, latent_dim=S2UT_LATENT_DIM):
     """Writes chunk latents summary into 4-slot ring mem_k_0 / mem_v_0 at
-    (src_pos mod 4) and increments src_pos."""
-    c = translator_enc_contract()
+    (src_pos mod 4) and increments src_pos. `latent_dim` sizes latents, enc_conv
+    and the ring memory (s2ut_mismatch/ uses 16)."""
+    c = translator_enc_contract(latent_dim=latent_dim)
     n_lang, i_lang = reshape("src_lang_f", "src_lang_3d", [1, 1, 1], "lang_3d")
-    n_conv, i_conv = reshape("v_slot", "v_2d", [1, S2UT_LATENT_DIM], "conv_2d")
+    n_conv, i_conv = reshape("v_slot", "v_2d", [1, latent_dim], "conv_2d")
     n_mask, i_mask = reshape("slot_eq", "slot_mask", [1, S2UT_RING, 1], "mask_3d")
     pos_in = "state_in.src_pos" if with_src_pos else "zero_pos"
     nodes = [
@@ -278,13 +286,13 @@ def fixture_translator_enc(text=None, with_src_pos=True):
         i_lang, i_conv, i_mask,
         const_i64("ax1", [1]),
         const_f32("inv_chunk", [1.0 / S2UT_CHUNK_FRAMES]),
-        const_f32("inv_lat", [1.0 / S2UT_LATENT_DIM]),
+        const_f32("inv_lat", [1.0 / latent_dim]),
         const_f32("zero_f", [0.0]),
         const_i64("ring_n", [S2UT_RING]),
         const_i64("slots_0_3", list(range(S2UT_RING))),
     ]
     inputs = [
-        value("latents", F32, [1, S2UT_CHUNK_FRAMES, S2UT_LATENT_DIM]),
+        value("latents", F32, [1, S2UT_CHUNK_FRAMES, latent_dim]),
         value("src_lang", I64, [1]),
     ]
     outputs = [value("readiness_logit", F32, [1, 1])]
@@ -297,36 +305,39 @@ def fixture_translator_enc(text=None, with_src_pos=True):
     else:
         inits.append(const_i64("zero_pos", [0]))
     inputs += [
-        value("state_in.enc_conv", F32, [1, S2UT_LATENT_DIM]),
-        value("state_in.mem_k_0", F32, [1, S2UT_RING, S2UT_LATENT_DIM]),
-        value("state_in.mem_v_0", F32, [1, S2UT_RING, S2UT_LATENT_DIM]),
+        value("state_in.enc_conv", F32, [1, latent_dim]),
+        value("state_in.mem_k_0", F32, [1, S2UT_RING, latent_dim]),
+        value("state_in.mem_v_0", F32, [1, S2UT_RING, latent_dim]),
     ]
     outputs += [
-        value("state_out.enc_conv", F32, [1, S2UT_LATENT_DIM]),
-        value("state_out.mem_k_0", F32, [1, S2UT_RING, S2UT_LATENT_DIM]),
-        value("state_out.mem_v_0", F32, [1, S2UT_RING, S2UT_LATENT_DIM]),
+        value("state_out.enc_conv", F32, [1, latent_dim]),
+        value("state_out.mem_k_0", F32, [1, S2UT_RING, latent_dim]),
+        value("state_out.mem_v_0", F32, [1, S2UT_RING, latent_dim]),
     ]
     return make("fixture_translator_enc", inputs, outputs, nodes, inits,
                 c.to_json() if text is None else text)
 
 
-def fixture_translator_dec(text=None, with_mem_v=True):
+def fixture_translator_dec(text=None, with_mem_v=True, mem=S2UT_SHARED_MEM, langs=S2UT_LANGS):
     """Reads mem_k_0 / mem_v_0 at delayed slot (min(tgt_pos, max(src_pos-1, 0)) mod 4),
     emits deterministic units ((prev_units + tgt_lang) mod 16), prosody carrying
     the read slot's summary + prosody_ctx, increments tgt_pos, and raises
-    eos_prob = 1.0 once state_out.tgt_pos > src_pos (3rd flush step at wait_k=3)."""
-    c = translator_dec_contract()
+    eos_prob = 1.0 once state_out.tgt_pos > src_pos (3rd flush step at wait_k=3).
+    `mem` renames the (k, v) memory inputs and `langs` replaces the language
+    table (s2ut_mismatch/ variants)."""
+    c = translator_dec_contract(shared_mem_states=tuple(mem), langs=langs)
+    mem_k, mem_v = mem
     n_tgt, i_tgt = reshape("tgt_lang", "tgt_2d", [1, 1], "tgt_lang_2d")
     n_pf, i_pf = reshape("p_frame", "p_frame_3d", [1, 1, 4], "prosody_3d")
     n_mask, i_mask = reshape("tgt_eq", "tgt_mask", [1, S2UT_RING, 1], "tgt_mask_3d")
     n_eos, i_eos = reshape("eos_1d", "eos_prob", [1, 1], "eos_2d")
-    v_source = "mem_v_0" if with_mem_v else "mem_k_0"
+    v_source = mem_v if with_mem_v else mem_k
     nodes = [
         helper.make_node("Sub", ["src_pos", "one_i64"], ["last_src"], name="sub_src"),
         helper.make_node("Max", ["last_src", "zero_i64"], ["valid_src"], name="clamp_lo"),
         helper.make_node("Min", ["state_in.tgt_pos", "valid_src"], ["read_pos"], name="clamp_hi"),
         helper.make_node("Mod", ["read_pos", "ring_n"], ["read_slot"], fmod=0, name="mod_read"),
-        helper.make_node("Gather", ["mem_k_0", "read_slot"], ["k_read"], axis=1, name="gather_k"),
+        helper.make_node("Gather", [mem_k, "read_slot"], ["k_read"], axis=1, name="gather_k"),
         helper.make_node("Gather", [v_source, "read_slot"], ["v_read"], axis=1, name="gather_v"),
         n_tgt,
         helper.make_node("Add", ["prev_units", "tgt_2d"], ["u_sum"], name="add_lang"),
@@ -374,10 +385,10 @@ def fixture_translator_dec(text=None, with_mem_v=True):
         value("prosody_ctx", F32, [1, 2]),
         value("src_pos", I64, [1]),
         value("state_in.tgt_pos", I64, [1]),
-        value("mem_k_0", F32, [1, S2UT_RING, S2UT_LATENT_DIM]),
+        value(mem_k, F32, [1, S2UT_RING, S2UT_LATENT_DIM]),
     ]
     if with_mem_v:
-        inputs.append(value("mem_v_0", F32, [1, S2UT_RING, S2UT_LATENT_DIM]))
+        inputs.append(value(mem_v, F32, [1, S2UT_RING, S2UT_LATENT_DIM]))
     inputs.append(value("state_in.dec_kv_0", F32, [1, S2UT_RING, S2UT_LATENT_DIM]))
     outputs = [
         value("units", I64, [1, S2UT_CHUNK_FRAMES]),
@@ -488,6 +499,34 @@ def broken_models():
     ]
 
 
+def s2ut_mismatch_models():
+    """(file, model, replaced quartet role, expected validate_s2ut_bundle error):
+    valid v2 translators (each loads on its own) that break the s2ut_s4 quartet
+    when they replace that role — Stage 07's bundle-level negative tests."""
+    return [
+        ("s2ut_mismatch/translator_enc_latent16.onnx", fixture_translator_enc(latent_dim=16),
+         "translator_enc", "latent_dim mismatch: encoder 8, translator_enc 16"),
+        ("s2ut_mismatch/translator_dec_mem1.onnx",
+         fixture_translator_dec(mem=("mem_k_1", "mem_v_1")),
+         "translator_dec", "shared_mem_states mismatch between translator_enc and translator_dec"),
+        ("s2ut_mismatch/translator_dec_langs.onnx",
+         fixture_translator_dec(langs={"en": 0, "es": 1, "fr": 2, "it": 3}),
+         "translator_dec", "langs mismatch between translator_enc and translator_dec"),
+    ]
+
+
+def s2ut_mismatch_error(quartet, role, replacement, contracts):
+    """validate_s2ut_bundle() error of manifest `quartet` with `role` replaced
+    by the contract of file `replacement` (None if the bundle is valid)."""
+    models = {r: contracts[quartet[r]] for r in S2UT_QUARTET_ROLES}
+    models[role] = contracts[replacement]
+    try:
+        fc.validate_s2ut_bundle(*(models[r] for r in S2UT_QUARTET_ROLES))
+    except fc.ContractError as e:
+        return str(e)
+    return None
+
+
 def _without_contract(model):
     del model.metadata_props[:]
     return model
@@ -508,6 +547,8 @@ def build_all():
     models.append(("s2ut/translator_enc.onnx", fixture_translator_enc(), None))
     models.append(("s2ut/translator_dec.onnx", fixture_translator_dec(), None))
     models += broken_models()
+    mismatches = s2ut_mismatch_models()
+    models += [(rel, model, None) for rel, model, _, _ in mismatches]  # each one is valid alone
 
     files, entries, contracts, graph_by_file = {}, [], {}, {}
     for rel, model, want_error in models:
@@ -554,6 +595,15 @@ def build_all():
             "translator_dec": t_dec, "vocoder": voc, "onset_latency_samples": onset,
         })
 
+    base = next(q for q in s2ut_quartets if q["name"] == S2UT_MISMATCH_QUARTET)
+    s2ut_mismatch = []
+    for rel, _, role, want_error in mismatches:
+        error = s2ut_mismatch_error(base, role, rel, contracts)
+        if error != want_error:
+            raise SystemExit(f"{rel}: expected bundle error {want_error!r}, got {error!r}")
+        s2ut_mismatch.append({"file": rel, "quartet": S2UT_MISMATCH_QUARTET, "replaces": role,
+                              "error": error})
+
     voices = voices_json()
     fc.validate_voices(voices, contracts["identity/vocoder_s1.onnx"])
     fc.validate_voices(voices, contracts["s2ut/vocoder_s4.onnx"])
@@ -570,6 +620,7 @@ def build_all():
         "models": entries,
         "pairs": pairs,
         "s2ut_quartets": s2ut_quartets,
+        "s2ut_mismatch": s2ut_mismatch,
         "bundles": [
             {"dir": "identity", "vocoder": "identity/vocoder_s1.onnx",
              "voices": "identity/voices.json"},
@@ -664,6 +715,15 @@ def self_test(out):
             check_that(ok, f"quartet {q['name']}", "onset latency differs")
         except (fc.ContractError, AttributeError, KeyError) as e:
             check_that(False, f"quartet {q['name']}", str(e))
+    for mm in manifest.get("s2ut_mismatch", []):
+        name = f"mismatch {mm.get('file')}"
+        try:
+            quartet = next(q for q in manifest["s2ut_quartets"] if q["name"] == mm["quartet"])
+            error = s2ut_mismatch_error(quartet, mm["replaces"], mm["file"], contracts)
+            check_that(error is not None and error == mm["error"], name,
+                       f"got {error!r}, want {mm['error']!r}")
+        except (StopIteration, KeyError) as e:
+            check_that(False, name, f"bad s2ut_mismatch entry ({e!r})")
     json_files_set = {"manifest.json"}
     for b in manifest["bundles"]:
         json_files_set.add(b["voices"])

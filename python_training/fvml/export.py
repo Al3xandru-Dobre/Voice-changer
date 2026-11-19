@@ -83,6 +83,23 @@ class ExportError(RuntimeError):
     fails its checks after export."""
 
 
+NC_NOTE = " [trained on non-commercial units: research only, not for distribution]"
+
+
+def noncommercial_license(meta, license, include_noncommercial):
+    """Licence text for a model whose training units are non-commercial
+    (mHuBERT-147, VoxPopuli): refused without --include-noncommercial, tagged
+    with it when the flag is given (BUG-031; shared by export_stateful_onnx.py
+    and s2ut_stream.export_step_graphs)."""
+    if not (isinstance(meta, dict) and meta.get("noncommercial")):
+        return license
+    if not include_noncommercial:
+        raise ExportError(
+            f"the checkpoint was trained on non-commercial units ({meta.get('license')}): it "
+            "must not ship in a default bundle; pass --include-noncommercial for a research export")
+    return (license or str(meta.get("license") or "non-commercial")) + NC_NOTE
+
+
 # -- step graphs ---------------------------------------------------------------
 class StepGraph(nn.Module):
     """One hop of a model with flat tensor I/O, which is what torch.onnx.export

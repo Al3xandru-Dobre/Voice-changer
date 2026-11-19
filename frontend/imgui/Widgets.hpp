@@ -24,8 +24,9 @@ void dim_text_wrapped(const char* text);
 void status_dot(const ImVec4& color, float radius_px);
 void pill(const char* text, const ImVec4& color);
 
-/// Horizontal level meter over -60..0 dBFS; red above -3 dBFS.
-void level_meter(const char* id, float dbfs, float width, float height);
+/// Horizontal level meter over -60..0 dBFS: a filled bar for RMS and a thin
+/// tick for the peak (red above -3 dBFS peak).
+void level_meter(const char* id, float peak_dbfs, float rms_dbfs, float width, float height);
 
 /// A large on/off button; returns true when clicked.
 bool toggle_button(const char* on_label, const char* off_label, bool on, const ImVec2& size,

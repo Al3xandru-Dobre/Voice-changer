@@ -119,13 +119,20 @@ TraySpec build_tray_spec(const TrayInputs& in) {
     // Tooltip: "FluxVoice · <state> · <preset> · <queued> ms"
     s.tooltip = "FluxVoice";
     switch (s.state) {
-        case TrayState::Idle:       s.tooltip += " - Idle"; break;
+        case TrayState::Idle:
+            s.tooltip += " - Idle";
+            if (!in.mode_label.empty()) s.tooltip += " - " + in.mode_label;
+            break;
         case TrayState::Running:
             s.tooltip += " - Running";
+            if (!in.mode_label.empty()) s.tooltip += " - " + in.mode_label;
             if (!in.preset.empty()) s.tooltip += " - " + in.preset;
             s.tooltip += " - " + (in.queued_valid ? fmt_ms(in.queued_ms) : std::string("n/a (independent clocks)"));
             break;
-        case TrayState::Muted:      s.tooltip += " - Muted"; break;
+        case TrayState::Muted:
+            s.tooltip += " - Muted";
+            if (!in.mode_label.empty()) s.tooltip += " - " + in.mode_label;
+            break;
         case TrayState::Recovering:
             s.tooltip += " - Recovering";
             if (in.retry_attempt > 0) s.tooltip += " (attempt " + std::to_string(in.retry_attempt) + ")";

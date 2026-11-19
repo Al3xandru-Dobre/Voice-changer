@@ -2,7 +2,9 @@
 
 > Parent: [Documents index](README.md) · [Bug reports](Bug%20Report/00_index.md) · Condensed reference: [`MEMORY.md`](../MEMORY.md)
 
-This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20Report/BUG-001_voicemeeter_vaio_routing_wedge.md), [`BUG-002`](Bug%20Report/BUG-002_voicemeeter_remote_write_lock.md)), Milestone 1/1.5 audio-engine discoveries, and Milestone 2 ML/ONNX audits. Every rule below traces to a specific failure mode or architectural hazard encountered in FluxVoice-S2UT.
+This document collects hard-won lessons from diagnosed bugs (the [bug index](Bug%20Report/00_index.md), from [`BUG-001`](Bug%20Report/BUG-001_voicemeeter_vaio_routing_wedge.md) and [`BUG-002`](Bug%20Report/BUG-002_voicemeeter_remote_write_lock.md) onwards), Milestone 1/1.5 audio-engine discoveries, and Milestone 2-4 ML/ONNX/frontend audits. Every rule below traces to a specific failure mode or architectural hazard encountered in FluxVoice-S2UT.
+
+**How to use it:** this is the single home of each rule's rationale. Open the section you need by heading — the per-domain rule files in [`.claude/rules/`](../.claude/rules/) name the sections that apply to the paths being edited. Section numbers and titles are link targets: add new sections at the end of their chapter, do not renumber.
 
 ---
 
@@ -170,6 +172,17 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Run chunked ONNX Runtime vs. offline PyTorch parity tests over durations **> 2x the longest attention window** (e.g., >= 25 s for a 10 s window in M2; >= 60 s / 6x window for M3's 128-chunk ring-KV translator).
   - Export fixed-shape graphs per hop variant (`s1`, `s2`, `s4`) and embed the `ModelContract` JSON inside `ModelProto.metadata_props`.
 
+### 4.5 Configure ONNX Runtime C++ for deterministic real-time execution
+- **Hazards ([Milestone 2 Research §9–§10](Research_documents/M2_TEXTLESS_VC_RESEARCH.md)):**
+  1. **Default ORT threading:** By default, ORT spawns intra-op threads equal to physical cores with spin-waiting enabled, pegging CPU cores and causing scheduling jitter against the audio thread.
+  2. **Windows `System32\onnxruntime.dll` shadowing:** Windows 11 ships an older system `onnxruntime.dll` in `C:\Windows\System32`. If the SDK DLL is not placed beside the executable, the loader silently binds the older system DLL or fails at startup.
+  3. **Exceptions on the worker thread:** ORT's C++ API throws `Ort::Exception` on errors.
+- **Rule:**
+  - Set `intra_op_num_threads = 1`, `inter_op_num_threads = 1`, sequential execution, spin-wait disabled (`session.intra_op.allow_spinning = "0"`), global thread pool with `SetGlobalDenormalAsZero()`, and elevate the worker thread (Windows MMCSS `"Pro Audio"`, Linux `SCHED_FIFO`/nice, macOS `QOS_CLASS_USER_INTERACTIVE`).
+  - Preallocate all tensor backing memory in `KVStateCache` and ping-pong two prebuilt `Ort::IoBinding` instances (state A->B on even steps, B->A on odd steps) so steady-state hops perform zero allocations.
+  - Copy the pinned `onnxruntime.dll` next to every executable in CMake post-build, log `Ort::GetVersionString()`, and refuse to run on a version mismatch.
+  - Guard all `<onnxruntime_cxx_api.h>` includes and calls behind `#ifdef FLUXVOICE_WITH_ORT` so the default ORT-less CI build always compiles and passes `ctest`.
+
 ### 4.6 Simultaneous S2UT (Mode B) training & streaming pitfalls ([Milestone 3](Milestone%203/00_master.md))
 - **Hazards ([M3 Research §2–§8](Research_documents/M3_WAITK_S2UT_RESEARCH.md)):**
   1. **Single-pass unit-only S2UT collapse:** Direct S2UT trained only with unit cross-entropy collapses on high word-order reordering (`De->En` drops to 2.46 ASR-BLEU on CVSS-C).
@@ -184,17 +197,6 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - **Match readiness scale end to end (`[BUG-029](Bug%20Report/BUG-029_ctc_adaptive_probability_never_catches_up.md)`):** `WaitKPolicy::on_source_readiness` expects expected target chunks in `[0, 2]`; training targets and runtime inference must map `readiness_logit` onto `[0, 2]` (not `sigmoid` in `(0, 1)`), otherwise two-write catch-up steps can never fire at constant $k$.
   - **Audit `<EOS>` termination, not just `<PAD>` steps, and keep NC taint across every manifest/checkpoint hop (`[BUG-027](Bug%20Report/BUG-027_s2ut_data_prep_archive_plumbing_broken.md)`, `[BUG-030](Bug%20Report/BUG-030_silence_tail_babble_passes_gate_and_eval.md)`, `[BUG-031](Bug%20Report/BUG-031_s2ut_pipeline_drops_noncommercial_taint.md)`, `[BUG-032](Bug%20Report/BUG-032_cpp_voice_catalog_ignores_voice_lang_field.md)`):** Test dataset registries without rewriting `Archive` descriptors in test helpers; fail `gate_s2ut` when `trailing_silence` clips hit `max_flush_ratio`/`max_flush_steps` without `<EOS>`; propagate `noncommercial: true` from both manifest rows and teacher metadata into checkpoints and ONNX contract `license` strings; and keep every `voices.json` field (`"lang"`) validated identically in Python and both C++ `VoiceCatalog` parsers.
 
-### 4.5 Configure ONNX Runtime C++ for deterministic real-time execution
-- **Hazards ([Milestone 2 Research §9–§10](Research_documents/M2_TEXTLESS_VC_RESEARCH.md)):**
-  1. **Default ORT threading:** By default, ORT spawns intra-op threads equal to physical cores with spin-waiting enabled, pegging CPU cores and causing scheduling jitter against the audio thread.
-  2. **Windows `System32\onnxruntime.dll` shadowing:** Windows 11 ships an older system `onnxruntime.dll` in `C:\Windows\System32`. If the SDK DLL is not placed beside the executable, the loader silently binds the older system DLL or fails at startup.
-  3. **Exceptions on the worker thread:** ORT's C++ API throws `Ort::Exception` on errors.
-- **Rule:**
-  - Set `intra_op_num_threads = 1`, `inter_op_num_threads = 1`, sequential execution, spin-wait disabled (`session.intra_op.allow_spinning = "0"`), global thread pool with `SetGlobalDenormalAsZero()`, and elevate the worker thread (Windows MMCSS `"Pro Audio"`, Linux `SCHED_FIFO`/nice, macOS `QOS_CLASS_USER_INTERACTIVE`).
-  - Preallocate all tensor backing memory in `KVStateCache` and ping-pong two prebuilt `Ort::IoBinding` instances (state A->B on even steps, B->A on odd steps) so steady-state hops perform zero allocations.
-  - Copy the pinned `onnxruntime.dll` next to every executable in CMake post-build, log `Ort::GetVersionString()`, and refuse to run on a version mismatch.
-  - Guard all `<onnxruntime_cxx_api.h>` includes and calls behind `#ifdef FLUXVOICE_WITH_ORT` so the default ORT-less CI build always compiles and passes `ctest`.
-
 ### 4.7 Decision gates and parity checks must measure what ships, and must be able to fail
 - **Past mistakes ([`BUG-015`](Bug%20Report/BUG-015_gate_decides_on_pytorch_clock.md), [`BUG-016`](Bug%20Report/BUG-016_gate_export_silent_exporter_fallback.md), [`BUG-017`](Bug%20Report/BUG-017_vocoder_checks_below_noise_floor.md), [Stage 05 review](Bug%20Report/REVIEW-M2-S05_2026-10-18.md)):**
   1. The Stage 05 decision gate applied its "compute p95 <= 50 % of hop" rule to PyTorch-eager time (Python dispatch) while the product runs ONNX Runtime; with the stage file's own numbers the gate would have rejected every 20 ms-hop design and picked a 108.7 ms one.
@@ -207,6 +209,15 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
   - Force UTF-8 on stdout/stderr (`sys.stdout.reconfigure(encoding="utf-8", errors="replace")`) in every Python tool that prints `✓`, `−` or library progress text; the exit status must not depend on the console codepage.
   - Gate equivalence on a relative measure (SNR >= 90 dB or error / RMS) **and** assert the reference is not near-silent; run parity checks on a model whose output is O(0.1), and with carried state.
   - Pin every business rule of a gate (each threshold, the T-B formula, the ordering) and every identity-carrying mapping (speaker embedding -> voices.json row -> audio) with a test that fails when that rule is broken.
+
+### 4.8 Mode B runtime orchestration: twin-derived tests, edge hops, zero-copy bindings, thread ownership ([Milestone 3 Stages 07-09](Milestone%203/00_master.md))
+- **Past mistakes (found while implementing the C++ runner):** the Stage 08 fake-test count "2 `kRead` / 8 `kWrite` / 2 `kFlush`" was written before the tail-flush rules settled and only holds with `tail_flush_ms = 0`; the governor protected hops with queued translated frames but not the hop carrying the last frame, its ramp-down successor or a Stage 09 switch hop; a zero-copy binding silently kept pointing into a reloaded producer; UI-visible accessors were worker-only state; a refused `set_params()` was dropped by `ModeAWorker`.
+- **Rules:**
+  - **Derive test expectations from the executable twin** (`WaitKPolicy` twin, `python_training/s2ut_golden.py`), not from stage-text examples written before the rules settled. Pin both the stage-text scenario (with its stated preconditions) and the default-config scenario (4 / 13 / 3 under the 400 ms tail).
+  - **Protect every hop whose samples touch translated audio** from latency-governor drops (edge hops), not only hops with queued frames: final-frame hop, its ramp-down successor, and any switch hop.
+  - **A zero-copy cross-session binding must detect producer reload or move** (load-generation counter) and refuse to step with a clear error until re-bound.
+  - **Accessors read by the UI thread must be atomic** (relaxed is enough for a mode flag or counter) or documented worker-only; never hand the UI a reference into worker state.
+  - **The control thread pre-validates whatever the worker may refuse** (language ids, `src != tgt`, translators present): the worker's `set_params()` result is dropped by `ModeAWorker`, so a refusal there is silent.
 
 ---
 
@@ -260,22 +271,24 @@ This document collects hard-won lessons from diagnosed bugs ([`BUG-001`](Bug%20R
 
 ### 5.5 Per-toolchain build directories & the optional ONNX Runtime SDK
 - **Rule:**
-  - Keep one build directory per native toolchain (`build/` MSVC, `build-gcc`, `build-clang`, `build-macos`) — never reuse a Visual Studio cache for Ninja/GCC or vice versa.
-  - Linux GCC (fresh dir):
+  - Keep one build directory per native toolchain and flavour — never reuse a Visual Studio cache for Ninja/GCC or vice versa, and never create a throw-away tree per task: every extra tree is a full rebuild, and a tree whose configure later fails keeps serving stale binaries to `ctest` (a bogus `model_contract` failure came from an October binary in such a tree).
+  - Linux GCC / Clang: use the presets in [`CMakePresets.json`](../CMakePresets.json) (Ninja, Release, strict warnings as errors, tests on; trees `build-linux-gcc`, `build-linux-clang`, and `-ort` variants that point `ONNXRUNTIME_ROOT` at `third_party/onnxruntime`):
     ```bash
-    CC=gcc CXX=g++ cmake -S . -B build-gcc -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON
-    cmake --build build-gcc -j
-    ctest --test-dir build-gcc --output-on-failure
+    cmake --workflow --preset linux-gcc        # configure + build all + ctest; also linux-clang, linux-gcc-ort, linux-clang-ort
+    cmake --build --preset linux-gcc --target <target> && ctest --preset linux-gcc -R <regex>   # inner loop
+    ctest --preset linux-gcc-training          # python_training_* suites only
     ```
-  - Linux Clang: same with `CC=clang CXX=clang++` and `-B build-clang`.
+    The workflow presets exclude the `python_training_*` suites: those are registered only where `python_training/.venv` exists, never run on the CI C++ legs, and take minutes each. Run the `-training` preset when the change touches `python_training/**`, a Python↔C++ twin, a golden or a contract. Chain build and test with `&&` so a failed build is never followed by a green run of old binaries.
+  - Without presets (CMake < 3.25): `CC=gcc CXX=g++ cmake -S . -B build-linux-gcc -G Ninja -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON && cmake --build build-linux-gcc && ctest --test-dir build-linux-gcc --output-on-failure` (Clang: `CC=clang CXX=clang++`, `build-linux-clang`).
+  - Optional speed-up for any new tree: export `CMAKE_C_COMPILER_LAUNCHER=ccache` and `CMAKE_CXX_COMPILER_LAUNCHER=ccache` before the first configure (CMake reads them from the environment); a second tree or a git worktree then rebuilds from cache.
   - macOS AppleClang — select the SDK compiler explicitly (`/usr/bin/clang` is AppleClang even when a Homebrew LLVM leads in PATH) and pin the deployment target to the macOS 13 floor, as the CI `macos-clang` leg does:
     ```bash
     CC=/usr/bin/clang CXX=/usr/bin/clang++ cmake -S . -B build-macos -DCMAKE_BUILD_TYPE=Release -DFLUXVOICE_WARNINGS_AS_ERRORS=ON -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
     cmake --build build-macos -j
     ctest --test-dir build-macos --output-on-failure
     ```
-  - Record verification status honestly: MSVC is built locally; the Linux GCC/Clang and AppleClang legs are exercised by CI — do not claim local runs that did not happen.
-  - ONNX Runtime is optional and off by default (`ONNXRUNTIME_ROOT` unset → `FLUXVOICE_WITH_ORT` undefined → ORT code compiled out, the CI baseline). A prebuilt SDK must match the target architecture and platform: a Windows x64 SDK cannot link an ARM64 or Linux build, and the CUDA / DirectML / CoreML execution-provider builds are not interchangeable. Neural runtime wiring is still future work.
+  - Record verification status honestly: only the legs built natively on the machine at hand count as local runs (GCC/Clang on the Linux machine, MSVC on the Windows machine); every other leg comes from CI — do not claim local runs that did not happen.
+  - ONNX Runtime is optional and off by default (`ONNXRUNTIME_ROOT` unset → `FLUXVOICE_WITH_ORT` undefined → ORT code compiled out, the CI baseline). A prebuilt SDK must match the target architecture and platform: a Windows x64 SDK cannot link an ARM64 or Linux build, and the CUDA / DirectML / CoreML execution-provider builds are not interchangeable. A change to ORT-guarded code must pass the gate in both flavours (with and without the SDK).
 
 ### 5.6 Default development workflow
 
@@ -287,7 +300,7 @@ This is the default for all future C++ source, header, test and CMake work, not 
 4. **Verify narrowly, then run the final gate.** First build and test the affected targets with regression coverage. Then configure with `FLUXVOICE_BUILD_TESTS=ON`, `FLUXVOICE_STRICT_WARNINGS=ON` and `FLUXVOICE_WARNINGS_AS_ERRORS=ON`, build all targets (including `fluxvoice_header_checks`) and run the hardware-free CTest suite. The header check disables PCH/unity to guard independent inclusion; still audit owning headers because a header's internal transitive includes can hide omissions. Use the per-toolchain directories and commands in section 5.5; do not change generators or compilers inside an existing cache.
 5. **Report evidence, not inferred portability.** Record each native compiler's identity/version, OS/architecture, configure/build/test commands, result and raw log or CI run reference. A local MSVC pass or a clang-tidy parse using MSVC headers is not a Linux/AppleClang pass. Mark unavailable or unexecuted legs NOT RUN/pending, retain the reason and name the required CI follow-up. Cross-platform verification requires green native configure/build/CTest runs for all four legs in `.github/workflows/build.yml`; compilation alone does not verify live audio routing or OS permissions. Documentation-only changes need link/diff validation, not a fabricated new C++ test result.
 
-Compiler failures must leave behind the minimal upstream fix, a relevant regression check and a concise lesson here (with a condensed reminder in `MEMORY.md`/`AGENTS.md` when it changes the standing workflow). Keep research snapshots unchanged and do not mark milestone acceptance complete until its evidence exists.
+Compiler failures must leave behind the minimal upstream fix, a relevant regression check and a concise lesson here, plus one imperative line in the owning `.claude/rules/<handle>.md` (`MEMORY.md` only for a new cross-domain invariant, `AGENTS.md` only when an always-on rule changes — see "Recording a lesson" in `AGENTS.md` Part 3). Keep research snapshots unchanged and do not mark milestone acceptance complete until its evidence exists.
 
 ### 5.7 A user-typed name that becomes a path is validated at the writer, and persisted on commit
 - **Past mistake ([`BUG-021`](Bug%20Report/BUG-021_studio_draft_saved_per_keystroke_unvalidated_path.md)):** The Voice Studio saved its draft into `studio_root / voice_name` on every keystroke. Typing `alex` created `a/`, `al/`, `ale/` and `alex/`. Typing an existing project's name overwrote its draft, and `..\x` escaped the root. A `name_problem()` check existed but was used only for display.

@@ -62,9 +62,10 @@ DeviceRows build_rows(const DeviceSnapshot& snap, EndpointDirection direction, b
     return out;
 }
 
-DeviceSelection selection_for_row(const DeviceRows& rows, std::size_t row) {
-    if (row == 0 || row >= rows.rows.size() || rows.rows[row].follow_default) return FollowSystemDefault{};
-    return ExplicitEndpoint{rows.rows[row].key, rows.generation};
+std::optional<DeviceSelection> selection_for_row(const DeviceRows& rows, std::size_t row) {
+    if (row >= rows.rows.size()) return std::nullopt;  // never a quiet "Follow system default"
+    if (rows.rows[row].follow_default) return DeviceSelection{FollowSystemDefault{}};
+    return DeviceSelection{ExplicitEndpoint{rows.rows[row].key, rows.generation}};
 }
 
 std::optional<std::size_t> row_for_selection(const DeviceRows& rows, const DeviceSelection& sel) {

@@ -8,9 +8,18 @@
 //
 // A frame is the target unit plus the contract-v2 `prosody` row
 // (z_f0, voicing, aperiodicity, z_energy). The backing store is allocated in
-// the constructor; push_chunk() and pop_hop() never allocate, lock or block.
-// Single-threaded: both ends are driven by the inference worker.
-// python_training/fvml/waitk_policy.py carries the Python twin.
+// the constructor; push_chunk(), pad_to_multiple() and pop_hop() never
+// allocate, lock or block. Single-threaded: both ends are driven by the
+// inference worker. python_training/fvml/waitk_policy.py carries the Python
+// twin.
+//
+// BUG-028 (stranded tail frames): push_chunk() drops everything from the
+// first special unit, so an <EOS> chunk queues 1..3 frames and an s2/s4
+// vocoder could never pop them (and their phase would shift every later
+// hop). After each push the Mode B pipeline calls pad_to_multiple(hop
+// frames): the remainder is completed with `pad` frames (last unit, voicing 0,
+// aperiodicity 1) whose vocoded samples the pipeline replaces by silence, so
+// the queue stays hop-aligned and no frame survives into the next utterance.
 #pragma once
 
 #include "dsp/PitchTracker.hpp"
@@ -32,6 +41,7 @@ public:
         float voicing = 0.0f;
         float aperiodicity = 1.0f;
         float energy_z = 0.0f;
+        bool pad = false;          // alignment filler (pad_to_multiple): render as silence
     };
 
     struct PushResult {
@@ -79,12 +89,38 @@ public:
         std::size_t tail = (head_ + size_) % buf_.size();
         for (std::size_t i = 0; i < valid; ++i) {
             const float* p = prosody.data() + i * kProsodyDims;
-            buf_[tail] = Frame{units[i], p[0], p[1], p[2], p[3]};
+            buf_[tail] = Frame{units[i], p[0], p[1], p[2], p[3], false};
             tail = (tail + 1) % buf_.size();
         }
         size_ += valid;
         r.pushed = valid;
         return r;
+    }
+
+    /// Complete the queue to a multiple of `n_frames` (the vocoder hop) with
+    /// pad frames: the newest frame's unit and pitch, voicing 0, aperiodicity
+    /// 1, `pad = true`. Returns the number of pad frames appended (0 when
+    /// already aligned, when empty, or when n_frames <= 1). Needs room for
+    /// them: keep capacity a multiple of n_frames (then the room always
+    /// exists); otherwise it pads nothing and counts an overflow.
+    std::size_t pad_to_multiple(std::size_t n_frames) {
+        if (n_frames <= 1 || size_ == 0) return 0;
+        const std::size_t rem = size_ % n_frames;
+        if (rem == 0) return 0;
+        const std::size_t pads = n_frames - rem;
+        if (pads > free_frames()) {
+            ++overflows_;
+            return 0;
+        }
+        const Frame& last = buf_[(head_ + size_ - 1) % buf_.size()];
+        const Frame filler{last.unit, last.logf0_z, 0.0f, 1.0f, last.energy_z, true};
+        std::size_t tail = (head_ + size_) % buf_.size();
+        for (std::size_t i = 0; i < pads; ++i) {
+            buf_[tail] = filler;
+            tail = (tail + 1) % buf_.size();
+        }
+        size_ += pads;
+        return pads;
     }
 
     /// Pop exactly one vocoder hop. Returns false (and writes nothing) when

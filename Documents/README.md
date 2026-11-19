@@ -8,9 +8,11 @@ table) followed by numbered stage files `NN_<stage_name>.md`.
 |---|---|---|
 | [Milestone 1/](Milestone%201/00_master.md) | DSP loopback & audio engine | In progress |
 | [Milestone 1.5/](Milestone%201.5/00_master.md) | Cross-platform audio devices (parallel to M2; blocks M4 device UI) | In progress (stages 01–02) |
-| [Milestone 2/](Milestone%202/00_master.md) | Textless VC mode (encoder + vocoder, voice controls) | Planned (stage files written) |
-| [Milestone 3/](Milestone%203/00_master.md) | Wait-k S2UT mode (bidirectional `En↔{Es,Fr,De}`, shared latents) | Planned (stage files written) |
+| [Milestone 2/](Milestone%202/00_master.md) | Textless VC mode (encoder + vocoder, voice controls) | In progress (stages 02 and 07 done; see the master's stage table) |
+| [Milestone 3/](Milestone%203/00_master.md) | Wait-k S2UT mode (bidirectional `En↔{Es,Fr,De}`, shared latents) | In progress (see the master's stage table) |
 | [Milestone 4/](Milestone%204/00_master.md) | UI & optimization | In progress (desktop frontend landed; optimization pending) |
+| [Milestone 5/](Milestone%205/00_master.md) | Personal voice profiles (on-device enrolment from user recordings; consent, export/erase, synthetic-audio marking) | Planned (stage files written 2026-11-18) |
+| [Milestone 6/](Milestone%206/00_master.md) | Local-first dataset execution & model training runbook (two-wave disk-budgeted Mode A training on RTX 4060 Laptop + cloud scale-up handoff for P1/P2 & M3 S2UT) | Planned (stage files written 2026-11-19) |
 
 ## Research documents
 
@@ -36,8 +38,10 @@ external-dependency bugs that block milestone work.
 
 Engineering rules and mistake-prevention patterns distilled from these bug
 reports and milestone findings live in [`BEST_PRACTICES.md`](BEST_PRACTICES.md)
-(with a condensed quick-reference layer in the root [`MEMORY.md`](../MEMORY.md)
-and specialist agent workflows in [`AGENTS.md`](../AGENTS.md)).
+(with a condensed cross-domain layer in the root [`MEMORY.md`](../MEMORY.md),
+always-on rules and the specialist roster in [`AGENTS.md`](../AGENTS.md), and
+per-domain rule files in [`.claude/rules/`](../.claude/rules/) that load when a
+matching path is edited).
 
 ## Default development workflow
 
@@ -48,6 +52,8 @@ Before claiming cross-platform verification, retain native Windows/MSVC, Linux/G
 ## Conventions
 
 
+- The milestone master (`00_master.md`) is the source of truth for status; the
+  table above is a summary.
 - Update the **Status** field inside each file (`☐ not started` →
   `◐ in progress` → `☑ done`) and the master table as work lands.
 - Stage files are executed in order; each lists its dependencies.

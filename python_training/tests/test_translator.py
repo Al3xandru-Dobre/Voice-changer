@@ -400,18 +400,42 @@ def test_streaming_equals_forward_with_short_pauses_no_reset():
     assert st.runtime.src_pos == len(speech) > 5 * model.cfg.max_src_steps
 
 
+class ScriptedReadinessHead(torch.nn.Module):
+    """Readiness logits from a fixed per-chunk schedule (BUG-029 regression):
+    the step path calls it once per chunk; replay_forward()'s offline call
+    re-reads the saturated tail (readiness outputs are never compared)."""
+
+    def __init__(self, logits):
+        super().__init__()
+        self.logits = [float(v) for v in logits]
+        self.calls = 0
+
+    def forward(self, x):
+        s = x.shape[1]
+        vals = torch.tensor([self.logits[min(self.calls + j, len(self.logits) - 1)]
+                             for j in range(s)], dtype=x.dtype)
+        self.calls += s
+        return vals.view(1, s, 1)
+
+
 def test_streaming_equals_forward_adaptive_policy():
     """CTC-adaptive Wait-k: 0, 1 or 2 writes per chunk driven by the readiness
-    head; forward() with the recorded schedule still matches."""
+    head; forward() with the recorded schedule still matches. The readiness
+    logits are scripted: sparse chunks hold writes back at a constant k, then
+    a dense chunk banks two expected target chunks and the policy writes twice
+    to catch up — no set_k() involved (BUG-029)."""
     model = make_model(seed=7)
-    with torch.no_grad():
-        model.encoder.readiness_head.weight.mul_(40.0)     # spread readiness over (0, 1)
+    model.encoder.readiness_head = ScriptedReadinessHead([-8.0] * 4 + [8.0] * 76)
     lat = random_latents(model.cfg, 80, seed=7)
     policy = WaitKConfig(k=2, adaptive_mode=True, adaptive_extra_wait=2)
     st, results, _, _ = check_equivalence(model, lat, policy, atol=1e-10)
-    assert {r.writes for r in results} == {0, 1}
+    assert {r.writes for r in results} == {0, 1, 2}
     lags = [r.t_src - r.t_tgt for r in results[4:]]
     assert max(lags) > 2, "readiness never held a write back"
+    # The 2-write catch-up happens while k is unchanged (no set_k() anywhere).
+    doubles = [r for r in results if r.writes == 2]
+    assert doubles, "readiness never banked a catch-up write at constant k"
+    assert st.policy.k == 2                                     # constant k throughout
     # Lowering k mid-stream leaves a backlog: the policy then writes twice per chunk.
     st = ss.StreamingTranslator(ss.TorchRuntime(model, "es", "en"),
                                 WaitKConfig(k=6, adaptive_mode=True, adaptive_extra_wait=1),
@@ -700,10 +724,35 @@ def test_readiness_targets_spread_the_target_chunks_over_the_source():
     mass = torch.tensor([[0.0, 2.0, 2.0, 0.0, 9.0], [1.0, 1.0, 1.0, 1.0, 0.0]])
     mask = torch.tensor([[1, 1, 1, 1, 0], [1, 1, 1, 1, 0]], dtype=torch.bool)
     ready = tr.readiness_targets(mass, mask, torch.tensor([2.0, 8.0]))
-    assert ready[0].tolist() == pytest.approx([0.0, 1.0, 1.0, 0.0, 0.0])   # padded mass ignored
-    assert ready[1].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0, 0.0])   # clamped to 1 / chunk
+    assert ready[0].tolist() == pytest.approx([0.0, 1.0, 1.0, 0.0, 0.0])  # padded mass ignored
+    assert ready[1].tolist() == pytest.approx([2.0, 2.0, 2.0, 2.0, 0.0])  # clamped to 2 / chunk
     ready = tr.readiness_targets(mass, mask, torch.tensor([1.0, 2.0]))
     assert ready.sum(1).tolist() == pytest.approx([1.0, 2.0])
+
+
+def test_expected_chunks_from_logit_and_policy_catch_up():
+    """BUG-029: the [0, 2] mapping lets CTC-Adaptive write twice at a constant
+    k (a plain sigmoid probability never can)."""
+    assert ss.expected_chunks_from_logit(0.0) == pytest.approx(1.0)      # neutral = on time
+    assert ss.expected_chunks_from_logit(-40.0) == pytest.approx(0.0, abs=1e-9)
+    assert ss.expected_chunks_from_logit(6.0) == pytest.approx(2.0, abs=1e-2)
+
+    from fvml.waitk_policy import WaitKPolicy
+
+    two_writes = 0
+    for seed in range(25):
+        rng = np.random.default_rng(seed)
+        policy = WaitKPolicy(WaitKConfig(k=2, adaptive_mode=True, adaptive_extra_wait=2))
+        for _ in range(100):
+            policy.on_chunk_energy(True, 80)
+            policy.notify_source_unit()
+            # Dense vs sparse chunks in [0, 2], like 2 * sigmoid of a readiness logit.
+            policy.on_source_readiness(2.0 * float(rng.integers(0, 2)))
+            n = policy.max_writes_this_step()
+            two_writes += n == 2
+            for _ in range(n):
+                policy.notify_target_unit(False)
+    assert two_writes > 0, "2 * sigmoid readiness can bank 2-write catch-up steps"
 
 
 def test_padding_does_not_change_an_utterance():

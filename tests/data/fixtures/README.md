@@ -25,7 +25,18 @@ producer, no timestamps). CC0-1.0: they contain no trained weights.
 | `s2ut/vocoder_s{1,2,4}.onnx` | v2 discrete vocoder (`vocab=16`) | `units [1,N]` + prosody conditioning → `audio [1,hop]` |
 | `s2ut/voices.json`, `s2ut/langs.json` | — | v2 bundle voice and bidirectional `{en,es,fr,de}` language tables |
 | `broken/*.onnx` | — | valid ONNX that breaks contract v1 or v2; `manifest.json` records the exact error each must be rejected with |
-| `manifest.json` | — | SHA256, contract string, graph I/O and expected error per file; Mode A pairs and Mode B quartets with latencies |
+| `s2ut_mismatch/translator_enc_latent16.onnx` | v2 `translator_enc`, `latent_dim=16` (`latents`, `enc_conv`, `mem_*` sized 16) | loads and runs alone; replacing `translator_enc` in `s2ut_s4` breaks the bundle (`latent_dim mismatch: encoder 8, translator_enc 16`) and `translator_dec` cannot bind its `[1,4,8]` memory to the `[1,4,16]` ring |
+| `s2ut_mismatch/translator_dec_mem1.onnx` | v2 `translator_dec`, `shared_mem_states = ["mem_k_1", "mem_v_1"]` | loads alone; breaks the bundle (`shared_mem_states mismatch between translator_enc and translator_dec`) and cannot bind to `translator_enc` (no `mem_k_1` state) |
+| `s2ut_mismatch/translator_dec_langs.onnx` | v2 `translator_dec`, `langs = {en: 0, es: 1, fr: 2, it: 3}` | loads alone; breaks the bundle (`langs mismatch between translator_enc and translator_dec`) |
+| `manifest.json` | — | SHA256, contract string, graph I/O and expected error per file; Mode A pairs, Mode B quartets with latencies and Mode B quartet mismatches |
+
+`s2ut_mismatch/` fixtures are ordinary valid models in `manifest.json`'s `models`
+list (`"error": null`, so the broken-fixture loops skip them). The top-level
+`s2ut_mismatch` list records, per file, the quartet it is swapped into
+(`"quartet": "s2ut_s4"`), the role it `"replaces"`, and the exact
+`validate_s2ut_bundle()` error. `--self-test` re-derives every error from the
+manifest; `tests/test_ort_model.cpp` loads each file in ONNX Runtime and checks
+the same error, plus the `bind_shared_inputs()` refusals.
 
 ## Hand-computed latencies
 
@@ -48,5 +59,7 @@ Mode B S2UT quartets (`wait_k × chunk_frames × frame_samples + (L_enc + L_voc)
 | `10` | 12800 samples (800 ms) |
 
 Checked by `tests/test_model_contract.cpp` (manifest, no ORT),
-`python_training/tests/test_contract.py` (stdlib), and
-`python_training/tests/test_fixtures.py` (runs both v1 and v2 chains in ONNX Runtime).
+`python_training/tests/test_contract.py` (stdlib),
+`python_training/tests/test_fixtures.py` (runs both v1 and v2 chains in ONNX Runtime), and
+`tests/test_ort_model.cpp` (the v2 quartet in the C++ runtime: zero-copy `mem_*`/`src_pos`
+sharing across all four `(translator_enc bank, translator_dec parity)` bindings).

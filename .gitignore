@@ -34,6 +34,12 @@ __pycache__/
 .venv/
 venv/
 
+# Agent tooling: rules and agent definitions under .claude/ are tracked;
+# worktrees and machine-local settings are not.
+.claude/worktrees/
+.claude/settings.local.json
+CMakeUserPresets.json
+
 # Editors / OS
 .idea/
 .vscode/

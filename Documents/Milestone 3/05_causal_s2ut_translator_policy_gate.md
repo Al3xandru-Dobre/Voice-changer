@@ -188,13 +188,17 @@ These are the definitions the code implements where the task list leaves room.
 
 Findings that affect the gate:
 
-- **CTC-Adaptive cannot write twice per chunk at a constant *k*.**
-  `WaitKPolicy.on_source_readiness` clamps each chunk's readiness to 1.0, so the
-  accumulator cannot reach 2.0 once the lag is $\ge k$: 0 two-write steps in
-  20,000 random trajectories (4M steps). The candidate can only *delay* writes
-  (up to $k$ + `adaptive_extra_wait`), never catch up; two writes happen only
-  after `set_k` lowers $k$. The "0/1/2 target chunks per step" benefit needs a
-  Stage 04 change (e.g. a readiness in $[0, 2]$).
+- **CTC-Adaptive readiness is a `[0, 2]` expected-chunk count** *(BUG-029,
+  fixed 2026-11-18)*. Stage 04 widened `WaitKPolicy.on_source_readiness` to
+  `[0, 2]`; `translator.py::readiness_targets()` now clamps to `[0, 2]` and
+  `s2ut_loss()` supervises `ready / 2` with BCE, while `push_chunk()` feeds
+  `2 * sigmoid(readiness_logit)` into the policy (`s2ut_stream
+  .expected_chunks_from_logit`; a logit of 0 means "one expected chunk"). The
+  pre-fix note — that readiness clamped to 1.0 and the candidate could only
+  delay writes, never catch up (0 two-write steps in 4M random steps at
+  constant $k$) — described the `[0, 1]$ probability mapping this replaced.
+  The Stage 07/08 C++ runner must apply the same `2.0f * sigmoidf(logit)`
+  mapping before `on_source_readiness()`.
 - **Compute budget is tight.** See the ORT measurement below: the translator
   alone costs 23 ms p95 per write step of the 40 ms allowed for all four stages.
 - **`<EOS>` then more speech.** If `<EOS>` arrives in a pause shorter than the

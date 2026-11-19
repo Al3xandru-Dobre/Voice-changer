@@ -3,6 +3,7 @@
 #include "imgui/Views.hpp"
 
 #include "core/AppModel.hpp"
+#include "core/Telemetry.hpp"
 #include "core/TrayModel.hpp"
 #include "imgui/Theme.hpp"
 #include "imgui/Widgets.hpp"
@@ -31,12 +32,14 @@ void draw_engine_card(ViewContext& ctx) {
     if (!widgets::begin_card("engine", "Engine")) { widgets::end_card(); return; }
 
     const ImVec2 big(200.0f * ctx.scale, 46.0f * ctx.scale);
-    const bool usable = app.backend_usable();
-    ImGui::BeginDisabled(!usable);
+    const bool usable  = app.backend_usable();
+    const bool loading = app.bundle_loading();  // Start waits for the model: the stream never runs across a model change
+    ImGui::BeginDisabled(!usable || loading);
     if (widgets::toggle_button("Stop", "Start", app.engine_on(), big, t.success)) app.toggle_engine();
     ImGui::EndDisabled();
-    if (!usable && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
-        ImGui::SetTooltip("%s", app.backend_status().state == BackendState::NullOnly
+    if ((!usable || loading) && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", loading ? "A model bundle is loading; Start is available when it has finished."
+                                : app.backend_status().state == BackendState::NullOnly
                                     ? "No audio hardware is reachable (null backend, offline mode)."
                                     : "No audio backend could be initialised.");
     ImGui::SameLine();
@@ -60,6 +63,12 @@ void draw_engine_card(ViewContext& ctx) {
         ImGui::SetTooltip("%s", app.translation().unavailable_reason().c_str());
 
     ImGui::Spacing();
+    // What the audio goes through: never leave "Bypass" implicit (the speech is not converted).
+    if (loading)
+        widgets::pill(("Loading bundle '" + app.loading_bundle() + "'...").c_str(), t.warning);
+    else
+        widgets::pill(app.mode_label().c_str(), app.mode_a() ? t.success : t.warning);
+    ImGui::Spacing();
     widgets::dim_text_wrapped(app.engine_message().empty()
                                   ? "Start routes the selected microphone through FluxVoice to the selected output."
                                   : app.engine_message().c_str());
@@ -82,6 +91,22 @@ void draw_status_card(ViewContext& ctx) {
         if (ImGui::Button("Retry")) static_cast<void>(app.start_engine());
     }
     widgets::end_card();
+}
+
+// A fatal pipeline error stopped the stream. Nothing restarts by itself: the
+// user retries (same bundle, same devices) or picks another bundle.
+void draw_failure_card(ViewContext& ctx) {
+    AppModel& app = ctx.app;
+    if (!app.pipeline_failed()) return;
+    if (!widgets::begin_card("failure", nullptr)) { widgets::end_card(); return; }
+    widgets::pill("Pipeline error", theme_colors().danger);
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", app.pipeline_failure().c_str());
+    if (ImGui::Button("Retry")) static_cast<void>(app.retry_after_failure());
+    ImGui::SameLine();
+    if (ImGui::Button("Choose another bundle")) app.choose_another_bundle();
+    widgets::end_card();
+    ImGui::Spacing();
 }
 
 void draw_pickers_card(ViewContext& ctx) {
@@ -123,20 +148,20 @@ void draw_devices_card(ViewContext& ctx) {
 void draw_meters_card(ViewContext& ctx) {
     AppModel& app = ctx.app;
     const TelemetrySnapshot t = app.telemetry();
-    if (!widgets::begin_card("meters", "Levels & latency")) { widgets::end_card(); return; }
+    if (!widgets::begin_card("meters", "Levels & glitches")) { widgets::end_card(); return; }
     const float w = ImGui::GetContentRegionAvail().x - 90.0f * ctx.scale;
     ImGui::TextUnformatted("Input");
     ImGui::SameLine(80.0f * ctx.scale);
-    widgets::level_meter("in", t.input_peak_dbfs, w, 14.0f * ctx.scale);
+    widgets::level_meter("in", t.input_peak_dbfs, t.input_rms_dbfs, w, 14.0f * ctx.scale);
     ImGui::TextUnformatted("Output");
     ImGui::SameLine(80.0f * ctx.scale);
-    widgets::level_meter("out", t.output_peak_dbfs, w, 14.0f * ctx.scale);
+    widgets::level_meter("out", t.output_peak_dbfs, t.output_rms_dbfs, w, 14.0f * ctx.scale);
     ImGui::Spacing();
 
     char buf[96];
-    std::snprintf(buf, sizeof buf, "Queued audio %s  |  %llu underruns  |  %llu overruns  |  %llu drops",
-                  t.queued_ms_text().c_str(), static_cast<unsigned long long>(t.output_underruns),
-                  static_cast<unsigned long long>(t.input_overruns), static_cast<unsigned long long>(t.output_drops));
+    std::snprintf(buf, sizeof buf, "%llu underruns  |  %llu overruns  |  %llu drops",
+                  static_cast<unsigned long long>(t.output_underruns), static_cast<unsigned long long>(t.input_overruns),
+                  static_cast<unsigned long long>(t.output_drops));
     ImGui::TextUnformatted(buf);
     const std::array<float, 60> hist = app.underrun_history().ordered();
     const int n = static_cast<int>(app.underrun_history().size());
@@ -146,18 +171,70 @@ void draw_meters_card(ViewContext& ctx) {
     widgets::end_card();
 }
 
+std::string ms_text(double ms) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%.1f ms", ms);
+    return b;
+}
+
 } // namespace
+
+void draw_latency_card(const TelemetrySnapshot& t, const char* id) {
+    const ThemeColors& colors = theme_colors();
+    const LatencyCard c = t.latency_card();
+    if (!widgets::begin_card(id, "Estimated end-to-end latency")) { widgets::end_card(); return; }
+    if (!t.stream_running) {
+        widgets::dim_text_wrapped("Start the engine to see the estimate (device periods and queued audio exist only while a "
+                                  "stream runs).");
+    } else if (!c.valid) {
+        ImGui::TextUnformatted("n/a (independent clocks)");
+        widgets::dim_text_wrapped("System-playback loopback has independently clocked capture and playback callbacks: the "
+                                  "queued audio is not defined there.");
+    } else {
+        ImGui::PushFont(nullptr, tokens::kHeroFont);
+        ImGui::TextUnformatted(ms_text(c.total_ms).c_str());
+        ImGui::PopFont();
+        ImGui::SameLine();
+        widgets::pill("estimated", colors.accent);
+        if (c.bypass) {
+            ImGui::SameLine();
+            widgets::pill("Bypass - queued + device terms only", colors.warning);
+        }
+        if (widgets::kv_table_begin((std::string(id) + "-terms").c_str())) {
+            widgets::kv_row("Capture device", ms_text(c.capture_device_ms));
+            widgets::kv_row("Queued", ms_text(c.queued_ms));
+            if (!c.bypass) widgets::kv_row("Model delay (lookahead + OLA)", ms_text(c.model_delay_ms));
+            widgets::kv_row("Playback device", ms_text(c.playback_device_ms));
+            widgets::kv_table_end();
+        }
+        if (!c.bypass) {
+            widgets::dim_text("Beside the estimate (not part of the sum)");
+            if (widgets::kv_table_begin((std::string(id) + "-info").c_str())) {
+                widgets::kv_row("Compute p95 per hop", ms_text(c.compute_p95_ms));
+                widgets::kv_row("Algorithmic latency (contract)", ms_text(c.algorithmic_ms));
+                widgets::kv_table_end();
+            }
+        }
+    }
+    widgets::dim_text_wrapped("Estimated from the queue accounting and the device periods; compute time runs while the queued "
+                              "audio plays, so it is not added. The measured value comes from fv_probe latency across two "
+                              "virtual cables.");
+    widgets::end_card();
+}
 
 void draw_live(ViewContext& ctx) {
     widgets::heading("Live");
     draw_engine_card(ctx);
     ImGui::Spacing();
     draw_status_card(ctx);
+    draw_failure_card(ctx);
     draw_pickers_card(ctx);
     ImGui::Spacing();
     draw_devices_card(ctx);
     ImGui::Spacing();
     draw_meters_card(ctx);
+    ImGui::Spacing();
+    draw_latency_card(ctx.app.telemetry(), "live-latency");
 
     const auto& notices = ctx.app.notices();
     if (!notices.empty()) {

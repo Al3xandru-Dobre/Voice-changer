@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -37,6 +38,7 @@ struct WavStats {
     float         speech_dbfs      = -120.0f;  // 90th percentile of 10 ms block RMS
     float         snr_db           = 0.0f;     // speech - noise floor
     std::size_t   clipped_samples  = 0;        // |x| >= 0.999 FS
+    std::size_t   non_finite_samples = 0;      // NaN/Inf (float WAVs); excluded from the levels
     bool clipped() const { return clipped_samples > 0; }
 };
 
@@ -44,12 +46,12 @@ struct WavStats {
 WavStats analyze_samples(const float* interleaved, std::size_t frames, std::uint16_t channels,
                          std::uint32_t sample_rate);
 
-/// Parse a RIFF/WAVE file (PCM 16/24/32-bit or IEEE float 32, incl. WAVE_FORMAT_EXTENSIBLE)
+/// Parse a RIFF/WAVE file (every header-derived size is bounded by the file size before it is used) (PCM 16/24/32-bit or IEEE float 32, incl. WAVE_FORMAT_EXTENSIBLE)
 /// and compute its statistics without loading it whole.
 WavStats analyze_wav_file(const std::filesystem::path& path);
 
 /// Why a take is excluded from the clean total, per the Stage 10 rules.
-enum class TakeVerdict : std::uint8_t { Clean, Clipped, LowSnr, NotMono, Unreadable, TooShort };
+enum class TakeVerdict : std::uint8_t { Clean, Clipped, LowSnr, NotMono, Unreadable, TooShort, NonFinite };
 const char* to_string(TakeVerdict v);
 
 struct Take {
@@ -93,22 +95,41 @@ struct StudioStatus {
 
 enum class Shell : std::uint8_t { Posix, PowerShell };
 
+/// The job commands. A step the repository's scripts cannot express (or whose
+/// inputs are not known) has an empty command and a non-empty `*_unavailable`
+/// reason; it is left out of job.json's commands and of the run_finetune scripts.
 struct StudioCommands {
     std::string prepare;
     std::string finetune;
     std::string export_;
+    std::string prepare_unavailable;
+    std::string finetune_unavailable;
+    std::string export_unavailable;
 };
+
+/// PowerShell: `cmd` followed by the `$LASTEXITCODE` check; POSIX: `cmd` (set -e stops the script).
+std::string checked_line(const std::string& cmd, Shell shell);
 
 /// A voice name that may name a project directory under the Studio root: the
 /// voices.json rule ([a-z0-9_-]+, so no separators, dots or drive letters)
 /// and not a Windows reserved device name (con, nul, com1, ...).
 bool is_safe_project_name(std::string_view name);
 
+/// Which list an asynchronously analysed file joins.
+enum class TakeKind : std::uint8_t { Take, RoomTone, LiveMic };
+
 class VoiceStudioModel {
 public:
+    VoiceStudioModel();
+    ~VoiceStudioModel();  // joins outstanding analysis work
+    VoiceStudioModel(VoiceStudioModel&&) noexcept;
+    VoiceStudioModel& operator=(VoiceStudioModel&&) noexcept;  // joins the overwritten model's work
+    VoiceStudioModel(const VoiceStudioModel&) = delete;
+    VoiceStudioModel& operator=(const VoiceStudioModel&) = delete;
+
     static constexpr double kMinimumMinutes = 60.0;
     static constexpr double kIdealMinutes   = 180.0;
-    static constexpr double kRoomToneMinimumSeconds = 25.0;
+    static constexpr double kRoomToneMinimumSeconds = 30.0;
     static constexpr double kLiveMicTargetMinutes   = 10.0;
 
     /// Thresholds from the Stage 10 protocol; adjustable for dry runs and tests.
@@ -137,6 +158,13 @@ public:
     const Take& add_take(const std::filesystem::path& wav, std::string session = {});
     const Take& add_room_tone(const std::filesystem::path& wav);
     const Take& add_live_mic(const std::filesystem::path& wav);
+    /// Asynchronous add: the file is read and analysed on a worker thread (which only reads
+    /// the file); the Take joins the draft in poll_analysis(), on the calling (UI) thread.
+    void request_take_analysis(TakeKind kind, const std::filesystem::path& wav, std::string session = {});
+    /// Applies finished analyses to the draft; returns how many were applied.
+    std::size_t poll_analysis();
+    bool        analysis_pending() const;  // requested but not yet applied
+    std::size_t analysis_pending_count() const;
     void remove_take(std::size_t index);
     double clean_minutes() const;
     double excluded_minutes() const;
@@ -145,8 +173,8 @@ public:
     float  progress_to_minimum() const;  // 0..1 against kMinimumMinutes
 
     // Outputs
-    /// studio_root / voice_name, or studio_root / "untitled" when the name is
-    /// not is_safe_project_name(): a path is never built from unvalidated text.
+    /// studio_root / voice_name, or an EMPTY path when the name is not
+    /// is_safe_project_name(): a path is never built from unvalidated text.
     /// The writers (save_draft, write_job) refuse an unsafe name outright.
     std::filesystem::path project_dir(const std::filesystem::path& studio_root) const;
     StudioCommands commands(const std::filesystem::path& repo_root, const std::filesystem::path& studio_root,
@@ -175,6 +203,9 @@ private:
     StudioDraft  draft_;
     StudioStep   step_ = StudioStep::NameConsent;
     Requirements req_{};
+
+    struct Worker;
+    std::unique_ptr<Worker> worker_;
 };
 
 /// Quote a path for the given shell.

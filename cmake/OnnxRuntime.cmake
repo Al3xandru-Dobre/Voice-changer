@@ -7,7 +7,10 @@
 #     defines FLUXVOICE_WITH_ORT.
 #   - Prebuilt SDK on disk: -DONNXRUNTIME_ROOT=/path/to/onnxruntime-<os>-<arch>-1.31.0
 #   - Auto-fetched SDK:     -DFLUXVOICE_FETCH_ORT=ON (downloads the pinned
-#     v1.31.0 archive for the host OS/arch and verifies its SHA256).
+#     v1.31.0 archive for the host OS/arch and verifies its SHA256). With
+#     -DFLUXVOICE_ORT_DOWNLOAD_DIR=<dir> the archive is kept in that stable
+#     directory (outside any build tree), so CI can cache it between runs; a
+#     matching file already there is hash-verified and not re-downloaded.
 #
 # Creates the IMPORTED SHARED target `onnxruntime::onnxruntime` with SYSTEM
 # headers and provides `fluxvoice_link_ort(<target>)`, which links ORT,
@@ -19,6 +22,8 @@ set(FLUXVOICE_ORT_VERSION "1.31.0")
 
 option(FLUXVOICE_FETCH_ORT "Fetch the pinned ONNX Runtime C++ SDK via FetchContent" OFF)
 set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to a prebuilt ONNX Runtime SDK")
+set(FLUXVOICE_ORT_DOWNLOAD_DIR "" CACHE PATH
+    "Stable directory for the fetched ONNX Runtime archive (kept outside the build tree for CI caching)")
 
 set(FLUXVOICE_HAS_ORT FALSE)
 set(FLUXVOICE_ORT_ROOT "")
@@ -73,9 +78,26 @@ elseif(FLUXVOICE_FETCH_ORT)
         message(FATAL_ERROR "FLUXVOICE_FETCH_ORT is not supported on ${CMAKE_SYSTEM_NAME}")
     endif()
 
+    # Optional stable archive location: when set, the download lands there
+    # (URL_HASH still verifies it — a mismatched or partial cached file is
+    # re-downloaded), so the archive survives build-tree removal and can be
+    # cached in CI. Empty -> FetchContent's default inside the build tree.
+    # Forward slashes only: CI passes a Windows workspace path (D:\a\...), and
+    # FetchContent may write DOWNLOAD_DIR into a generated sub-build script
+    # where a backslash would be read as a CMake escape sequence.
+    set(_ort_download_args)
+    if(FLUXVOICE_ORT_DOWNLOAD_DIR)
+        file(TO_CMAKE_PATH "${FLUXVOICE_ORT_DOWNLOAD_DIR}" _ort_download_dir)
+        file(MAKE_DIRECTORY "${_ort_download_dir}")
+        set(_ort_download_args
+            DOWNLOAD_DIR   "${_ort_download_dir}"
+            DOWNLOAD_NAME  "${_ort_archive}")
+    endif()
+
     FetchContent_Declare(onnxruntime_prebuilt
         URL           "${_ort_base_url}/${_ort_archive}"
         URL_HASH      "SHA256=${_ort_sha256}"
+        ${_ort_download_args}
         SOURCE_SUBDIR "__no_cmakelists__")
     FetchContent_MakeAvailable(onnxruntime_prebuilt)
     set(FLUXVOICE_ORT_ROOT "${onnxruntime_prebuilt_SOURCE_DIR}")
@@ -144,6 +166,22 @@ if(FLUXVOICE_ORT_ROOT)
     set(FLUXVOICE_HAS_ORT TRUE)
     message(STATUS "ONNX Runtime SDK (${_ort_ver}): ${FLUXVOICE_ORT_ROOT}")
 endif()
+
+# ORT for a STATIC library that compiles OrtModel.cpp (frontend core): the
+# definitions for its own sources plus a link dependency its consumers
+# inherit. Every executable that links such a library still calls
+# fluxvoice_link_ort below for RPATH and runtime staging —
+# $<TARGET_RUNTIME_DLLS> is valid for executables and shared libraries only.
+function(fluxvoice_compile_ort target)
+    if(NOT FLUXVOICE_HAS_ORT)
+        message(FATAL_ERROR "fluxvoice_compile_ort(${target}) called when FLUXVOICE_HAS_ORT is FALSE")
+    endif()
+    target_link_libraries(${target} PUBLIC onnxruntime::onnxruntime)
+    target_compile_definitions(${target} PRIVATE
+        FLUXVOICE_WITH_ORT=1
+        FLUXVOICE_ORT_VERSION="${FLUXVOICE_ORT_VERSION}"
+    )
+endfunction()
 
 # Link a target against onnxruntime::onnxruntime, define FLUXVOICE_WITH_ORT=1,
 # configure RPATH, and stage the shared library next to the executable.

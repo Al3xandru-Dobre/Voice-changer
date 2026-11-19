@@ -1,6 +1,8 @@
 // VoiceCatalog — voices.json / index.json parsing, bundle scanning, search.
 #include "core/VoiceCatalog.hpp"
 
+#include "core/JsonRead.hpp"
+#include "core/Paths.hpp"
 #include "core/TranslationModel.hpp"
 
 #include <nlohmann/json.hpp>
@@ -46,12 +48,10 @@ std::string read_file(const fs::path& p, bool& ok) {
     return ss.str();
 }
 
-/// A finite JSON number that is not a boolean (fvml.contract._is_number).
-bool is_number(const json& j) {
-    if (!j.is_number()) return false;  // booleans are not numbers in nlohmann
-    const double v = j.get<double>();
-    return std::isfinite(v);
-}
+/// A finite JSON number that is not a boolean (fvml.contract._is_number) and
+/// fits a float: the voice fields are stored as float, so a larger magnitude
+/// is rejected rather than cast (UB beyond FLT_MAX).
+bool is_number(const json& j) { return json_to_float(j).has_value(); }
 
 constexpr const char* kVoiceKeys[] = {"name", "display", "embedding", "logf0_mean", "logf0_std",
                                       "energy_mean", "energy_std", "license", "source"};
@@ -157,6 +157,16 @@ VoicesParseResult parse_voices_json(std::string_view text) {
         };
         if (!req_str("display", e.display) || !req_str("license", e.license) || !req_str("source", e.source)) return r;
         if (v.contains("attribution") && !req_str("attribution", e.attribution)) return r;
+        if (v.contains("lang")) {
+            if (!req_str("lang", e.lang)) return r;
+            bool ok = e.lang.size() >= 2 && e.lang.size() <= 8;
+            for (const char ch : e.lang) ok = ok && ((ch >= 'a' && ch <= 'z') || ch == '-');
+            if (!ok) {
+                r.error = "voice '" + e.name + "': invalid language code '" + e.lang +
+                          "' (expected lowercase [a-z-]{2,8})";
+                return r;
+            }
+        }
 
         auto req_num = [&](const char* k, float& out) {
             const json& j = v[k];
@@ -164,7 +174,7 @@ VoicesParseResult parse_voices_json(std::string_view text) {
                 r.error = "voice '" + e.name + "': " + k + " must be a finite number";
                 return false;
             }
-            out = j.get<float>();
+            out = *json_to_float(j);
             return true;
         };
         if (!req_num("logf0_mean", e.logf0_mean) || !req_num("logf0_std", e.logf0_std) ||
@@ -180,7 +190,7 @@ VoicesParseResult parse_voices_json(std::string_view text) {
         }
         for (const json& x : emb) {
             if (!is_number(x)) { r.error = "voice '" + e.name + "': embedding must be a list of numbers"; return r; }
-            e.embedding.push_back(x.get<float>());
+            e.embedding.push_back(*json_to_float(x));
         }
         r.voices.push_back(std::move(e));
     }
@@ -234,7 +244,7 @@ CatalogueIndex parse_catalogue_index(std::string_view text) {
         opt_str("sample", c.sample);
         if (auto it = e.find("languages"); it != e.end()) c.languages = string_list(*it);
         if (auto it = e.find("tags"); it != e.end()) c.tags = string_list(*it);
-        if (auto it = e.find("size_mb"); it != e.end() && is_number(*it)) c.size_mb = it->get<double>();
+        if (auto it = e.find("size_mb"); it != e.end() && it->is_number() && std::isfinite(it->get<double>())) c.size_mb = it->get<double>();
         idx.entries.push_back(std::move(c));
     }
     return idx;
@@ -265,13 +275,13 @@ bool VoiceCatalog::add_bundle_dir(const fs::path& dir, std::string* error) {
     std::error_code ec;
     const fs::path voices_path = dir / "voices.json";
     if (!fs::is_regular_file(voices_path, ec)) {
-        if (error) *error = "no voices.json in " + dir.string();
+        if (error) *error = "no voices.json in " + path_to_utf8(dir);
         return false;
     }
     BundleInfo b;
     b.dir  = dir;
-    b.name = dir.filename().string();
-    if (b.name.empty()) b.name = dir.parent_path().filename().string();
+    b.name = path_to_utf8(dir.filename());
+    if (b.name.empty()) b.name = path_to_utf8(dir.parent_path().filename());
     // Replace an earlier load of the same directory.
     bundles_.erase(std::remove_if(bundles_.begin(), bundles_.end(),
                                   [&](const BundleInfo& x) { return x.dir == dir; }),
@@ -280,7 +290,7 @@ bool VoiceCatalog::add_bundle_dir(const fs::path& dir, std::string* error) {
     bool ok = false;
     const std::string text = read_file(voices_path, ok);
     if (!ok) {
-        b.error = "cannot read " + voices_path.string();
+        b.error = "cannot read " + path_to_utf8(voices_path);
     } else {
         VoicesParseResult r = parse_voices_json(text);
         if (!r.ok()) {
@@ -296,7 +306,7 @@ bool VoiceCatalog::add_bundle_dir(const fs::path& dir, std::string* error) {
 
     for (const auto& e : fs::directory_iterator(dir, ec)) {
         if (!e.is_regular_file(ec)) continue;
-        const std::string fn = e.path().filename().string();
+        const std::string fn = path_to_utf8(e.path().filename());
         if (e.path().extension() == ".onnx") b.onnx_files.push_back(fn);
         if (fn.rfind("encoder_", 0) == 0 && e.path().extension() == ".onnx") b.has_encoder = true;
         if (fn.rfind("vocoder_", 0) == 0 && e.path().extension() == ".onnx") b.has_vocoder = true;
@@ -325,7 +335,7 @@ bool VoiceCatalog::load_catalogue_index(const fs::path& file, std::string* error
     bool ok = false;
     const std::string text = read_file(file, ok);
     if (!ok) {
-        if (error) *error = "cannot read " + file.string();
+        if (error) *error = "cannot read " + path_to_utf8(file);
         return false;
     }
     CatalogueIndex idx = parse_catalogue_index(text);
@@ -378,6 +388,12 @@ std::vector<VoiceCatalog::Item> VoiceCatalog::search(const Filter& f) const {
             it.attribution   = v.attribution;
             it.source        = v.source;
             it.languages     = b.languages;
+            // BUG-032: a per-voice "lang" tag surfaces in language filtering even
+            // when the bundle has no langs.json (Stage 03 multilingual Mode A);
+            // with langs.json the voice is additionally searchable by its own tag.
+            if (!v.lang.empty() && std::find(it.languages.begin(), it.languages.end(), v.lang)
+                    == it.languages.end())
+                it.languages.push_back(v.lang);
             it.license_class = v.license_class();
             it.installed     = true;
             it.voice         = &v;
@@ -445,7 +461,11 @@ std::vector<VoiceCatalog::Item> VoiceCatalog::search(const Filter& f) const {
 
 std::vector<std::string> VoiceCatalog::all_languages() const {
     std::set<std::string> s;
-    for (const BundleInfo& b : bundles_) s.insert(b.languages.begin(), b.languages.end());
+    for (const BundleInfo& b : bundles_) {
+        s.insert(b.languages.begin(), b.languages.end());
+        for (const VoiceEntry& v : b.voices)      // BUG-032: per-voice "lang" tags
+            if (!v.lang.empty()) s.insert(v.lang);
+    }
     for (const CatalogueIndex& i : indices_)
         for (const CatalogueEntry& e : i.entries) s.insert(e.languages.begin(), e.languages.end());
     return {s.begin(), s.end()};

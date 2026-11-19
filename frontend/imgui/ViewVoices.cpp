@@ -4,6 +4,7 @@
 #include "imgui/Views.hpp"
 
 #include "core/AppModel.hpp"
+#include "core/Paths.hpp"
 #include "core/VoiceCatalog.hpp"
 #include "imgui/Theme.hpp"
 #include "imgui/Widgets.hpp"
@@ -14,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -28,6 +30,7 @@ int index_of(const std::vector<std::string>& items, const std::string& value) {
 }
 
 char g_save_name[64] = "";
+bool g_save_translation = false;
 
 void draw_voice_badge(const VoiceEntry* v) {
     if (!v) return;
@@ -70,9 +73,18 @@ void draw_voices(ViewContext& ctx) {
         int bi = index_of(bundles, app.active_bundle());
         ImGui::SetNextItemWidth(300.0f * ctx.scale);
         if (widgets::combo_strings("Bundle", bi, bundles, "(no bundle with voices found)"))
-            static_cast<void>(app.set_active_bundle(bundles[static_cast<std::size_t>(bi)]));
+            static_cast<void>(app.activate_bundle(bundles[static_cast<std::size_t>(bi)]));  // loads it (stops and restarts a running stream)
+        ImGui::SameLine();
+        ImGui::BeginDisabled(app.bundle_loading() || app.active_bundle().empty());
+        if (ImGui::SmallButton("Reload")) static_cast<void>(app.reload_bundle());
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Load the bundle again, e.g. after changing frames per step or the latency target in Settings.");
         ImGui::SameLine();
         if (ImGui::SmallButton("Browse catalogue")) app.navigate(Section::Catalogue);
+        ImGui::SameLine();
+        if (app.bundle_loading()) widgets::pill(("loading '" + app.loading_bundle() + "'").c_str(), t.warning);
+        else widgets::pill(app.mode_label().c_str(), app.mode_a() ? t.success : t.warning);
         if (const BundleInfo* b = app.active_bundle_info()) {
             ImGui::SameLine();
             widgets::dim_text(b->has_translator ? "Mode A + B bundle" : "Mode A bundle (no translator)");
@@ -102,7 +114,10 @@ void draw_voices(ViewContext& ctx) {
         ImGui::SameLine();
         if (app.preset_modified()) { widgets::pill("modified", t.warning); ImGui::SameLine(); }
         if (ImGui::Button("Save as...")) {
-            std::snprintf(g_save_name, sizeof g_save_name, "%s", app.current_preset().c_str());
+            // Prefill with the current name unless it is a built-in (those cannot be overwritten).
+            const bool builtin = app.preset_name_problem(app.current_preset()).has_value();
+            std::snprintf(g_save_name, sizeof g_save_name, "%s", builtin ? "" : app.current_preset().c_str());
+            g_save_translation = false;
             ImGui::OpenPopup("Save preset");
         }
         ImGui::SameLine();
@@ -111,20 +126,25 @@ void draw_voices(ViewContext& ctx) {
         if (ImGui::Button("Reload")) app.reload_presets();
         ImGui::SameLine();
         widgets::help_marker("Voice presets never change the translation mode or languages: applying Deep while "
-                             "translating es -> en keeps translating es -> en.");
+                             "translating es -> en keeps translating es -> en. A preset saved with \"Include "
+                             "translation state\" also restores the mode, Wait-k and language pair.");
 
         if (ImGui::BeginPopupModal("Save preset", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::TextUnformatted("Preset name");
             ImGui::SetNextItemWidth(300.0f * ctx.scale);
             const bool enter = ImGui::InputText("##name", g_save_name, sizeof g_save_name, ImGuiInputTextFlags_EnterReturnsTrue);
-            widgets::dim_text_wrapped(app.paths().user_preset_dir.string().c_str());
-            const bool ok = ImGui::Button("Save", ImVec2(120.0f * ctx.scale, 0.0f)) || enter;
+            ImGui::Checkbox("Include translation state (mode, Wait-k, languages)", &g_save_translation);
+            widgets::dim_text_wrapped(path_to_utf8(app.paths().user_preset_dir).c_str());
+            const std::optional<std::string> problem = app.preset_name_problem(g_save_name);
+            if (problem && g_save_name[0] != '\0') widgets::notice(problem->c_str(), t.warning);
+            ImGui::BeginDisabled(problem.has_value());
+            const bool ok = ImGui::Button("Save", ImVec2(120.0f * ctx.scale, 0.0f)) || (enter && !problem);
+            ImGui::EndDisabled();
             ImGui::SameLine();
-            if (ImGui::Button("Cancel", ImVec2(120.0f * ctx.scale, 0.0f))) ImGui::CloseCurrentPopup();
-            if (ok && g_save_name[0] != '\0') {
-                static_cast<void>(app.save_preset_as(g_save_name));
+            if (ImGui::Button("Cancel", ImVec2(120.0f * ctx.scale, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
                 ImGui::CloseCurrentPopup();
-            }
+            else if (ok && app.save_preset_as(g_save_name, g_save_translation))
+                ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
         for (const std::string& w : app.preset_warnings()) {
@@ -137,10 +157,14 @@ void draw_voices(ViewContext& ctx) {
     ImGui::Spacing();
 
     if (widgets::begin_card("params", "Controls")) {
-        const TelemetrySnapshot tel = app.telemetry();
-        if (!app.engine_on()) widgets::pill("engine stopped: applied at start", t.neutral);
-        else if (tel.params_applied == tel.params_pushed) widgets::pill("applied by worker", t.success);
-        else widgets::pill("pending", t.warning);
+        // "Applied" is the pipeline's acceptance of the newest snapshot, not its delivery.
+        // In Bypass there is no pipeline: the model controls say so instead of claiming it.
+        const ParamApply apply = app.param_apply();
+        const ImVec4 colour = apply == ParamApply::Applied    ? t.success
+                              : apply == ParamApply::Rejected ? t.danger
+                              : apply == ParamApply::Pending  ? t.warning
+                                                              : t.neutral;
+        widgets::pill(app.param_apply_text().c_str(), colour);
         ImGui::SameLine();
         widgets::dim_text("Controls act on the vocoder conditioning and the output chain; there is no dry/wet mix.");
 
